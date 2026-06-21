@@ -1,4 +1,4 @@
-defmodule Mix.UOF.XSD do
+defmodule Mix.UOF.SDK.XSD do
   @moduledoc """
   A small XSD parser that turns Betradar's `.xsd` files into a flat
   intermediate representation (a list of `ComplexType`s plus the root

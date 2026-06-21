@@ -1,4 +1,4 @@
-defmodule Mix.UOF.XSD.Sources do
+defmodule Mix.UOF.SDK.XSD.Sources do
   @moduledoc false
   # Upstream XSD sources, pinned to a single SDK release tag so code
   # generation is reproducible. Schemas are downloaded on demand by

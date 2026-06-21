@@ -1,13 +1,13 @@
-defmodule Mix.Tasks.Uof.Xsd.Fetch do
+defmodule Mix.Tasks.Uof.Sdk.Xsd.Fetch do
   @moduledoc """
   Download the Betradar XSD files into the git-ignored `priv/xsd/` cache,
-  pinned to the upstream SDK tag in `Mix.UOF.XSD.Sources`.
+  pinned to the upstream SDK tag in `Mix.UOF.SDK.XSD.Sources`.
 
-      mix uof.xsd.fetch              # all groups
-      mix uof.xsd.fetch custombet    # a single group
+      mix uof.sdk.xsd.fetch              # all groups
+      mix uof.sdk.xsd.fetch custombet    # a single group
 
   This is a convenience for inspecting/refreshing the schemas; `mix
-  uof.gen.schemas` fetches what it needs on its own.
+  uof.sdk.gen.schemas` fetches what it needs on its own.
   """
   use Mix.Task
 
@@ -15,7 +15,7 @@ defmodule Mix.Tasks.Uof.Xsd.Fetch do
 
   @impl Mix.Task
   def run(args) do
-    known = Mix.UOF.XSD.Sources.groups()
+    known = Mix.UOF.SDK.XSD.Sources.groups()
 
     groups =
       case args do
@@ -30,10 +30,10 @@ defmodule Mix.Tasks.Uof.Xsd.Fetch do
           end)
       end
 
-    Mix.shell().info("Fetching XSDs pinned to SDK tag #{Mix.UOF.XSD.Sources.sdk_tag()}")
+    Mix.shell().info("Fetching XSDs pinned to SDK tag #{Mix.UOF.SDK.XSD.Sources.sdk_tag()}")
 
     for group <- groups do
-      dir = Mix.UOF.XSD.Sources.fetch!(group)
+      dir = Mix.UOF.SDK.XSD.Sources.fetch!(group)
       count = dir |> Path.join("**/*.xsd") |> Path.wildcard() |> length()
       Mix.shell().info("#{group}: #{count} xsd -> #{dir}")
     end

@@ -21,10 +21,13 @@ defmodule BetradarUofSdk.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:uof_api, "~> 2.0"},
+      {:broadway, "~> 1.3"},
+      {:broadway_rabbitmq, "~> 0.8"},
       {:ecto, "~> 3.12"},
-      {:saxy, "~> 1.5"},
-      # Used by the XSD codegen mix tasks to download the pinned upstream XSD.
-      {:req, "~> 0.5", only: :dev, runtime: false}
+      {:saxy, "~> 1.5"}
+      # `req` (used by the XSD codegen mix tasks) is pulled in transitively by
+      # uof_api; `amqp` is pulled in transitively by broadway_rabbitmq.
     ]
   end
 end

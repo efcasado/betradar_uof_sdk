@@ -1,4 +1,4 @@
-defmodule Mix.UOF.XSD.Generator do
+defmodule Mix.UOF.SDK.XSD.Generator do
   @moduledoc """
   Turns the `UOF.XSD` intermediate representation into Ecto embedded-schema
   source code (one module per `complexType`), mirroring the XSD nesting
@@ -11,7 +11,7 @@ defmodule Mix.UOF.XSD.Generator do
     * field names follow the XSD, except for entries in `@rename_overrides`
   """
 
-  alias Mix.UOF.XSD.{ComplexType, Element}
+  alias Mix.UOF.SDK.XSD.{ComplexType, Element}
 
   # Per field-name type overrides applied on top of the XSD type mapping.
   @type_overrides %{

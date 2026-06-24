@@ -18,8 +18,8 @@ messages.
   sport-event so a given event is always processed in order, while different
   events run in parallel.
 - **Automatic recovery** — producers start down and are recovered on connect,
-  on reconnect (the connection gap is detected and filled), when alives stop, on
-  `product_down`, and on `subscribed=0`.
+  on reconnect (the connection gap is detected and filled), when alives stop,
+  and on `subscribed=0`.
 - **Producer health** — a two-axis model (feed-delivery vs. slow local
   processing) exposed both as a callback and via `UOF.SDK.producers/0`.
 - **Pluggable recovery checkpoints** — ETS by default; bring your own

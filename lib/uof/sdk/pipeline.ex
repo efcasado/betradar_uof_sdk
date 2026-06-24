@@ -18,9 +18,9 @@ defmodule UOF.SDK.Pipeline do
       `BroadwayRabbitMQ.Producer` built from `:queue` / `:connection` /
       `:bindings`. Tests pass `{Broadway.DummyProducer, []}`.
     * `:monitor` / `:recovery` / `:checkpoint_store` — modules that receive the
-      lifecycle side-effects (`alive`, content timestamps, `snapshot_complete`,
-      `product_down`). Default `nil`, in which case messages are only delivered
-      to the handler.
+      lifecycle side-effects (`alive`, content timestamps,
+      `snapshot_complete`). Default `nil`, in which case messages are only
+      delivered to the handler.
   """
 
   use Broadway
@@ -85,8 +85,8 @@ defmodule UOF.SDK.Pipeline do
 
   ## lifecycle side-effects --------------------------------------------------
 
-  # alive / snapshot_complete / product_down drive the producer lifecycle;
-  # content messages advance the processing clock and the recovery checkpoint.
+  # alive / snapshot_complete drive the producer lifecycle; content messages
+  # advance the processing clock and the recovery checkpoint.
   defp observe(ctx, "alive", msg) do
     notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
     checkpoint(ctx, msg.product, msg.timestamp)
@@ -94,10 +94,6 @@ defmodule UOF.SDK.Pipeline do
 
   defp observe(ctx, "snapshot_complete", msg) do
     notify(ctx.recovery, :snapshot_complete, [msg.product, msg.request_id])
-  end
-
-  defp observe(ctx, "product_down", msg) do
-    notify(ctx.monitor, :product_down, [msg.product])
   end
 
   defp observe(ctx, _content_type, msg) do

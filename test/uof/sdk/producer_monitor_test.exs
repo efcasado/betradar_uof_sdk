@@ -110,15 +110,4 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
     assert_receive {:recover, 1}
   end
-
-  test "product_down marks down and recovers", %{monitor: m} do
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    assert_receive {:recover, 1}
-    ProducerMonitor.recovery_completed(m, 1, 1)
-    assert_receive {:status, %Producer{down?: false}}
-
-    ProducerMonitor.product_down(m, 1)
-    assert_receive {:status, %Producer{down?: true, reason: :other}}
-    assert_receive {:recover, 1}
-  end
 end

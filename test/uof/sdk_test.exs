@@ -15,7 +15,6 @@ defmodule UOF.SDKTest do
     assert "*.*.*.*.*.*.*.-.#" in keys
     assert "*.*.*.*.*.*.*.#" in keys
     assert "-.-.-.alive.#" in keys
-    assert "-.-.-.product_down.#" in keys
     assert "-.-.-.snapshot_complete.#" in keys
   end
 

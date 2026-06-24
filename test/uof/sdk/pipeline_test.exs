@@ -20,7 +20,6 @@ defmodule UOF.SDK.PipelineTest do
   defmodule Sink do
     def alive(product, ts, subscribed?), do: emit({:alive_sink, product, ts, subscribed?})
     def message(product, ts), do: emit({:message_sink, product, ts})
-    def product_down(product), do: emit({:product_down_sink, product})
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
     def put(product, ts), do: emit({:checkpoint_sink, product, ts})
     def observe_connection(conn_pid), do: emit({:connection_sink, conn_pid})
@@ -120,13 +119,6 @@ defmodule UOF.SDK.PipelineTest do
     )
 
     assert_receive {:snapshot_sink, 3, 77}
-
-    # product_down -> monitor
-    Broadway.test_message(name, ~s(<product_down product="3" timestamp="1"/>),
-      metadata: %{routing_key: "-.-.-.product_down.-.-.-.-"}
-    )
-
-    assert_receive {:product_down_sink, 3}
   end
 
   test "observes the AMQP connection pid for reconnect detection" do

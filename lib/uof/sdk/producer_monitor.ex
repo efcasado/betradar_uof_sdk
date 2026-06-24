@@ -7,10 +7,10 @@ defmodule UOF.SDK.ProducerMonitor do
   ## The two down-axes
 
     * **Delivery / alive** — when `alive` heartbeats stop (older than
-      `inactivity_ms`), `subscribed=0` arrives, or a `product_down` is seen, the
-      producer is marked down (`:alive_interval_violation` / `:other`) and a
-      **recovery is requested**. It returns up via `:returned_from_inactivity`
-      (or `:first_recovery_completed` the first time) when recovery completes.
+      `inactivity_ms`) or `subscribed=0` arrives, the producer is marked down
+      (`:alive_interval_violation`) and a **recovery is requested**. It returns
+      up via `:returned_from_inactivity` (or `:first_recovery_completed` the
+      first time) when recovery completes.
 
     * **Processing lag** — when the messages being processed were generated more
       than `inactivity_ms` ago, the producer is marked down + `delayed?`
@@ -23,8 +23,8 @@ defmodule UOF.SDK.ProducerMonitor do
   `recovery_completed/3`. The monitor is the single writer of
   `UOF.SDK.ProducerRegistry`.
 
-  The event functions (`alive/4`, `message/3`, `product_down/2`) are called by
-  the Broadway pipeline; that wiring lands in B5.
+  The event functions (`alive/4`, `message/3`) are called by the Broadway
+  pipeline; that wiring lands in B5.
   """
 
   use GenServer
@@ -53,11 +53,6 @@ defmodule UOF.SDK.ProducerMonitor do
   @doc "Record a processed content message's generation timestamp."
   def message(server \\ __MODULE__, producer_id, gen_timestamp) do
     GenServer.cast(server, {:message, producer_id, gen_timestamp})
-  end
-
-  @doc "Record a `product_down` signal for a producer."
-  def product_down(server \\ __MODULE__, producer_id) do
-    GenServer.cast(server, {:product_down, producer_id})
   end
 
   @doc "Recovery has completed for `producer_id` (correlated by `request_id`)."
@@ -118,11 +113,6 @@ defmodule UOF.SDK.ProducerMonitor do
       }
     end)
 
-    {:noreply, state}
-  end
-
-  def handle_cast({:product_down, id}, state) do
-    with_producer(state, id, &trigger_recovery(state, &1, :other))
     {:noreply, state}
   end
 

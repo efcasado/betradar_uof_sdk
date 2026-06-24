@@ -15,8 +15,9 @@ defmodule UOF.SDK.MessageHandler do
         end
       end
 
-  Each callback receives the decoded `UOF.SDK.Feed.*` struct and a
-  `UOF.SDK.Context` describing the producer, scope and routing key.
+  Each callback receives the decoded `UOF.Schemas.Feed.*` struct (from
+  `uof_schemas`) and a `UOF.SDK.Context` describing the producer, scope and
+  routing key.
   """
 
   alias UOF.SDK.Context

@@ -26,8 +26,8 @@ defmodule UOF.SDK.Pipeline do
   use Broadway
 
   alias Broadway.Message
+  alias UOF.Schemas
   alias UOF.SDK.{Context, RoutingKey}
-  alias UOF.SDK.Feed.Decoder
 
   @doc false
   def child_spec(opts) do
@@ -63,7 +63,7 @@ defmodule UOF.SDK.Pipeline do
   def handle_message(_processor, %Message{} = message, context) do
     rk = message |> routing_key() |> RoutingKey.parse()
 
-    case Decoder.decode(message.data) do
+    case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
         maybe_track_connection(context.monitor, rk.message_type, message)
 

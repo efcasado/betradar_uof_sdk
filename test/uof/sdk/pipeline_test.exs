@@ -1,7 +1,7 @@
 defmodule UOF.SDK.PipelineTest do
   use ExUnit.Case, async: false
 
-  alias UOF.SDK.Feed
+  alias UOF.Schemas.Feed
 
   # Test handler: forwards every callback to the pid registered in app env.
   defmodule Handler do

@@ -17,9 +17,8 @@ defmodule UOF.SDK.Session do
   SDK. With a `node_id` set, the queue binds only broadcast (`-`) and its own
   node's messages, isolating it from other clients on a shared account.
 
-  `alive` and `product_down` are broadcast to every client. `snapshot_complete`
-  is scoped to `node_id` when set so clients don't consume each other's recovery
-  completions.
+  `alive` is broadcast to every client. `snapshot_complete` is scoped to
+  `node_id` when set so clients don't consume each other's recovery completions.
   """
 
   @exchange "unifiedfeed"
@@ -45,7 +44,7 @@ defmodule UOF.SDK.Session do
     do: ["#{pattern}.-.#", "#{pattern}.#"]
 
   defp system_keys(node_id) do
-    ["-.-.-.alive.#", "-.-.-.product_down.#", snapshot_complete_key(node_id)]
+    ["-.-.-.alive.#", snapshot_complete_key(node_id)]
   end
 
   defp snapshot_complete_key(node_id) when is_integer(node_id) and node_id > 0,

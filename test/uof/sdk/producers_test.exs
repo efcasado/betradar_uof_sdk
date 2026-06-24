@@ -1,7 +1,7 @@
 defmodule UOF.SDK.ProducersTest do
   use ExUnit.Case, async: true
 
-  alias UOF.API.Schemas.Descriptions.Producer, as: Desc
+  alias UOF.Schemas.API.Descriptions.Producer, as: Desc
   alias UOF.SDK.Producer
   alias UOF.SDK.Producers
 

@@ -8,7 +8,8 @@ orchestrating odds recovery automatically.
 It is built on [Broadway](https://hexdocs.pm/broadway) (backpressure, per-event
 ordering, fault tolerance) and depends on
 [`uof_api`](https://hex.pm/packages/uof_api) for the HTTP calls (recovery,
-producer descriptions, `whoami`).
+producer descriptions, `whoami`), and [`uof_schemas`](https://hex.pm/packages/uof_schemas) for the decoding of feed
+messages.
 
 ## Features
 
@@ -168,16 +169,6 @@ UOF.SDK.start_link(
   host: "stgmq.betradar.com",
   node_id: 1
 )
-```
-
-## Feed schemas
-
-The `UOF.SDK.Feed.*` structs are generated from Betradar's `UnifiedFeed.xsd`,
-pinned to an upstream SDK release tag:
-
-```sh
-mix uof.sdk.xsd.fetch     # download the pinned XSD (git-ignored)
-mix uof.sdk.gen.schemas   # regenerate lib/uof/sdk/feed/
 ```
 
 ## License

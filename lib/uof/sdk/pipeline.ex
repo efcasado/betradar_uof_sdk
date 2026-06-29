@@ -21,9 +21,27 @@ defmodule UOF.SDK.Pipeline do
       lifecycle side-effects (`alive`, content timestamps,
       `snapshot_complete`). Default `nil`, in which case messages are only
       delivered to the handler.
+
+  ## Failure handling
+
+  Processing is **single-attempt**. A message that fails to decode (or whose
+  processing crashes) is rejected **without requeue** (`on_failure: :reject`) —
+  Betradar's broker has no dead-letter queue we can declare, and requeuing a
+  message that deterministically fails to parse would loop forever. Content gaps
+  from dropped messages are closed by recovery, not redelivery.
+
+  Every failure passes through `handle_failed/2`, which logs the routing key,
+  reason and (truncated) payload — the only forensic record, since there is no
+  DLQ — and emits `[:uof_sdk, :message, :failed]` telemetry for alerting.
+
+  Retrying a handler's side-effects (for a transient downstream) is the
+  handler's concern: only it knows whether re-applying is idempotent, and
+  whether a retried odds message is still fresh enough to matter.
   """
 
   use Broadway
+
+  require Logger
 
   alias Broadway.Message
   alias UOF.Schemas
@@ -82,6 +100,45 @@ defmodule UOF.SDK.Pipeline do
         Message.failed(message, reason)
     end
   end
+
+  # Single forensic chokepoint for every failed message (decode errors and
+  # processor crashes alike), called just before the message is rejected
+  # (`on_failure: :reject`, no requeue — see `build_producer/1`). With no
+  # dead-letter queue on Betradar's broker, this log line is the only record of
+  # the bytes that failed, so it carries the payload (truncated). Always-on
+  # telemetry carries the counts so alerting works regardless of log level.
+  @impl Broadway
+  def handle_failed(messages, _context) do
+    for message <- messages do
+      rk = message |> routing_key() |> RoutingKey.parse()
+
+      :telemetry.execute(
+        [:uof_sdk, :message, :failed],
+        %{payload_bytes: byte_size(message.data)},
+        %{routing_key: rk.raw, message_type: rk.message_type, reason: message.status}
+      )
+
+      # Structured fields as Logger metadata (namespaced to avoid collisions) so
+      # backends can emit JSON; the message stays a short human-readable summary.
+      # Rendering (plain vs structured) is the app's Logger config concern.
+      Logger.error("UOF message processing failed: #{inspect(message.status)}",
+        uof_reason: inspect(message.status),
+        uof_routing_key: rk.raw,
+        uof_message_type: rk.message_type,
+        uof_event_urn: rk.event_urn,
+        uof_redelivered: message.metadata[:redelivered],
+        uof_delivery_tag: message.metadata[:delivery_tag],
+        uof_payload: truncate(message.data, 4096)
+      )
+    end
+
+    messages
+  end
+
+  # The only forensic copy of the failed bytes, so we keep it — but bounded, so
+  # a systemic decode break can't flood the log backend.
+  defp truncate(bin, max) when byte_size(bin) > max, do: binary_part(bin, 0, max)
+  defp truncate(bin, _max), do: bin
 
   ## lifecycle side-effects --------------------------------------------------
 
@@ -178,8 +235,8 @@ defmodule UOF.SDK.Pipeline do
          connection: Keyword.get(opts, :connection, []),
          declare: [exclusive: true, auto_delete: true],
          bindings: Keyword.get(opts, :bindings, []),
-         on_failure: :reject_and_requeue,
-         metadata: [:routing_key]}
+         on_failure: :reject,
+         metadata: [:routing_key, :redelivered, :delivery_tag]}
 
       producer ->
         producer

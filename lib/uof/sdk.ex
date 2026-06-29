@@ -80,6 +80,12 @@ defmodule UOF.SDK do
       {Pipeline,
        name: Pipeline,
        handler: config.handler,
+       # `:producer` (when set) overrides the default RabbitMQ producer; the
+       # queue/connection/bindings below are then ignored. See `UOF.SDK.Pipeline`
+       # for the contract a custom producer must satisfy.
+       producer: config.producer,
+       routing_key_metadata_key: config.routing_key_metadata_key,
+       connection_token_metadata_key: config.connection_token_metadata_key,
        queue: "",
        connection: Config.amqp_connection(config),
        bindings: Session.bindings(config.node_id),

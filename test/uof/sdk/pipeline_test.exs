@@ -147,4 +147,59 @@ defmodule UOF.SDK.PipelineTest do
 
     assert_receive {:connection_sink, ^conn}
   end
+
+  test "reads the routing key from a custom metadata field" do
+    name = Module.concat(__MODULE__, CustomRk)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {UOF.SDK.Pipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             routing_key_metadata_key: :pulsar_key
+           ]
+         ]}
+    })
+
+    xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
+    # routing key lives under :pulsar_key, not :routing_key
+    metadata = %{pulsar_key: "hi.-.live.odds_change.1.sr:match.12345.-"}
+
+    Broadway.test_message(name, xml, metadata: metadata)
+
+    assert_receive {:odds_change, %Feed.OddsChange{}, ctx}, 1_000
+    assert ctx.message_type == "odds_change"
+    assert ctx.event_urn == "sr:match:12345"
+  end
+
+  test "observes a connection token from a custom metadata field" do
+    name = Module.concat(__MODULE__, CustomToken)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {UOF.SDK.Pipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink,
+             connection_token_metadata_key: :conn_id
+           ]
+         ]}
+    })
+
+    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
+      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", conn_id: "conn-abc-123"}
+    )
+
+    assert_receive {:connection_sink, "conn-abc-123"}
+  end
 end

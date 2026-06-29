@@ -16,11 +16,49 @@ defmodule UOF.SDK.Pipeline do
     * `:concurrency` — processor concurrency (default `10`).
     * `:producer` — a Broadway producer spec. Defaults to a
       `BroadwayRabbitMQ.Producer` built from `:queue` / `:connection` /
-      `:bindings`. Tests pass `{Broadway.DummyProducer, []}`.
+      `:bindings`. Tests pass `{Broadway.DummyProducer, []}`; see "Custom
+      producers" below for rolling your own transport.
     * `:monitor` / `:recovery` / `:checkpoint_store` — modules that receive the
       lifecycle side-effects (`alive`, content timestamps,
       `snapshot_complete`). Default `nil`, in which case messages are only
       delivered to the handler.
+    * `:routing_key_metadata_key` — the `message.metadata` field carrying the
+      UOF routing key (default `:routing_key`). See "Custom producers".
+    * `:connection_token_metadata_key` — the `message.metadata` field carrying a
+      per-connection token for reconnect detection (default `nil`, i.e. the
+      AMQP connection pid). See "Custom producers".
+
+  ## Custom producers
+
+  The default `BroadwayRabbitMQ.Producer` is what Betradar's docs recommend, but
+  any Broadway producer works (e.g. an `off_broadway_*` producer fed by a
+  RabbitMQ source connector). Pass it as `:producer` (`{Module, opts}`). A custom
+  producer must honour this contract — it's the whole interface:
+
+    1. **Routing key in `message.metadata`** (a binary). Dispatch, partitioning
+       and lifecycle observation all derive from it (`UOF.SDK.RoutingKey`);
+       without it nothing routes. The original AMQP routing key must survive the
+       transport hop. If the transport surfaces it under a different field than
+       `:routing_key` (e.g. a Pulsar source connector that maps it to the
+       message key), point `:routing_key_metadata_key` at that field.
+    2. **Raw UOF XML → `message.data`**, byte-for-byte. `UOF.Schemas.XML.decode/1`
+       expects the verbatim feed payload; a connector that wraps or re-encodes
+       the body breaks decoding.
+    3. **Failure/ack semantics are the producer's own.** The RabbitMQ default
+       rejects without requeue (see "Failure handling"); a custom producer
+       brings its own equivalent (e.g. a Pulsar DLQ topic + bounded redelivery).
+
+  ### Reconnect detection across transports
+
+  A reconnect produces a message gap that must trigger recovery. The default
+  (RabbitMQ) keys off the `amqp_channel.conn.pid` in metadata — a new pid means
+  a new connection. A custom transport can restore this by emitting a
+  **per-connection-unique** token as a flat metadata field and pointing
+  `:connection_token_metadata_key` at it (the monitor dedups by value, so any
+  token that changes on reconnect works). The token must actually roll per
+  connection — a stable endpoint string won't trip it. Omit it and reconnect
+  recovery is forgone, falling back to `alive`-heartbeat gap detection; this
+  degrades cleanly (no crash) but is a real capability difference.
 
   ## Failure handling
 
@@ -62,28 +100,34 @@ defmodule UOF.SDK.Pipeline do
     name = Keyword.fetch!(opts, :name)
     handler = Keyword.fetch!(opts, :handler)
     concurrency = Keyword.get(opts, :concurrency, 10)
+    routing_key_key = Keyword.get(opts, :routing_key_metadata_key, :routing_key)
+    connection_token_key = Keyword.get(opts, :connection_token_metadata_key)
 
     Broadway.start_link(__MODULE__,
       name: name,
       producer: [module: build_producer(opts), concurrency: 1],
       processors: [default: [concurrency: concurrency]],
-      partition_by: &partition/1,
+      # `partition_by` runs in the producer's dispatcher (no context), so the
+      # routing-key field is captured in the closure rather than read from context.
+      partition_by: &partition(&1, routing_key_key),
       context: %{
         handler: handler,
         monitor: Keyword.get(opts, :monitor),
         recovery: Keyword.get(opts, :recovery),
-        checkpoint_store: Keyword.get(opts, :checkpoint_store)
+        checkpoint_store: Keyword.get(opts, :checkpoint_store),
+        routing_key_key: routing_key_key,
+        connection_token_key: connection_token_key
       }
     )
   end
 
   @impl Broadway
   def handle_message(_processor, %Message{} = message, context) do
-    rk = message |> routing_key() |> RoutingKey.parse()
+    rk = message |> routing_key(context.routing_key_key) |> RoutingKey.parse()
 
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
-        maybe_track_connection(context.monitor, rk.message_type, message)
+        maybe_track_connection(context, rk.message_type, message)
 
         ctx = %Context{
           producer_id: Map.get(decoded, :product),
@@ -108,9 +152,9 @@ defmodule UOF.SDK.Pipeline do
   # the bytes that failed, so it carries the payload (truncated). Always-on
   # telemetry carries the counts so alerting works regardless of log level.
   @impl Broadway
-  def handle_failed(messages, _context) do
+  def handle_failed(messages, context) do
     for message <- messages do
-      rk = message |> routing_key() |> RoutingKey.parse()
+      rk = message |> routing_key(context.routing_key_key) |> RoutingKey.parse()
 
       :telemetry.execute(
         [:uof_sdk, :message, :failed],
@@ -166,20 +210,26 @@ defmodule UOF.SDK.Pipeline do
   defp checkpoint(%{checkpoint_store: nil}, _product, _timestamp), do: :ok
   defp checkpoint(%{checkpoint_store: store}, product, timestamp), do: store.put(product, timestamp)
 
-  # A reconnect always yields a new AMQP connection pid; the monitor dedups and
+  # A reconnect always yields a new connection token; the monitor dedups and
   # recovers the resulting message gap. Checked only on `alive` (broadcast on
   # every connection, ~10s cadence) to avoid per-message overhead. Absent in
   # tests (DummyProducer), so nil.
-  defp maybe_track_connection(nil, _type, _message), do: :ok
+  defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
-  defp maybe_track_connection(monitor, "alive", message) do
-    case connection_pid(message) do
+  defp maybe_track_connection(%{monitor: monitor, connection_token_key: key}, "alive", message) do
+    case connection_token(message, key) do
       nil -> :ok
-      pid -> monitor.observe_connection(pid)
+      token -> monitor.observe_connection(token)
     end
   end
 
-  defp maybe_track_connection(_monitor, _type, _message), do: :ok
+  defp maybe_track_connection(_context, _type, _message), do: :ok
+
+  # Default (RabbitMQ): the AMQP connection pid, which changes on every reconnect.
+  # Custom transports set `:connection_token_metadata_key` to a flat metadata
+  # field carrying a per-connection-unique token (see "Custom producers").
+  defp connection_token(message, nil), do: connection_pid(message)
+  defp connection_token(%Message{metadata: metadata}, key), do: Map.get(metadata, key)
 
   defp connection_pid(%Message{metadata: %{amqp_channel: %{conn: %{pid: pid}}}}), do: pid
   defp connection_pid(_message), do: nil
@@ -210,17 +260,17 @@ defmodule UOF.SDK.Pipeline do
   ## partitioning ------------------------------------------------------------
 
   # Broadway requires an integer; it does `rem(partition.(msg), n_processors)`.
-  defp partition(%Message{} = message) do
+  defp partition(%Message{} = message, routing_key_key) do
     message
-    |> routing_key()
+    |> routing_key(routing_key_key)
     |> RoutingKey.parse()
     |> RoutingKey.partition_key()
     |> :erlang.phash2()
   end
 
-  defp routing_key(%Message{metadata: metadata}) do
-    case metadata do
-      %{routing_key: rk} when is_binary(rk) -> rk
+  defp routing_key(%Message{metadata: metadata}, key) do
+    case Map.get(metadata, key) do
+      rk when is_binary(rk) -> rk
       _ -> ""
     end
   end

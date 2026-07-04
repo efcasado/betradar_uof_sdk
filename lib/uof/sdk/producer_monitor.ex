@@ -25,6 +25,11 @@ defmodule UOF.SDK.ProducerMonitor do
 
   The event functions (`alive/4`, `message/3`) are called by the Broadway
   pipeline; that wiring lands in B5.
+
+  Connection deduplication is kept in the GenServer state (`seen_connections`)
+  rather than a separate ETS table — `alive` heartbeats arrive roughly every
+  10 seconds per producer, so the extra cast per reconnect costs nothing
+  measurable.
   """
 
   use GenServer
@@ -35,9 +40,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @default_inactivity_ms 20_000
   @default_tick_ms 1_000
-
-  # Dedup table for connection-pid observations (atomic, set once per pid).
-  @connections __MODULE__.Connections
 
   ## Client API --------------------------------------------------------------
 
@@ -62,24 +64,18 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @doc """
   Observe the AMQP connection a message arrived on. The first time a given
-  connection pid is seen, every producer is recovered — this fires on the
+  connection token is seen, every producer is recovered — this fires on the
   initial connection and again on each reconnect (a reconnect always yields a
-  new connection pid), closing the message-gap a reconnect leaves behind. The
-  ETS dedup is atomic, so concurrent processors fire it exactly once.
+  new token), closing the message-gap a reconnect leaves behind.
   """
   def observe_connection(server \\ __MODULE__, conn_pid) do
-    if :ets.insert_new(@connections, {conn_pid, true}) do
-      GenServer.cast(server, {:connection_established, conn_pid})
-    end
-
-    :ok
+    GenServer.cast(server, {:observe_connection, conn_pid})
   end
 
   ## Server ------------------------------------------------------------------
 
   @impl true
   def init(opts) do
-    ensure_connections_table()
     registry = Keyword.get(opts, :registry, ProducerRegistry)
     for producer <- Keyword.get(opts, :producers, []), do: registry.register(producer)
 
@@ -90,7 +86,8 @@ defmodule UOF.SDK.ProducerMonitor do
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
-      first_recovery_done: MapSet.new()
+      first_recovery_done: MapSet.new(),
+      seen_connections: MapSet.new()
     }
 
     schedule_tick(state)
@@ -116,13 +113,17 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
-  def handle_cast({:connection_established, _conn_pid}, state) do
-    # A (re)connect leaves a gap; recover every producer not already recovering.
-    for producer <- state.registry.all(), not producer.recovering? do
-      trigger_recovery(state, producer, :connection_down)
-    end
+  def handle_cast({:observe_connection, conn_pid}, state) do
+    if MapSet.member?(state.seen_connections, conn_pid) do
+      {:noreply, state}
+    else
+      # A (re)connect leaves a gap; recover every producer not already recovering.
+      for producer <- state.registry.all(), not producer.recovering? do
+        trigger_recovery(state, producer, :connection_down)
+      end
 
-    {:noreply, state}
+      {:noreply, %{state | seen_connections: MapSet.put(state.seen_connections, conn_pid)}}
+    end
   end
 
   def handle_cast({:recovery_completed, id, _request_id}, state) do
@@ -259,13 +260,6 @@ defmodule UOF.SDK.ProducerMonitor do
   defp max_ts(nil, b), do: b
   defp max_ts(a, nil), do: a
   defp max_ts(a, b), do: max(a, b)
-
-  defp ensure_connections_table do
-    case :ets.whereis(@connections) do
-      :undefined -> :ets.new(@connections, [:named_table, :public, :set])
-      _ref -> @connections
-    end
-  end
 
   defp schedule_tick(state), do: Process.send_after(self(), :tick, state.tick_ms)
 

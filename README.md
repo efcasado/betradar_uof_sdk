@@ -84,6 +84,13 @@ virtual host is derived from `UOF.API.Users.whoami/0` at startup; set
 
 ## Usage
 
+> [!TIP]
+> `UOF.SDK.LogHandler` logs every message and producer-status change. Point the
+> SDK at it for a first connection without writing your own handler:
+> ```elixir
+> UOF.SDK.start_link(handler: UOF.SDK.LogHandler, access_token: "...", host: "stgmq.betradar.com")
+> ```
+
 Implement a handler — `use UOF.SDK.MessageHandler` gives no-op defaults for every
 callback, so override only what you need:
 
@@ -108,10 +115,20 @@ defmodule MyApp.FeedHandler do
 end
 ```
 
-Callbacks: `handle_odds_change/2`, `handle_bet_settlement/2`, `handle_bet_stop/2`,
-`handle_bet_cancel/2`, `handle_rollback_bet_cancel/2`,
-`handle_rollback_bet_settlement/2`, `handle_fixture_change/2`, `handle_alive/2`,
-and `handle_producer_status/1`.
+| Callback | When it fires |
+|----------|---------------|
+| `handle_odds_change/2` | Odds updated for a sport event |
+| `handle_bet_settlement/2` | Markets settled after an event |
+| `handle_bet_stop/2` | Betting suspended on a market |
+| `handle_bet_cancel/2` | Bets cancelled on a market |
+| `handle_rollback_bet_cancel/2` | Cancellation rolled back |
+| `handle_rollback_bet_settlement/2` | Settlement rolled back |
+| `handle_fixture_change/2` | Fixture metadata changed |
+| `handle_alive/2` | Heartbeat from the producer (~10 s cadence) |
+| `handle_producer_status/1` | Producer health changed (up / down / recovering) |
+
+Every callback except `handle_producer_status/1` receives the decoded feed struct
+and a `UOF.SDK.Context` (`producer_id`, `event_urn`, `routing_key`, `message_type`).
 
 > Return quickly from callbacks — a slow handler delays that event's later messages and may trigger a "slow processing" down. Offload heavy work asynchronously.
 
@@ -127,7 +144,12 @@ children = [
 Supervisor.start_link(children, strategy: :one_for_one)
 ```
 
-## Producer health
+## Producer health and recovery
+
+> [!NOTE]
+> The default `UOF.SDK.CheckpointStore.ETS` is in-memory: checkpoints are lost
+> on VM restart and a full recovery is issued on next start. This is fine for
+> development and low-volume producers; use a persistent store in production.
 
 Producer state is available synchronously and via the `handle_producer_status/1`
 callback (same `UOF.SDK.Producer` struct):
@@ -150,14 +172,10 @@ reasons:
   the remote producer is healthy. It returns up via
   `:processing_queue_delay_stabilized` once your handler catches up.
 
-## Recovery
-
 The UOF protocol requires every producer to be *recovered* before its markets are
 safe to act on. A gap in the message stream — on first connect, reconnect, or
 alive heartbeat timeout — leaves local state out of sync with the remote producer.
-
-When `ProducerMonitor` detects a gap it marks the producer down and initiates
-recovery:
+When a gap is detected, the SDK:
 
 1. Reads `CheckpointStore` for the last processed timestamp for that producer.
 2. Issues a `UOF.API.Recovery.recover/2` call with a unique `request_id` —
@@ -170,29 +188,14 @@ A stall guard (`:max_recovery_time`) reissues the request if no
 `snapshot_complete` arrives within the deadline, preserving the original
 timestamp so no messages are skipped on retry.
 
-## Custom checkpoint store
-
-The default ETS store loses checkpoints on VM restart (which simply falls back to
-a full recovery). To resume incremental recovery across restarts, implement the
-`UOF.SDK.CheckpointStore` behaviour (`get/1`, `put/2`, `delete/1`) and point the
-config at it:
+**Checkpoints** are the timestamp of the last processed message per producer.
+With a valid checkpoint, recovery is incremental — only missed messages are
+replayed. Without one, a full recovery is issued. To persist checkpoints across
+VM restarts, implement the `UOF.SDK.CheckpointStore` behaviour (`get/1`, `put/2`,
+`delete/1`) and configure it:
 
 ```elixir
 config :uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore
-```
-
-## Smoke testing
-
-`UOF.SDK.LogHandler` logs every message and producer-status change — handy for a
-first connection:
-
-```elixir
-UOF.SDK.start_link(
-  handler: UOF.SDK.LogHandler,
-  access_token: System.fetch_env!("UOF_ACCESS_TOKEN"),
-  host: "stgmq.betradar.com",
-  node_id: 1
-)
 ```
 
 ## License

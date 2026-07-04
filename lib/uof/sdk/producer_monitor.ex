@@ -3,6 +3,11 @@ defmodule UOF.SDK.ProducerMonitor do
   Tracks producer health and orchestrates recovery — two concerns that are
   tightly coupled in the UOF protocol.
 
+  Producer state is managed directly in the GenServer state as a plain map
+  (`%{producer_id => UOF.SDK.Producer.t()}`). External reads (`producers/0`,
+  `producer/1`) go through `GenServer.call`, appropriate for the infrequent
+  health-check use case they serve.
+
   ## Health monitoring
 
   Two independent "down" axes are tracked per producer:
@@ -35,16 +40,14 @@ defmodule UOF.SDK.ProducerMonitor do
   The defaults for `min_interval_ms` / `max_recovery_ms` mirror the official
   SDK and are throttling-safe; change with care.
 
-  This module is the single writer of `UOF.SDK.ProducerRegistry`. Connection
-  deduplication is kept in the GenServer state (`seen_connections`) rather than
-  a separate ETS table — `alive` heartbeats arrive roughly every 10 s per
-  producer, so the extra cast per reconnect costs nothing measurable.
+  Connection deduplication is kept in the GenServer state (`seen_connections`)
+  rather than a separate ETS table — `alive` heartbeats arrive roughly every
+  10 s per producer, so the extra cast per reconnect costs nothing measurable.
   """
 
   use GenServer
 
   alias UOF.SDK.Producer
-  alias UOF.SDK.ProducerRegistry
 
   require Logger
 
@@ -57,6 +60,16 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+  end
+
+  @doc "All known producers, ordered by id."
+  def producers(server \\ __MODULE__) do
+    GenServer.call(server, :all_producers)
+  end
+
+  @doc "Get a single producer by id."
+  def producer(server \\ __MODULE__, id) do
+    GenServer.call(server, {:get_producer, id})
   end
 
   @doc "Record an `alive` heartbeat. `subscribed?` false means recovery is needed."
@@ -88,11 +101,13 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @impl true
   def init(opts) do
-    registry = Keyword.get(opts, :registry, ProducerRegistry)
-    for producer <- Keyword.get(opts, :producers, []), do: registry.register(producer)
+    producers =
+      opts
+      |> Keyword.get(:producers, [])
+      |> Map.new(fn p -> {p.id, p} end)
 
     state = %{
-      registry: registry,
+      producers: producers,
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
@@ -117,19 +132,34 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @impl true
+  def handle_call(:all_producers, _from, state) do
+    result = state.producers |> Map.values() |> Enum.sort_by(& &1.id)
+    {:reply, result, state}
+  end
+
+  def handle_call({:get_producer, id}, _from, state) do
+    {:reply, Map.fetch(state.producers, id), state}
+  end
+
+  def handle_call(:sync, _from, state), do: {:reply, :ok, state}
+
+  @impl true
   def handle_cast({:alive, id, gen_ts, subscribed?}, state) do
     state = with_producer(state, id, fn p -> on_alive(state, p, gen_ts, subscribed?) end)
     {:noreply, state}
   end
 
   def handle_cast({:message, id, gen_ts}, state) do
-    state.registry.update(id, fn p ->
-      %{
-        p
-        | last_message_timestamp: max_ts(p.last_message_timestamp, gen_ts),
-          last_processed_message_gen_timestamp: max_ts(p.last_processed_message_gen_timestamp, gen_ts)
-      }
-    end)
+    state =
+      with_producer(state, id, fn p ->
+        updated = %{
+          p
+          | last_message_timestamp: max_ts(p.last_message_timestamp, gen_ts),
+            last_processed_message_gen_timestamp: max_ts(p.last_processed_message_gen_timestamp, gen_ts)
+        }
+
+        %{state | producers: Map.put(state.producers, id, updated)}
+      end)
 
     {:noreply, state}
   end
@@ -139,7 +169,8 @@ defmodule UOF.SDK.ProducerMonitor do
       {:noreply, state}
     else
       state =
-        state.registry.all()
+        state.producers
+        |> Map.values()
         |> Enum.reject(& &1.recovering?)
         |> Enum.reduce(state, fn p, acc -> trigger_recovery(acc, p, :connection_down) end)
 
@@ -154,22 +185,18 @@ defmodule UOF.SDK.ProducerMonitor do
         state = %{state | recoveries: Map.delete(state.recoveries, id)}
 
         state =
-          case state.registry.get(id) do
-            {:ok, producer} ->
-              {first?, state} = pop_first_recovery(state, id)
-              reason = if first?, do: :first_recovery_completed, else: :returned_from_inactivity
+          with_producer(state, id, fn producer ->
+            {first?, state} = pop_first_recovery(state, id)
+            reason = if first?, do: :first_recovery_completed, else: :returned_from_inactivity
 
-              apply_status(state, producer, %{
-                down?: false,
-                delayed?: false,
-                recovering?: false,
-                recovery_id: nil,
-                reason: reason
-              })
-
-            :error ->
-              state
-          end
+            apply_status(state, producer, %{
+              down?: false,
+              delayed?: false,
+              recovering?: false,
+              recovery_id: nil,
+              reason: reason
+            })
+          end)
 
         {:noreply, state}
 
@@ -180,12 +207,9 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @impl true
-  def handle_call(:sync, _from, state), do: {:reply, :ok, state}
-
-  @impl true
   def handle_info(:tick, state) do
     now = state.now_fun.()
-    state = Enum.reduce(state.registry.all(), state, &check(&2, &1, now))
+    state = Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now))
     schedule_tick(state)
     {:noreply, state}
   end
@@ -223,8 +247,7 @@ defmodule UOF.SDK.ProducerMonitor do
     if (not subscribed? or producer.down?) and not producer.recovering? do
       trigger_recovery(state, producer, producer.reason)
     else
-      state.registry.register(producer)
-      state
+      %{state | producers: Map.put(state.producers, producer.id, producer)}
     end
   end
 
@@ -261,7 +284,7 @@ defmodule UOF.SDK.ProducerMonitor do
   # Mark down + recovering, then initiate recovery. Returns updated state.
   defp trigger_recovery(state, before, reason) do
     after_ = %{before | down?: true, recovering?: true, reason: reason}
-    state.registry.register(after_)
+    state = %{state | producers: Map.put(state.producers, after_.id, after_)}
     maybe_notify(state, before, after_)
     initiate(state, after_, after_from_checkpoint(state, after_))
   end
@@ -269,7 +292,7 @@ defmodule UOF.SDK.ProducerMonitor do
   # Apply an arbitrary status update. Returns updated state.
   defp apply_status(state, before, attrs) do
     after_ = struct(before, attrs)
-    state.registry.register(after_)
+    state = %{state | producers: Map.put(state.producers, after_.id, after_)}
     maybe_notify(state, before, after_)
     state
   end
@@ -299,7 +322,11 @@ defmodule UOF.SDK.ProducerMonitor do
         %{
           state
           | recoveries:
-              Map.put(state.recoveries, producer.id, %{request_id: request_id, after_ts: after_ts, producer: producer})
+              Map.put(state.recoveries, producer.id, %{
+                request_id: request_id,
+                after_ts: after_ts,
+                producer: producer
+              })
         }
 
       :error ->
@@ -380,7 +407,7 @@ defmodule UOF.SDK.ProducerMonitor do
   # Looks up a producer and applies `fun`, returning updated state.
   # Returns state unchanged when the producer is not registered.
   defp with_producer(state, id, fun) do
-    case state.registry.get(id) do
+    case Map.fetch(state.producers, id) do
       {:ok, producer} -> fun.(producer)
       :error -> state
     end

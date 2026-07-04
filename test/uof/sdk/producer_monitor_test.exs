@@ -4,7 +4,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
   alias UOF.SDK.CheckpointStore
   alias UOF.SDK.Producer
   alias UOF.SDK.ProducerMonitor
-  alias UOF.SDK.ProducerRegistry
 
   @inactivity 10_000
   @now 1_000_000_000_000
@@ -23,7 +22,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
   setup do
     Application.put_env(:uof_sdk, :test_pid, self())
     start_supervised!(CheckpointStore.ETS)
-    start_supervised!(ProducerRegistry)
     clock = start_supervised!(%{id: :clock, start: {Agent, :start_link, [fn -> 1_000 end]}})
     %{clock: clock}
   end
@@ -69,7 +67,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.alive(m, 1, 1_000, true)
     rid = assert_recovery_triggered()
     sync(m)
-    assert {:ok, %Producer{down?: true, recovering?: true}} = ProducerRegistry.get(1)
+    assert {:ok, %Producer{down?: true, recovering?: true}} = ProducerMonitor.producer(m, 1)
 
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %Producer{id: 1, down?: false, reason: :first_recovery_completed}}
@@ -141,6 +139,21 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
+  test "producers/1 returns all producers ordered by id", %{clock: clock} do
+    m =
+      start_monitor(
+        [producers: [%Producer{id: 3, product: "pre"}, %Producer{id: 1, product: "liveodds"}]],
+        clock
+      )
+
+    assert [%Producer{id: 1}, %Producer{id: 3}] = ProducerMonitor.producers(m)
+  end
+
+  test "producer/2 returns :error for unknown id", %{clock: clock} do
+    m = start_monitor(clock)
+    assert :error = ProducerMonitor.producer(m, 99)
+  end
+
   ## Recovery orchestration ----------------------------------------------------
 
   test "full recovery (no checkpoint) omits :after", %{clock: clock} do
@@ -195,7 +208,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.snapshot_complete(m, 1, 9_999)
     sync(m)
     refute_received {:status, _}
-    assert {:ok, %Producer{recovering?: true}} = ProducerRegistry.get(1)
+    assert {:ok, %Producer{recovering?: true}} = ProducerMonitor.producer(m, 1)
   end
 
   test "API failure schedules a retry", %{clock: clock} do

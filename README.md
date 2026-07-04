@@ -14,21 +14,20 @@ Built on [Broadway](https://hexdocs.pm/broadway); depends on
 
 ## Architecture
 
-`UOF.SDK` is a library supervisor that starts four components in order:
+`UOF.SDK` is a library supervisor that starts three components in order:
 
 ```
 UOF.SDK
-├── CheckpointStore   – persists the last-seen feed timestamp per producer
-├── ProducerRegistry  – ETS store of live producer state (lock-free reads)
-├── ProducerMonitor   – health monitoring and recovery orchestration
-└── Pipeline          – Broadway AMQP consumer; decodes and dispatches messages
+├── CheckpointStore   – last-seen feed timestamp per producer
+├── ProducerMonitor   – producer state, health monitoring, and recovery
+└── Pipeline          – AMQP consumer; decodes and dispatches messages
 ```
 
 Messages flow in one direction: the `Pipeline` receives raw AMQP messages, decodes
 the XML payload, and calls your `MessageHandler`. As a side-effect it notifies
 `ProducerMonitor` of each `alive` heartbeat, content-message timestamp, and
-`snapshot_complete`. `ProducerMonitor` is the single writer of `ProducerRegistry`;
-all reads (`UOF.SDK.producers/0`) go directly to ETS.
+`snapshot_complete`. Producer state lives entirely in `ProducerMonitor`'s GenServer
+state; `UOF.SDK.producers/0` goes through a `GenServer.call`.
 
 ## Configuration
 

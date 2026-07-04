@@ -24,15 +24,23 @@ messages.
 - Producer health via callback and `UOF.SDK.producers/0`
 - Pluggable checkpoint store (ETS by default)
 
-## Installation
+## Architecture
 
-```elixir
-def deps do
-  [
-    {:uof_sdk, "~> 0.1"}
-  ]
-end
+`UOF.SDK` is a library supervisor that starts four components in order:
+
 ```
+UOF.SDK
+├── CheckpointStore   – persists the last-seen feed timestamp per producer
+├── ProducerRegistry  – ETS store of live producer state (lock-free reads)
+├── ProducerMonitor   – health monitoring and recovery orchestration
+└── Pipeline          – Broadway AMQP consumer; decodes and dispatches messages
+```
+
+Messages flow in one direction: the `Pipeline` receives raw AMQP messages, decodes
+the XML payload, and calls your `MessageHandler`. As a side-effect it notifies
+`ProducerMonitor` of each `alive` heartbeat, content-message timestamp, and
+`snapshot_complete`. `ProducerMonitor` is the single writer of `ProducerRegistry`;
+all reads (`UOF.SDK.producers/0`) go directly to ETS.
 
 ## Configuration
 
@@ -141,6 +149,26 @@ reasons:
 - **Slow local processing** (`:processing_queue_delay_violation`) — no recovery;
   the remote producer is healthy. It returns up via
   `:processing_queue_delay_stabilized` once your handler catches up.
+
+## Recovery
+
+The UOF protocol requires every producer to be *recovered* before its markets are
+safe to act on. A gap in the message stream — on first connect, reconnect, or
+alive heartbeat timeout — leaves local state out of sync with the remote producer.
+
+When `ProducerMonitor` detects a gap it marks the producer down and initiates
+recovery:
+
+1. Reads `CheckpointStore` for the last processed timestamp for that producer.
+2. Issues a `UOF.API.Recovery.recover/2` call with a unique `request_id` —
+   incremental (from the checkpoint timestamp) if one exists, full otherwise.
+3. Betradar replays the missing messages back over the same AMQP feed.
+4. When `snapshot_complete` arrives with the matching `request_id`, the producer
+   is marked up and `handle_producer_status/1` fires.
+
+A stall guard (`:max_recovery_time`) reissues the request if no
+`snapshot_complete` arrives within the deadline, preserving the original
+timestamp so no messages are skipped on retry.
 
 ## Custom checkpoint store
 

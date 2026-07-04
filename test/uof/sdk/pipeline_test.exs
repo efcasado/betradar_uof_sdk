@@ -94,7 +94,6 @@ defmodule UOF.SDK.PipelineTest do
              concurrency: 1,
              producer: {Broadway.DummyProducer, []},
              monitor: Sink,
-             recovery: Sink,
              checkpoint_store: Sink
            ]
          ]}
@@ -116,7 +115,7 @@ defmodule UOF.SDK.PipelineTest do
     assert_receive {:message_sink, 3, 99}
     assert_receive {:checkpoint_sink, 3, 99}
 
-    # snapshot_complete -> recovery
+    # snapshot_complete -> monitor.snapshot_complete
     Broadway.test_message(name, ~s(<snapshot_complete product="3" timestamp="1" request_id="77"/>),
       metadata: %{routing_key: "-.-.-.snapshot_complete.-.-.-.39"}
     )

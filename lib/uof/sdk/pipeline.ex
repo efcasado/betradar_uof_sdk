@@ -18,10 +18,9 @@ defmodule UOF.SDK.Pipeline do
       `BroadwayRabbitMQ.Producer` built from `:queue` / `:connection` /
       `:bindings`. Tests pass `{Broadway.DummyProducer, []}`; see "Custom
       producers" below for rolling your own transport.
-    * `:monitor` / `:recovery` / `:checkpoint_store` — modules that receive the
-      lifecycle side-effects (`alive`, content timestamps,
-      `snapshot_complete`). Default `nil`, in which case messages are only
-      delivered to the handler.
+    * `:monitor` / `:checkpoint_store` — modules that receive the lifecycle
+      side-effects (`alive`, content timestamps, `snapshot_complete`). Default
+      `nil`, in which case messages are only delivered to the handler.
     * `:routing_key_metadata_key` — the `message.metadata` field carrying the
       UOF routing key (default `:routing_key`). See "Custom producers".
     * `:connection_token_metadata_key` — the `message.metadata` field carrying a
@@ -114,7 +113,6 @@ defmodule UOF.SDK.Pipeline do
       context: %{
         handler: handler,
         monitor: Keyword.get(opts, :monitor),
-        recovery: Keyword.get(opts, :recovery),
         checkpoint_store: Keyword.get(opts, :checkpoint_store),
         routing_key_key: routing_key_key,
         connection_token_key: connection_token_key
@@ -195,7 +193,7 @@ defmodule UOF.SDK.Pipeline do
   end
 
   defp observe(ctx, "snapshot_complete", msg) do
-    notify(ctx.recovery, :snapshot_complete, [msg.product, msg.request_id])
+    notify(ctx.monitor, :snapshot_complete, [msg.product, msg.request_id])
   end
 
   defp observe(ctx, _content_type, msg) do

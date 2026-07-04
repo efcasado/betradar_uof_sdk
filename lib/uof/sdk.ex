@@ -17,11 +17,10 @@ defmodule UOF.SDK do
   override per start.
 
   It supervises (in order, with `:rest_for_one`) the checkpoint store, producer
-  registry, recovery orchestrator, producer monitor, and one `UOF.SDK.Pipeline`
-  per configured session. The `:rest_for_one` strategy ensures that if any
-  lifecycle component crashes, every component that depends on it (started after
-  it) is also restarted — preventing the monitor from referencing a stale or
-  empty registry table.
+  registry, producer monitor, and one `UOF.SDK.Pipeline` per configured session.
+  The `:rest_for_one` strategy ensures that if any lifecycle component crashes,
+  every component that depends on it (started after it) is also restarted —
+  preventing the monitor from referencing a stale or empty registry table.
   """
 
   use Supervisor
@@ -32,7 +31,6 @@ defmodule UOF.SDK do
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerRegistry
   alias UOF.SDK.Producers
-  alias UOF.SDK.Recovery
   alias UOF.SDK.Session
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -56,16 +54,14 @@ defmodule UOF.SDK do
     lifecycle = [
       config.checkpoint_store,
       ProducerRegistry,
-      {Recovery,
-       node_id: config.node_id,
-       checkpoint_store: config.checkpoint_store,
-       min_interval_ms: config.min_interval_between_recoveries * 1_000,
-       max_recovery_ms: config.max_recovery_time * 1_000},
       {ProducerMonitor,
        producers: Producers.fetch(),
        handler: config.handler,
        inactivity_ms: config.inactivity_seconds * 1_000,
-       recover: &Recovery.request/1}
+       node_id: config.node_id,
+       checkpoint_store: config.checkpoint_store,
+       min_interval_ms: config.min_interval_between_recoveries * 1_000,
+       max_recovery_ms: config.max_recovery_time * 1_000}
     ]
 
     Supervisor.init(lifecycle ++ child_specs(config), strategy: :rest_for_one)
@@ -92,7 +88,6 @@ defmodule UOF.SDK do
         connection: Config.amqp_connection(config),
         bindings: Session.bindings(config.node_id),
         monitor: ProducerMonitor,
-        recovery: Recovery,
         checkpoint_store: config.checkpoint_store
       }
     ]

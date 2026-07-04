@@ -1,9 +1,9 @@
-defmodule BetradarUofSdk.MixProject do
+defmodule UofSdk.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :betradar_uof_sdk,
+      app: :uof_sdk,
       version: "0.1.0",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,

@@ -14,7 +14,7 @@ defmodule UOF.SDK.PipelineTest do
     @impl true
     def handle_alive(msg, ctx), do: notify({:alive, msg, ctx})
 
-    defp notify(event), do: send(Application.fetch_env!(:betradar_uof_sdk, :test_pid), event)
+    defp notify(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
   end
 
   # One module standing in for monitor + recovery + checkpoint store; the
@@ -27,11 +27,11 @@ defmodule UOF.SDK.PipelineTest do
     def put(product, ts), do: emit({:checkpoint_sink, product, ts})
     def observe_connection(conn_pid), do: emit({:connection_sink, conn_pid})
 
-    defp emit(event), do: send(Application.fetch_env!(:betradar_uof_sdk, :test_pid), event)
+    defp emit(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
   end
 
   setup context do
-    Application.put_env(:betradar_uof_sdk, :test_pid, self())
+    Application.put_env(:uof_sdk, :test_pid, self())
     name = Module.concat(__MODULE__, context.test)
 
     start_link_supervised!(%{

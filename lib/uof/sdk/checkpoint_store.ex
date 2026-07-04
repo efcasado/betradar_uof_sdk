@@ -13,7 +13,7 @@ defmodule UOF.SDK.CheckpointStore do
   adapter that needs no process of its own (e.g. one backed by an existing Ecto
   repo) can implement `child_spec/1`/`start_link/1` to return `:ignore`.
 
-      config :betradar_uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore
+      config :uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore
   """
 
   @type producer_id :: integer()

@@ -5,7 +5,7 @@ defmodule UOF.SDK.Config do
 
   ## Example
 
-      config :betradar_uof_sdk,
+      config :uof_sdk,
         handler: MyApp.FeedHandler,
         access_token: System.get_env("UOF_ACCESS_TOKEN"),
         host: "stgmq.betradar.com"   # integration; production is mq.betradar.com
@@ -22,7 +22,7 @@ defmodule UOF.SDK.Config do
 
   alias UOF.SDK.CheckpointStore.ETS
 
-  @otp_app :betradar_uof_sdk
+  @otp_app :uof_sdk
 
   @type t :: %__MODULE__{
           handler: module(),

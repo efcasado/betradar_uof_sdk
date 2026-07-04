@@ -29,7 +29,7 @@ messages.
 ```elixir
 def deps do
   [
-    {:betradar_uof_sdk, "~> 0.1"}
+    {:uof_sdk, "~> 0.1"}
   ]
 end
 ```
@@ -38,7 +38,7 @@ end
 
 ```elixir
 # The SDK
-config :betradar_uof_sdk,
+config :uof_sdk,
   handler: MyApp.FeedHandler,
   access_token: System.get_env("UOF_ACCESS_TOKEN"),
   host: "stgmq.betradar.com",         # the AMQP endpoint, explicit
@@ -150,7 +150,7 @@ a full recovery). To resume incremental recovery across restarts, implement the
 config at it:
 
 ```elixir
-config :betradar_uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore
+config :uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore
 ```
 
 ## Smoke testing

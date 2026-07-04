@@ -6,23 +6,11 @@
 > [here](https://sdk.sportradar.com).
 
 An Elixir SDK for Betradar's [Unified Odds Feed](https://docs.betradar.com/) (UOF).
-It connects to the UOF AMQP feed, decodes the XML messages into structs, delivers
-them to a handler you implement, and keeps each producer in sync with the feed by
-orchestrating odds recovery automatically.
-
-It is built on [Broadway](https://hexdocs.pm/broadway) (backpressure, per-event
-ordering, fault tolerance) and depends on
-[`uof_api`](https://hex.pm/packages/uof_api) for the HTTP calls (recovery,
-producer descriptions, `whoami`), and [`uof_schemas`](https://hex.pm/packages/uof_schemas) for the decoding of feed
-messages.
-
-## Features
-
-- AMQP connection, message decoding, and handler dispatch
-- Per-event ordering with concurrent processing across events (Broadway)
-- Automatic recovery on connect, reconnect, and alive-gap
-- Producer health via callback and `UOF.SDK.producers/0`
-- Pluggable checkpoint store (ETS by default)
+Connects to the AMQP feed, decodes XML messages into structs, delivers them to a
+handler you implement, and keeps each producer in sync via automatic recovery.
+Built on [Broadway](https://hexdocs.pm/broadway); depends on
+[`uof_api`](https://hex.pm/packages/uof_api) and
+[`uof_schemas`](https://hex.pm/packages/uof_schemas).
 
 ## Architecture
 
@@ -44,8 +32,16 @@ all reads (`UOF.SDK.producers/0`) go directly to ETS.
 
 ## Configuration
 
+> [!NOTE]
+> The SDK uses [`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html) by default. Set `:producer` to use a
+> custom Broadway producer instead (e.g. Pulsar), and omit `:connection`. With a
+> custom producer, two settings matter: `:routing_key_metadata_key` (the metadata
+> field carrying the UOF routing key — partitioning, dispatch, and lifecycle all
+> derive from it) and `:connection_token_metadata_key` (a per-connection token for
+> reconnect detection; without it, micro-disconnections may go unnoticed and leave
+> a message gap silently unfilled).
+
 ```elixir
-# Built-in AMQP producer
 config :uof_sdk,
   handler: MyApp.FeedHandler,
   node_id: 1,
@@ -67,30 +63,6 @@ config :uof_api,
 derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 `stgmq.betradar.com` (integration), `replaymq.betradar.com` (replay).
 
-For a custom Broadway producer (e.g. Pulsar), set `:producer` instead and omit
-`:connection`:
-
-```elixir
-config :uof_sdk,
-  handler: MyApp.FeedHandler,
-  node_id: 1,
-  producer: {MyPulsarProducer, topic: "uof-feed"},
-  routing_key_metadata_key: :pulsar_key,
-  connection_token_metadata_key: :conn_id
-```
-
-> [!NOTE]
-> The default `BroadwayRabbitMQ.Producer` is what Betradar's docs recommend. When
-> using a custom producer, two settings are important for smooth end-to-end
-> operation:
-> - `:routing_key_metadata_key` — the metadata field carrying the UOF routing key.
->   Partitioning by event URN, message dispatch, and lifecycle observation all
->   derive from it; without it nothing routes correctly.
-> - `:connection_token_metadata_key` — a per-connection-unique token used to detect
->   reconnects and trigger recovery. Without it, reconnect detection relies on
->   alive-heartbeat gap detection (~20 s); a micro-disconnection that reconnects
->   within that window goes unnoticed and leaves a message gap silently unfilled.
-
 | Option | Default | Notes |
 |--------|---------|-------|
 | `:handler` | — (required) | Your `UOF.SDK.MessageHandler` module |
@@ -108,15 +80,9 @@ config :uof_sdk,
 
 ## Usage
 
-> [!TIP]
-> `UOF.SDK.LogHandler` logs every message and producer-status change. Point the
-> SDK at it for a first connection without writing your own handler:
-> ```elixir
-> UOF.SDK.start_link(
->   handler: UOF.SDK.LogHandler,
->   connection: [host: "stgmq.betradar.com", username: "...", password: "", virtual_host: "/unifiedfeed/12345", ssl_options: []]
-> )
-> ```
+> [!NOTE]
+> `UOF.SDK.LogHandler` logs every message and producer-status change. Swap it in
+> for `handler` in your config for a first connection without writing your own handler.
 
 Implement a handler — `use UOF.SDK.MessageHandler` gives no-op defaults for every
 callback, so override only what you need:

@@ -8,9 +8,9 @@ defmodule UOF.SDK.Producers do
   `stateful_recovery_window_in_minutes`.
   """
 
-  require Logger
-
   alias UOF.SDK.Producer
+
+  require Logger
 
   @doc """
   Fetch producer descriptions from the API and build the tracked list. Logs and

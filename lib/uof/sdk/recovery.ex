@@ -25,9 +25,10 @@ defmodule UOF.SDK.Recovery do
 
   use GenServer
 
-  require Logger
+  alias UOF.SDK.Producer
+  alias UOF.SDK.ProducerMonitor
 
-  alias UOF.SDK.{Producer, ProducerMonitor}
+  require Logger
 
   @default_min_interval_ms 30_000
   @default_max_recovery_ms 5 * 60_000
@@ -61,8 +62,7 @@ defmodule UOF.SDK.Recovery do
       min_interval_ms: Keyword.get(opts, :min_interval_ms, @default_min_interval_ms),
       max_recovery_ms: Keyword.get(opts, :max_recovery_ms, @default_max_recovery_ms),
       now_fun: Keyword.get(opts, :now_fun, fn -> System.system_time(:millisecond) end),
-      gen_request_id:
-        Keyword.get(opts, :gen_request_id, fn -> System.unique_integer([:positive, :monotonic]) end),
+      gen_request_id: Keyword.get(opts, :gen_request_id, fn -> System.unique_integer([:positive, :monotonic]) end),
       on_complete:
         Keyword.get(opts, :on_complete, fn id, rid ->
           ProducerMonitor.recovery_completed(monitor, id, rid)

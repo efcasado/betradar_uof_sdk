@@ -1,11 +1,14 @@
 defmodule UOF.SDK.ProducerMonitorTest do
   use ExUnit.Case, async: false
 
-  alias UOF.SDK.{Producer, ProducerMonitor, ProducerRegistry}
+  alias UOF.SDK.Producer
+  alias UOF.SDK.ProducerMonitor
+  alias UOF.SDK.ProducerRegistry
 
   @inactivity 10_000
 
   defmodule Handler do
+    @moduledoc false
     use UOF.SDK.MessageHandler
 
     @impl true
@@ -37,7 +40,14 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   defp set_clock(clock, value), do: Agent.update(clock, fn _ -> value end)
-  defp tick(monitor), do: (send(monitor, :tick); GenServer.call(monitor, :sync))
+
+  defp tick(monitor),
+    do:
+      (
+        send(monitor, :tick)
+        GenServer.call(monitor, :sync)
+      )
+
   defp sync(monitor), do: GenServer.call(monitor, :sync)
 
   test "first alive triggers recovery; completion brings the producer up", %{monitor: m} do
@@ -82,15 +92,13 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(m)
 
     tick(m)
-    assert_receive {:status,
-                    %Producer{down?: true, delayed?: true, reason: :processing_queue_delay_violation}}
+    assert_receive {:status, %Producer{down?: true, delayed?: true, reason: :processing_queue_delay_violation}}
     refute_received {:recover, 1}
 
     # processing catches up -> stabilized, back up
     ProducerMonitor.message(m, 1, 20_000)
     tick(m)
-    assert_receive {:status,
-                    %Producer{down?: false, delayed?: false, reason: :processing_queue_delay_stabilized}}
+    assert_receive {:status, %Producer{down?: false, delayed?: false, reason: :processing_queue_delay_stabilized}}
   end
 
   test "observing a new connection recovers; same connection is deduped", %{monitor: m} do

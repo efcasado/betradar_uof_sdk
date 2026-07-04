@@ -34,9 +34,10 @@ defmodule UOF.SDK.ProducerMonitor do
 
   use GenServer
 
-  require Logger
+  alias UOF.SDK.Producer
+  alias UOF.SDK.ProducerRegistry
 
-  alias UOF.SDK.{Producer, ProducerRegistry}
+  require Logger
 
   @default_inactivity_ms 20_000
   @default_tick_ms 1_000
@@ -105,8 +106,7 @@ defmodule UOF.SDK.ProducerMonitor do
       %{
         p
         | last_message_timestamp: max_ts(p.last_message_timestamp, gen_ts),
-          last_processed_message_gen_timestamp:
-            max_ts(p.last_processed_message_gen_timestamp, gen_ts)
+          last_processed_message_gen_timestamp: max_ts(p.last_processed_message_gen_timestamp, gen_ts)
       }
     end)
 
@@ -167,12 +167,10 @@ defmodule UOF.SDK.ProducerMonitor do
         last_message_timestamp: max_ts(producer.last_message_timestamp, gen_ts)
     }
 
-    cond do
-      (not subscribed? or producer.down?) and not producer.recovering? ->
-        trigger_recovery(state, producer, producer.reason)
-
-      true ->
-        state.registry.register(producer)
+    if (not subscribed? or producer.down?) and not producer.recovering? do
+      trigger_recovery(state, producer, producer.reason)
+    else
+      state.registry.register(producer)
     end
   end
 
@@ -225,8 +223,7 @@ defmodule UOF.SDK.ProducerMonitor do
     if status_changed?(before, after_), do: notify(state, after_)
   end
 
-  defp status_changed?(a, b),
-    do: {a.down?, a.delayed?, a.reason} != {b.down?, b.delayed?, b.reason}
+  defp status_changed?(a, b), do: {a.down?, a.delayed?, a.reason} != {b.down?, b.delayed?, b.reason}
 
   defp notify(%{handler: nil}, _producer), do: :ok
   defp notify(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
@@ -236,11 +233,9 @@ defmodule UOF.SDK.ProducerMonitor do
   defp alive_violation?(%Producer{last_alive_at: nil}, _now, _ms), do: false
   defp alive_violation?(%Producer{last_alive_at: t}, now, ms), do: now - t > ms
 
-  defp processing_violation?(%Producer{last_processed_message_gen_timestamp: nil}, _now, _ms),
-    do: false
+  defp processing_violation?(%Producer{last_processed_message_gen_timestamp: nil}, _now, _ms), do: false
 
-  defp processing_violation?(%Producer{last_processed_message_gen_timestamp: t}, now, ms),
-    do: now - t > ms
+  defp processing_violation?(%Producer{last_processed_message_gen_timestamp: t}, now, ms), do: now - t > ms
 
   defp with_producer(state, id, fun) do
     case state.registry.get(id) do

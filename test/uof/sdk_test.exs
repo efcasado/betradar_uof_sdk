@@ -2,12 +2,13 @@ defmodule UOF.SDKTest do
   use ExUnit.Case, async: true
 
   alias UOF.SDK.Config
+  alias UOF.SDK.Pipeline
 
   test "builds a single catch-all pipeline with the broadcast system keys" do
     config = Config.load(handler: MyApp.Handler, access_token: "tok", host: "stgmq.betradar.com")
 
-    assert [{UOF.SDK.Pipeline, opts}] = UOF.SDK.child_specs(config)
-    assert opts[:name] == UOF.SDK.Pipeline
+    assert [{Pipeline, opts}] = UOF.SDK.child_specs(config)
+    assert opts[:name] == Pipeline
     assert opts[:handler] == MyApp.Handler
 
     keys = for {"unifiedfeed", routing_key: rk} <- opts[:bindings], do: rk
@@ -20,7 +21,7 @@ defmodule UOF.SDKTest do
 
   test "scopes the bindings to a configured node id" do
     config = Config.load(handler: MyApp.Handler, access_token: "tok", host: "stgmq.betradar.com", node_id: 7)
-    [{UOF.SDK.Pipeline, opts}] = UOF.SDK.child_specs(config)
+    [{Pipeline, opts}] = UOF.SDK.child_specs(config)
 
     keys = for {"unifiedfeed", routing_key: rk} <- opts[:bindings], do: rk
     # broadcast (`-`) and our node (`7`) only — not any node (`#`)
@@ -35,7 +36,7 @@ defmodule UOF.SDKTest do
 
   test "threads the resolved AMQP connection into the pipeline" do
     config = Config.load(handler: MyApp.Handler, access_token: "tok", host: "stgmq.betradar.com")
-    [{UOF.SDK.Pipeline, opts}] = UOF.SDK.child_specs(config)
+    [{Pipeline, opts}] = UOF.SDK.child_specs(config)
 
     assert opts[:connection][:username] == "tok"
     assert opts[:connection][:host] == "stgmq.betradar.com"

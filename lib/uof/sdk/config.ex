@@ -20,6 +20,8 @@ defmodule UOF.SDK.Config do
   `stgmq.betradar.com` (integration), `replaymq.betradar.com` (replay).
   """
 
+  alias UOF.SDK.CheckpointStore.ETS
+
   @otp_app :betradar_uof_sdk
 
   @type t :: %__MODULE__{
@@ -52,7 +54,7 @@ defmodule UOF.SDK.Config do
     ssl: true,
     amqp: [],
     routing_key_metadata_key: :routing_key,
-    checkpoint_store: UOF.SDK.CheckpointStore.ETS,
+    checkpoint_store: ETS,
     inactivity_seconds: 20,
     min_interval_between_recoveries: 30,
     max_recovery_time: 3600
@@ -78,7 +80,7 @@ defmodule UOF.SDK.Config do
       producer: Keyword.get(cfg, :producer),
       routing_key_metadata_key: Keyword.get(cfg, :routing_key_metadata_key, :routing_key),
       connection_token_metadata_key: Keyword.get(cfg, :connection_token_metadata_key),
-      checkpoint_store: Keyword.get(cfg, :checkpoint_store, UOF.SDK.CheckpointStore.ETS),
+      checkpoint_store: Keyword.get(cfg, :checkpoint_store, ETS),
       inactivity_seconds: Keyword.get(cfg, :inactivity_seconds, 20),
       min_interval_between_recoveries: Keyword.get(cfg, :min_interval_between_recoveries, 30),
       max_recovery_time: Keyword.get(cfg, :max_recovery_time, 3600)

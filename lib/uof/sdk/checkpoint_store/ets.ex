@@ -12,6 +12,8 @@ defmodule UOF.SDK.CheckpointStore.ETS do
 
   use GenServer
 
+  alias UOF.SDK.CheckpointStore
+
   @table __MODULE__
 
   def start_link(opts) do
@@ -31,7 +33,7 @@ defmodule UOF.SDK.CheckpointStore.ETS do
     {:ok, %{}}
   end
 
-  @impl UOF.SDK.CheckpointStore
+  @impl CheckpointStore
   def get(producer_id) do
     case :ets.lookup(@table, producer_id) do
       [{^producer_id, timestamp}] -> {:ok, timestamp}
@@ -39,13 +41,13 @@ defmodule UOF.SDK.CheckpointStore.ETS do
     end
   end
 
-  @impl UOF.SDK.CheckpointStore
+  @impl CheckpointStore
   def put(producer_id, timestamp) do
     :ets.insert(@table, {producer_id, timestamp})
     :ok
   end
 
-  @impl UOF.SDK.CheckpointStore
+  @impl CheckpointStore
   def delete(producer_id) do
     :ets.delete(@table, producer_id)
     :ok

@@ -1,5 +1,10 @@
 # Betradar UOF SDK
 
+> [!IMPORTANT]
+> This is an **unofficial Elixir SDK** for Betradar's Unified Odds Feed (UOF).
+> Betradar offers official Java and .NET SDKs. You can read more about these
+> [here](https://sdk.sportradar.com).
+
 An Elixir SDK for Betradar's [Unified Odds Feed](https://docs.betradar.com/) (UOF).
 It connects to the UOF AMQP feed, decodes the XML messages into structs, delivers
 them to a handler you implement, and keeps each producer in sync with the feed by
@@ -13,17 +18,11 @@ messages.
 
 ## Features
 
-- **Turnkey feed consumption** — connects, subscribes, decodes, dispatches.
-- **Per-event ordering with concurrency** — messages are partitioned by
-  sport-event so a given event is always processed in order, while different
-  events run in parallel.
-- **Automatic recovery** — producers start down and are recovered on connect,
-  on reconnect (the connection gap is detected and filled), when alives stop,
-  and on `subscribed=0`.
-- **Producer health** — a two-axis model (feed-delivery vs. slow local
-  processing) exposed both as a callback and via `UOF.SDK.producers/0`.
-- **Pluggable recovery checkpoints** — ETS by default; bring your own
-  (PostgreSQL, Redis, …) to resume recovery across restarts.
+- AMQP connection, message decoding, and handler dispatch
+- Per-event ordering with concurrent processing across events (Broadway)
+- Automatic recovery on connect, reconnect, and alive-gap
+- Producer health via callback and `UOF.SDK.producers/0`
+- Pluggable checkpoint store (ETS by default)
 
 ## Installation
 
@@ -73,8 +72,7 @@ virtual host is derived from `UOF.API.Users.whoami/0` at startup; set
 | `:max_recovery_time` | `3600` | Stall deadline before reissuing recovery |
 | `:amqp` | `[]` | Raw `connection` options (`ssl_options`, `heartbeat`, …), merged in last |
 
-> Defaults for the recovery knobs mirror the official SDK and are
-> throttling-safe; change them only after reading Betradar's recovery docs.
+> Recovery defaults mirror the official SDK. Change with care — see Betradar's recovery docs on throttling.
 
 ## Usage
 
@@ -107,9 +105,7 @@ Callbacks: `handle_odds_change/2`, `handle_bet_settlement/2`, `handle_bet_stop/2
 `handle_rollback_bet_settlement/2`, `handle_fixture_change/2`, `handle_alive/2`,
 and `handle_producer_status/1`.
 
-> Return from callbacks quickly. The pipeline processes per event in order, so a
-> slow handler delays that event's later messages and can mark the producer
-> down for "slow processing". Offload heavy work (DB writes, HTTP) asynchronously.
+> Return quickly from callbacks — a slow handler delays that event's later messages and may trigger a "slow processing" down. Offload heavy work asynchronously.
 
 Add the SDK to your supervision tree — it's a library supervisor, so it connects
 only when your app starts it:

@@ -16,9 +16,12 @@ defmodule UOF.SDK do
   keyword list as the child argument (`{UOF.SDK, sessions: [:live]}`) to
   override per start.
 
-  It supervises (in order) the checkpoint store, producer registry, recovery
-  orchestrator, producer monitor, and one `UOF.SDK.Pipeline` per configured
-  session — so the lifecycle components are ready before messages flow.
+  It supervises (in order, with `:rest_for_one`) the checkpoint store, producer
+  registry, recovery orchestrator, producer monitor, and one `UOF.SDK.Pipeline`
+  per configured session. The `:rest_for_one` strategy ensures that if any
+  lifecycle component crashes, every component that depends on it (started after
+  it) is also restarted — preventing the monitor from referencing a stale or
+  empty registry table.
   """
 
   use Supervisor
@@ -67,7 +70,7 @@ defmodule UOF.SDK do
        recover: &Recovery.request/1}
     ]
 
-    Supervisor.init(lifecycle ++ child_specs(config), strategy: :one_for_one)
+    Supervisor.init(lifecycle ++ child_specs(config), strategy: :rest_for_one)
   end
 
   @doc """

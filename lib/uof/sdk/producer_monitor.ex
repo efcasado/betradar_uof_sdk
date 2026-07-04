@@ -167,11 +167,7 @@ defmodule UOF.SDK.ProducerMonitor do
     }
 
     cond do
-      not subscribed? and not producer.recovering? ->
-        trigger_recovery(state, producer, producer.reason)
-
-      producer.down? and not producer.recovering? ->
-        # alive-driven (re)start of recovery for a down producer
+      (not subscribed? or producer.down?) and not producer.recovering? ->
         trigger_recovery(state, producer, producer.reason)
 
       true ->

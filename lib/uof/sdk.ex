@@ -26,16 +26,14 @@ defmodule UOF.SDK do
 
   use Supervisor
 
-  alias UOF.SDK.{
-    Config,
-    Pipeline,
-    Producer,
-    ProducerMonitor,
-    ProducerRegistry,
-    Producers,
-    Recovery,
-    Session
-  }
+  alias UOF.SDK.Config
+  alias UOF.SDK.Pipeline
+  alias UOF.SDK.Producer
+  alias UOF.SDK.ProducerMonitor
+  alias UOF.SDK.ProducerRegistry
+  alias UOF.SDK.Producers
+  alias UOF.SDK.Recovery
+  alias UOF.SDK.Session
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -80,21 +78,23 @@ defmodule UOF.SDK do
   @spec child_specs(Config.t()) :: [Supervisor.child_spec()]
   def child_specs(%Config{} = config) do
     [
-      {Pipeline,
-       name: Pipeline,
-       handler: config.handler,
-       # `:producer` (when set) overrides the default RabbitMQ producer; the
-       # queue/connection/bindings below are then ignored. See `UOF.SDK.Pipeline`
-       # for the contract a custom producer must satisfy.
-       producer: config.producer,
-       routing_key_metadata_key: config.routing_key_metadata_key,
-       connection_token_metadata_key: config.connection_token_metadata_key,
-       queue: "",
-       connection: Config.amqp_connection(config),
-       bindings: Session.bindings(config.node_id),
-       monitor: ProducerMonitor,
-       recovery: Recovery,
-       checkpoint_store: config.checkpoint_store}
+      {
+        Pipeline,
+        # `:producer` (when set) overrides the default RabbitMQ producer; the
+        # queue/connection/bindings below are then ignored. See `UOF.SDK.Pipeline`
+        # for the contract a custom producer must satisfy.
+        name: Pipeline,
+        handler: config.handler,
+        producer: config.producer,
+        routing_key_metadata_key: config.routing_key_metadata_key,
+        connection_token_metadata_key: config.connection_token_metadata_key,
+        queue: "",
+        connection: Config.amqp_connection(config),
+        bindings: Session.bindings(config.node_id),
+        monitor: ProducerMonitor,
+        recovery: Recovery,
+        checkpoint_store: config.checkpoint_store
+      }
     ]
   end
 end

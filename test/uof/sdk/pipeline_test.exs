@@ -2,9 +2,11 @@ defmodule UOF.SDK.PipelineTest do
   use ExUnit.Case, async: false
 
   alias UOF.Schemas.Feed
+  alias UOF.SDK.Pipeline
 
   # Test handler: forwards every callback to the pid registered in app env.
   defmodule Handler do
+    @moduledoc false
     use UOF.SDK.MessageHandler
 
     @impl true
@@ -18,6 +20,7 @@ defmodule UOF.SDK.PipelineTest do
   # One module standing in for monitor + recovery + checkpoint store; the
   # function names don't collide, so the pipeline can target it for all three.
   defmodule Sink do
+    @moduledoc false
     def alive(product, ts, subscribed?), do: emit({:alive_sink, product, ts, subscribed?})
     def message(product, ts), do: emit({:message_sink, product, ts})
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
@@ -34,7 +37,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {UOF.SDK.Pipeline, :start_link,
+        {Pipeline, :start_link,
          [
            [
              name: name,
@@ -83,7 +86,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {UOF.SDK.Pipeline, :start_link,
+        {Pipeline, :start_link,
          [
            [
              name: name,
@@ -127,7 +130,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {UOF.SDK.Pipeline, :start_link,
+        {Pipeline, :start_link,
          [
            [
              name: name,
@@ -154,7 +157,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {UOF.SDK.Pipeline, :start_link,
+        {Pipeline, :start_link,
          [
            [
              name: name,
@@ -183,7 +186,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {UOF.SDK.Pipeline, :start_link,
+        {Pipeline, :start_link,
          [
            [
              name: name,

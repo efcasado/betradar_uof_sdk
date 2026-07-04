@@ -36,7 +36,7 @@ defmodule UOF.SDK.ConfigTest do
 
   describe "amqp_connection/1" do
     test "uses host/port, the access token as username, and TLS by default" do
-      conn = Config.load(base_opts()) |> Config.amqp_connection()
+      conn = base_opts() |> Config.load() |> Config.amqp_connection()
 
       assert conn[:host] == "stgmq.betradar.com"
       assert conn[:port] == 5671
@@ -47,7 +47,8 @@ defmodule UOF.SDK.ConfigTest do
 
     test "raw :amqp options are merged in and win" do
       conn =
-        base_opts(amqp: [ssl_options: [verify: :verify_none], heartbeat: 30])
+        [amqp: [ssl_options: [verify: :verify_none], heartbeat: 30]]
+        |> base_opts()
         |> Config.load()
         |> Config.amqp_connection()
 
@@ -56,15 +57,15 @@ defmodule UOF.SDK.ConfigTest do
     end
 
     test "includes the virtual host when set and omits it otherwise" do
-      with_vhost = Config.load(base_opts(virtual_host: "/unifiedfeed/42")) |> Config.amqp_connection()
+      with_vhost = [virtual_host: "/unifiedfeed/42"] |> base_opts() |> Config.load() |> Config.amqp_connection()
       assert with_vhost[:virtual_host] == "/unifiedfeed/42"
 
-      without = Config.load(base_opts()) |> Config.amqp_connection()
+      without = base_opts() |> Config.load() |> Config.amqp_connection()
       refute Keyword.has_key?(without, :virtual_host)
     end
 
     test "omits ssl_options when ssl is disabled" do
-      conn = Config.load(base_opts(ssl: false)) |> Config.amqp_connection()
+      conn = [ssl: false] |> base_opts() |> Config.load() |> Config.amqp_connection()
       refute Keyword.has_key?(conn, :ssl_options)
     end
   end

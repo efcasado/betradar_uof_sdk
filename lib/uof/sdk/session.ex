@@ -40,8 +40,7 @@ defmodule UOF.SDK.Session do
   defp expand(pattern, node_id) when is_integer(node_id) and node_id > 0,
     do: ["#{pattern}.-.#", "#{pattern}.#{node_id}.#"]
 
-  defp expand(pattern, _node_id),
-    do: ["#{pattern}.-.#", "#{pattern}.#"]
+  defp expand(pattern, _node_id), do: ["#{pattern}.-.#", "#{pattern}.#"]
 
   defp system_keys(node_id) do
     ["-.-.-.alive.#", snapshot_complete_key(node_id)]

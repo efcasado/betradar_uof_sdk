@@ -75,7 +75,7 @@ defmodule UOF.SDK.RoutingKey do
       i ->
         urn_type = Enum.at(parts, i)
         event_id = parts |> Enum.at(i + 1) |> dash()
-        urn = if event_id, do: "#{urn_type}:#{event_id}", else: nil
+        urn = if event_id, do: "#{urn_type}:#{event_id}"
         {urn_type, event_id, urn}
     end
   end

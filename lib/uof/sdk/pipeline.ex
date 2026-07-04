@@ -79,11 +79,12 @@ defmodule UOF.SDK.Pipeline do
 
   use Broadway
 
-  require Logger
-
   alias Broadway.Message
   alias UOF.Schemas
-  alias UOF.SDK.{Context, RoutingKey}
+  alias UOF.SDK.Context
+  alias UOF.SDK.RoutingKey
+
+  require Logger
 
   @doc false
   def child_spec(opts) do
@@ -244,14 +245,11 @@ defmodule UOF.SDK.Pipeline do
   defp deliver(handler, "bet_stop", msg, ctx), do: handler.handle_bet_stop(msg, ctx)
   defp deliver(handler, "bet_cancel", msg, ctx), do: handler.handle_bet_cancel(msg, ctx)
 
-  defp deliver(handler, "rollback_bet_cancel", msg, ctx),
-    do: handler.handle_rollback_bet_cancel(msg, ctx)
+  defp deliver(handler, "rollback_bet_cancel", msg, ctx), do: handler.handle_rollback_bet_cancel(msg, ctx)
 
-  defp deliver(handler, "rollback_bet_settlement", msg, ctx),
-    do: handler.handle_rollback_bet_settlement(msg, ctx)
+  defp deliver(handler, "rollback_bet_settlement", msg, ctx), do: handler.handle_rollback_bet_settlement(msg, ctx)
 
-  defp deliver(handler, "fixture_change", msg, ctx),
-    do: handler.handle_fixture_change(msg, ctx)
+  defp deliver(handler, "fixture_change", msg, ctx), do: handler.handle_fixture_change(msg, ctx)
 
   defp deliver(handler, "alive", msg, ctx), do: handler.handle_alive(msg, ctx)
 

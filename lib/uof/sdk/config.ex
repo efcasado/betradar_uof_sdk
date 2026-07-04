@@ -3,21 +3,30 @@ defmodule UOF.SDK.Config do
   Resolves the SDK configuration from application env (plus per-call overrides)
   into a normalized struct.
 
-  ## Example
+  ## Example — built-in AMQP producer
 
       config :uof_sdk,
         handler: MyApp.FeedHandler,
-        access_token: System.get_env("UOF_ACCESS_TOKEN"),
-        host: "stgmq.betradar.com"   # integration; production is mq.betradar.com
+        node_id: 1,
+        connection: [
+          host: "stgmq.betradar.com",
+          username: System.get_env("UOF_ACCESS_TOKEN"),
+          password: "",
+          virtual_host: "/unifiedfeed/12345",
+          ssl_options: []
+        ]
 
-  The AMQP endpoint is explicit: `:host` is required, `:port` defaults to `5671`
-  and `:ssl` to `true`. Raw `BroadwayRabbitMQ` connection options (e.g.
-  `ssl_options`) can be passed under `:amqp` and win over the above.
-  `:virtual_host` is derived from the bookmaker id (`UOF.API.Users.whoami/0`)
-  when not set explicitly.
+  ## Example — custom producer (e.g. Pulsar)
 
-  Known Betradar AMQP hosts: `mq.betradar.com` (production),
-  `stgmq.betradar.com` (integration), `replaymq.betradar.com` (replay).
+      config :uof_sdk,
+        handler: MyApp.FeedHandler,
+        node_id: 1,
+        producer: {MyPulsarProducer, topic: "uof-feed"},
+        routing_key_metadata_key: :pulsar_key
+
+  `:connection` is passed directly to `BroadwayRabbitMQ.Producer` and is
+  ignored when `:producer` is set. No fields are derived or defaulted — what
+  you pass is exactly what the broker sees.
   """
 
   alias UOF.SDK.CheckpointStore.ETS
@@ -26,14 +35,9 @@ defmodule UOF.SDK.Config do
 
   @type t :: %__MODULE__{
           handler: module(),
-          access_token: String.t(),
-          host: String.t(),
-          port: :inet.port_number(),
-          ssl: boolean(),
-          amqp: keyword(),
-          virtual_host: String.t() | nil,
           node_id: integer() | nil,
           producer: {module(), keyword()} | module() | nil,
+          connection: keyword(),
           routing_key_metadata_key: atom(),
           connection_token_metadata_key: atom() | nil,
           checkpoint_store: module(),
@@ -44,15 +48,10 @@ defmodule UOF.SDK.Config do
 
   defstruct [
     :handler,
-    :access_token,
-    :host,
-    :virtual_host,
     :node_id,
     :producer,
     :connection_token_metadata_key,
-    port: 5671,
-    ssl: true,
-    amqp: [],
+    connection: [],
     routing_key_metadata_key: :routing_key,
     checkpoint_store: ETS,
     inactivity_seconds: 20,
@@ -62,7 +61,7 @@ defmodule UOF.SDK.Config do
 
   @doc """
   Load config from application env, merging `overrides` on top. Raises
-  `ArgumentError` on a missing required key.
+  `ArgumentError` on a missing `:handler`.
   """
   @spec load(keyword()) :: t()
   def load(overrides \\ []) do
@@ -70,14 +69,9 @@ defmodule UOF.SDK.Config do
 
     %__MODULE__{
       handler: fetch!(cfg, :handler),
-      access_token: fetch!(cfg, :access_token),
-      host: fetch!(cfg, :host),
-      port: Keyword.get(cfg, :port, 5671),
-      ssl: Keyword.get(cfg, :ssl, true),
-      amqp: Keyword.get(cfg, :amqp, []),
-      virtual_host: Keyword.get(cfg, :virtual_host),
       node_id: Keyword.get(cfg, :node_id),
       producer: Keyword.get(cfg, :producer),
+      connection: Keyword.get(cfg, :connection, []),
       routing_key_metadata_key: Keyword.get(cfg, :routing_key_metadata_key, :routing_key),
       connection_token_metadata_key: Keyword.get(cfg, :connection_token_metadata_key),
       checkpoint_store: Keyword.get(cfg, :checkpoint_store, ETS),
@@ -86,31 +80,6 @@ defmodule UOF.SDK.Config do
       max_recovery_time: Keyword.get(cfg, :max_recovery_time, 3600)
     }
   end
-
-  @doc """
-  The `BroadwayRabbitMQ.Producer` `:connection` keyword for this config: host /
-  port from the endpoint, the access token as the username, a blank password,
-  and the virtual host when known. TLS uses `ssl_options` when `ssl: true`.
-
-  The blank password is required: UOF authenticates on the token alone, but the
-  `amqp` library otherwise defaults the password to `"guest"`. Anything passed
-  under `:amqp` (e.g. `ssl_options`, an explicit `password`) wins.
-  """
-  @spec amqp_connection(t()) :: keyword()
-  def amqp_connection(%__MODULE__{} = config) do
-    [host: config.host, port: config.port]
-    |> Keyword.merge(config.amqp)
-    |> Keyword.put_new(:username, config.access_token)
-    |> Keyword.put_new(:password, "")
-    |> put_unless_nil(:virtual_host, config.virtual_host)
-    |> maybe_tls(config.ssl)
-  end
-
-  defp maybe_tls(opts, true), do: Keyword.put_new(opts, :ssl_options, [])
-  defp maybe_tls(opts, _false), do: opts
-
-  defp put_unless_nil(opts, _key, nil), do: opts
-  defp put_unless_nil(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp fetch!(cfg, key) do
     case Keyword.fetch(cfg, key) do

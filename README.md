@@ -45,40 +45,64 @@ all reads (`UOF.SDK.producers/0`) go directly to ETS.
 ## Configuration
 
 ```elixir
-# The SDK
+# Built-in AMQP producer
 config :uof_sdk,
   handler: MyApp.FeedHandler,
-  access_token: System.get_env("UOF_ACCESS_TOKEN"),
-  host: "stgmq.betradar.com",         # the AMQP endpoint, explicit
-  node_id: 1,                         # isolate this client on a shared account
-  checkpoint_store: UOF.SDK.CheckpointStore.ETS
+  node_id: 1,
+  connection: [
+    host: "stgmq.betradar.com",
+    username: System.get_env("UOF_ACCESS_TOKEN"),
+    password: "",
+    virtual_host: "/unifiedfeed/12345",
+    ssl_options: []
+  ]
 
-# The HTTP client it depends on (recovery + descriptions)
+# The HTTP client (recovery + producer descriptions)
 config :uof_api,
   base_url: "https://stgapi.betradar.com/v1",
   auth_token: System.get_env("UOF_ACCESS_TOKEN")
 ```
 
-The AMQP endpoint is explicit — `:host` is required, `:port` defaults to `5671`
-and `:ssl` to `true`. Known Betradar hosts: `mq.betradar.com` (production),
-`stgmq.betradar.com` (integration), `replaymq.betradar.com` (replay). Raw
-`BroadwayRabbitMQ` connection options (e.g. `ssl_options`) go under `:amqp`. The
-virtual host is derived from `UOF.API.Users.whoami/0` at startup; set
-`:virtual_host` to override.
+`:connection` is passed verbatim to `BroadwayRabbitMQ.Producer` — no fields are
+derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
+`stgmq.betradar.com` (integration), `replaymq.betradar.com` (replay).
+
+For a custom Broadway producer (e.g. Pulsar), set `:producer` instead and omit
+`:connection`:
+
+```elixir
+config :uof_sdk,
+  handler: MyApp.FeedHandler,
+  node_id: 1,
+  producer: {MyPulsarProducer, topic: "uof-feed"},
+  routing_key_metadata_key: :pulsar_key,
+  connection_token_metadata_key: :conn_id
+```
+
+> [!NOTE]
+> The default `BroadwayRabbitMQ.Producer` is what Betradar's docs recommend. When
+> using a custom producer, two settings are important for smooth end-to-end
+> operation:
+> - `:routing_key_metadata_key` — the metadata field carrying the UOF routing key.
+>   Partitioning by event URN, message dispatch, and lifecycle observation all
+>   derive from it; without it nothing routes correctly.
+> - `:connection_token_metadata_key` — a per-connection-unique token used to detect
+>   reconnects and trigger recovery. Without it, reconnect detection relies on
+>   alive-heartbeat gap detection (~20 s); a micro-disconnection that reconnects
+>   within that window goes unnoticed and leaves a message gap silently unfilled.
 
 | Option | Default | Notes |
 |--------|---------|-------|
 | `:handler` | — (required) | Your `UOF.SDK.MessageHandler` module |
-| `:access_token` | — (required) | UOF access token (AMQP username) |
-| `:host` | — (required) | AMQP endpoint host |
-| `:port` | `5671` | AMQP port |
-| `:ssl` | `true` | Enable TLS |
-| `:node_id` | `nil` | Scopes recovery/`snapshot_complete` per client |
+| `:connection` | `[]` | `BroadwayRabbitMQ.Producer` connection options (ignored when `:producer` is set) |
+| `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
+| `:producer` | `nil` | Custom Broadway producer spec; overrides `:connection` |
+| `:routing_key_metadata_key` | `:routing_key` | Metadata field carrying the UOF routing key (custom producers only) |
+| `:connection_token_metadata_key` | `nil` | Metadata field carrying a per-connection token for reconnect detection (custom producers only) |
 | `:checkpoint_store` | `UOF.SDK.CheckpointStore.ETS` | Recovery checkpoint persistence |
 | `:inactivity_seconds` | `20` | Down threshold for the two health axes |
-| `:min_interval_between_recoveries` | `30` | Recovery cooldown |
-| `:max_recovery_time` | `3600` | Stall deadline before reissuing recovery |
-| `:amqp` | `[]` | Raw `connection` options (`ssl_options`, `heartbeat`, …), merged in last |
+| `:min_interval_between_recoveries` | `30` | Recovery cooldown (seconds) |
+| `:max_recovery_time` | `3600` | Stall deadline before reissuing recovery (seconds) |
 
 > Recovery defaults mirror the official SDK. Change with care — see Betradar's recovery docs on throttling.
 
@@ -88,7 +112,10 @@ virtual host is derived from `UOF.API.Users.whoami/0` at startup; set
 > `UOF.SDK.LogHandler` logs every message and producer-status change. Point the
 > SDK at it for a first connection without writing your own handler:
 > ```elixir
-> UOF.SDK.start_link(handler: UOF.SDK.LogHandler, access_token: "...", host: "stgmq.betradar.com")
+> UOF.SDK.start_link(
+>   handler: UOF.SDK.LogHandler,
+>   connection: [host: "stgmq.betradar.com", username: "...", password: "", virtual_host: "/unifiedfeed/12345", ssl_options: []]
+> )
 > ```
 
 Implement a handler — `use UOF.SDK.MessageHandler` gives no-op defaults for every

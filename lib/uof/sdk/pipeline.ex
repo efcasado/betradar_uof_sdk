@@ -14,10 +14,17 @@ defmodule UOF.SDK.Pipeline do
     * `:name` (required) — pipeline name.
     * `:handler` (required) — module implementing `UOF.SDK.MessageHandler`.
     * `:concurrency` — processor concurrency (default `10`).
-    * `:producer` — a Broadway producer spec. Defaults to a
-      `BroadwayRabbitMQ.Producer` built from `:queue` / `:connection` /
-      `:bindings`. Tests pass `{Broadway.DummyProducer, []}`; see "Custom
-      producers" below for rolling your own transport.
+    * `:connection` — keyword list passed verbatim to `BroadwayRabbitMQ.Producer`
+      as its `:connection` option. Typically includes `:host`, `:username`,
+      `:password`, `:virtual_host`, `:ssl_options`. Ignored when `:producer`
+      is set.
+    * `:node_id` — integer identifying this SDK instance on a shared account.
+      Used to scope the AMQP queue bindings and recovery requests. When set,
+      the queue subscribes only to broadcast (`-`) and this node's messages;
+      `snapshot_complete` completions from other nodes are not received.
+    * `:producer` — a custom Broadway producer spec, overriding the built-in
+      `BroadwayRabbitMQ.Producer`. Tests pass `{Broadway.DummyProducer, []}`;
+      see "Custom producers" below for rolling your own transport.
     * `:monitor` / `:checkpoint_store` — modules that receive the lifecycle
       side-effects (`alive`, content timestamps, `snapshot_complete`). Default
       `nil`, in which case messages are only delivered to the handler.
@@ -273,19 +280,41 @@ defmodule UOF.SDK.Pipeline do
 
   ## producer ----------------------------------------------------------------
 
+  # The unifiedfeed topic exchange on Betradar's AMQP broker.
+  # Two routing key patterns cover all UOF messages for a given node:
+  #   *.*.*.*.*.*.*.<node_id>.#  — messages addressed to this node
+  #   *.*.*.*.*.*.*.-.#          — broadcast messages (node field = -)
+  # alive heartbeats (-.-.-.alive.*) and snapshot_complete (-.-.-.snapshot_complete.-.-.-.NODE)
+  # are both caught by these two patterns, so no explicit system-key bindings are needed.
+  @exchange "unifiedfeed"
+
   defp build_producer(opts) do
     case Keyword.get(opts, :producer) do
       nil ->
         {BroadwayRabbitMQ.Producer,
-         queue: Keyword.get(opts, :queue, ""),
+         queue: "",
          connection: Keyword.get(opts, :connection, []),
          declare: [exclusive: true, auto_delete: true],
-         bindings: Keyword.get(opts, :bindings, []),
+         bindings: feed_bindings(Keyword.get(opts, :node_id)),
          on_failure: :reject,
          metadata: [:routing_key, :redelivered, :delivery_tag]}
 
       producer ->
         producer
     end
+  end
+
+  defp feed_bindings(node_id) when is_integer(node_id) and node_id > 0 do
+    [
+      {@exchange, routing_key: "*.*.*.*.*.*.*.-.#"},
+      {@exchange, routing_key: "*.*.*.*.*.*.*.#{node_id}.#"}
+    ]
+  end
+
+  defp feed_bindings(_node_id) do
+    [
+      {@exchange, routing_key: "*.*.*.*.*.*.*.-.#"},
+      {@exchange, routing_key: "*.*.*.*.*.*.*.#"}
+    ]
   end
 end

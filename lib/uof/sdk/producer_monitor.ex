@@ -3,11 +3,6 @@ defmodule UOF.SDK.ProducerMonitor do
   Tracks producer health and orchestrates recovery — two concerns that are
   tightly coupled in the UOF protocol.
 
-  Producer state is managed directly in the GenServer state as a plain map
-  (`%{producer_id => UOF.SDK.Producer.t()}`). External reads (`producers/0`,
-  `producer/1`) go through `GenServer.call`, appropriate for the infrequent
-  health-check use case they serve.
-
   ## Health monitoring
 
   Two independent "down" axes are tracked per producer:
@@ -39,10 +34,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   The defaults for `min_interval_ms` / `max_recovery_ms` mirror the official
   SDK and are throttling-safe; change with care.
-
-  Connection deduplication is kept in the GenServer state (`seen_connections`)
-  rather than a separate ETS table — `alive` heartbeats arrive roughly every
-  10 s per producer, so the extra cast per reconnect costs nothing measurable.
   """
 
   use GenServer
@@ -114,7 +105,6 @@ defmodule UOF.SDK.ProducerMonitor do
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       first_recovery_done: MapSet.new(),
       seen_connections: MapSet.new(),
-      # recovery
       recover_fun: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
       checkpoint_store: Keyword.get(opts, :checkpoint_store, UOF.SDK.CheckpointStore.ETS),
       node_id: Keyword.get(opts, :node_id),
@@ -251,7 +241,6 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  # Returns updated state; called from handle_info(:tick) via Enum.reduce.
   defp check(state, producer, now) do
     cond do
       producer.recovering? ->
@@ -281,7 +270,6 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  # Mark down + recovering, then initiate recovery. Returns updated state.
   defp trigger_recovery(state, before, reason) do
     after_ = %{before | down?: true, recovering?: true, reason: reason}
     state = %{state | producers: Map.put(state.producers, after_.id, after_)}
@@ -289,7 +277,6 @@ defmodule UOF.SDK.ProducerMonitor do
     initiate(state, after_, after_from_checkpoint(state, after_))
   end
 
-  # Apply an arbitrary status update. Returns updated state.
   defp apply_status(state, before, attrs) do
     after_ = struct(before, attrs)
     state = %{state | producers: Map.put(state.producers, after_.id, after_)}
@@ -308,8 +295,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Recovery -----------------------------------------------------------------
 
-  # Issue the API recovery call, arm the stall timer, and record in-flight state.
-  # Returns updated state.
   defp initiate(state, producer, after_ts) do
     request_id = state.gen_request_id.()
     opts = build_opts(after_ts, request_id, state.node_id)
@@ -404,8 +389,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp processing_violation?(%Producer{last_processed_message_gen_timestamp: t}, now, ms), do: now - t > ms
 
-  # Looks up a producer and applies `fun`, returning updated state.
-  # Returns state unchanged when the producer is not registered.
   defp with_producer(state, id, fun) do
     case Map.fetch(state.producers, id) do
       {:ok, producer} -> fun.(producer)

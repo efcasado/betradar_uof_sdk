@@ -1,11 +1,7 @@
 defmodule UOF.SDK.CheckpointStore.ETS do
   @moduledoc """
-  Default `UOF.SDK.CheckpointStore` backed by a public ETS table.
-
-  Zero dependencies and fast — `get`/`put`/`delete` are direct ETS operations,
-  not `GenServer` calls, so per-message checkpointing isn't a bottleneck. The
-  `GenServer` exists only to own the table for its lifetime. Checkpoints are
-  lost on VM restart, which simply falls back to full recovery on next start.
+  Default `UOF.SDK.CheckpointStore` — in-memory, lost on VM restart (falls
+  back to full recovery on next start).
   """
 
   @behaviour UOF.SDK.CheckpointStore

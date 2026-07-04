@@ -151,12 +151,6 @@ defmodule UOF.SDK.Pipeline do
     end
   end
 
-  # Single forensic chokepoint for every failed message (decode errors and
-  # processor crashes alike), called just before the message is rejected
-  # (`on_failure: :reject`, no requeue — see `build_producer/1`). With no
-  # dead-letter queue on Betradar's broker, this log line is the only record of
-  # the bytes that failed, so it carries the payload (truncated). Always-on
-  # telemetry carries the counts so alerting works regardless of log level.
   @impl Broadway
   def handle_failed(messages, context) do
     for message <- messages do
@@ -185,15 +179,11 @@ defmodule UOF.SDK.Pipeline do
     messages
   end
 
-  # The only forensic copy of the failed bytes, so we keep it — but bounded, so
-  # a systemic decode break can't flood the log backend.
   defp truncate(bin, max) when byte_size(bin) > max, do: binary_part(bin, 0, max)
   defp truncate(bin, _max), do: bin
 
   ## lifecycle side-effects --------------------------------------------------
 
-  # alive / snapshot_complete drive the producer lifecycle; content messages
-  # advance the processing clock and the recovery checkpoint.
   defp observe(ctx, "alive", msg) do
     notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
     checkpoint(ctx, msg.product, msg.timestamp)
@@ -216,10 +206,6 @@ defmodule UOF.SDK.Pipeline do
   defp checkpoint(%{checkpoint_store: nil}, _product, _timestamp), do: :ok
   defp checkpoint(%{checkpoint_store: store}, product, timestamp), do: store.put(product, timestamp)
 
-  # A reconnect always yields a new connection token; the monitor dedups and
-  # recovers the resulting message gap. Checked only on `alive` (broadcast on
-  # every connection, ~10s cadence) to avoid per-message overhead. Absent in
-  # tests (DummyProducer), so nil.
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
   defp maybe_track_connection(%{monitor: monitor, connection_token_key: key}, "alive", message) do
@@ -231,9 +217,6 @@ defmodule UOF.SDK.Pipeline do
 
   defp maybe_track_connection(_context, _type, _message), do: :ok
 
-  # Default (RabbitMQ): the AMQP connection pid, which changes on every reconnect.
-  # Custom transports set `:connection_token_metadata_key` to a flat metadata
-  # field carrying a per-connection-unique token (see "Custom producers").
   defp connection_token(message, nil), do: connection_pid(message)
   defp connection_token(%Message{metadata: metadata}, key), do: Map.get(metadata, key)
 
@@ -262,7 +245,6 @@ defmodule UOF.SDK.Pipeline do
 
   ## partitioning ------------------------------------------------------------
 
-  # Broadway requires an integer; it does `rem(partition.(msg), n_processors)`.
   defp partition(%Message{} = message, routing_key_key) do
     message
     |> routing_key(routing_key_key)

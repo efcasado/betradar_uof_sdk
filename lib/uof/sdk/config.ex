@@ -42,6 +42,7 @@ defmodule UOF.SDK.Config do
           connection_token_metadata_key: atom() | nil,
           checkpoint_store: module(),
           inactivity_seconds: pos_integer(),
+          max_processing_delay_seconds: pos_integer(),
           min_interval_between_recoveries: pos_integer(),
           max_recovery_time: pos_integer()
         }
@@ -55,6 +56,7 @@ defmodule UOF.SDK.Config do
     routing_key_metadata_key: :routing_key,
     checkpoint_store: ETS,
     inactivity_seconds: 20,
+    max_processing_delay_seconds: 20,
     min_interval_between_recoveries: 30,
     max_recovery_time: 3600
   ]
@@ -76,6 +78,7 @@ defmodule UOF.SDK.Config do
       connection_token_metadata_key: Keyword.get(cfg, :connection_token_metadata_key),
       checkpoint_store: Keyword.get(cfg, :checkpoint_store, ETS),
       inactivity_seconds: Keyword.get(cfg, :inactivity_seconds, 20),
+      max_processing_delay_seconds: Keyword.get(cfg, :max_processing_delay_seconds, 20),
       min_interval_between_recoveries: Keyword.get(cfg, :min_interval_between_recoveries, 30),
       max_recovery_time: Keyword.get(cfg, :max_recovery_time, 3600)
     }

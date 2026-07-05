@@ -39,6 +39,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       end,
       now_fun: fn -> Agent.get(clock, & &1) end,
       inactivity_ms: @inactivity,
+      max_processing_delay_ms: @inactivity,
       tick_ms: 60_000
     ]
 

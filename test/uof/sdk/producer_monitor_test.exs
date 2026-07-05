@@ -120,6 +120,32 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %Producer{down?: false, delayed?: false, reason: :processing_queue_delay_stabilized}}
   end
 
+  test "alive on a delayed producer does not trigger recovery", %{clock: clock} do
+    m = start_monitor(clock)
+
+    # bring it up
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{down?: false}}
+
+    # drive it into processing lag (down? + delayed?): stale content but a fresh
+    # alive, so it's the processing check that trips, not the alive interval.
+    ProducerMonitor.message(m, 1, 1_000)
+    set_clock(clock, 20_000)
+    ProducerMonitor.alive(m, 1, 20_000, true)
+    sync(m)
+    tick(m)
+    assert_receive {:status, %Producer{down?: true, delayed?: true, reason: :processing_queue_delay_violation}}
+
+    # a subscribed alive arrives while still delayed: the remote feed is healthy,
+    # so this must NOT issue a recovery (the flop bug re-triggered on every alive).
+    ProducerMonitor.alive(m, 1, 20_000, true)
+    sync(m)
+    refute_received {:recover_called, _, _}
+    assert {:ok, %Producer{recovering?: false, delayed?: true}} = ProducerMonitor.producer(m, 1)
+  end
+
   test "observing a new connection recovers; same connection is deduped", %{clock: clock} do
     m = start_monitor(clock)
 

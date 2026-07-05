@@ -20,6 +20,15 @@ defmodule UOF.SDKTest do
     assert opts[:node_id] == 7
   end
 
+  test "child_specs passes concurrency through to the pipeline" do
+    assert [{Pipeline, default}] = UOF.SDK.child_specs(Config.load(handler: MyApp.Handler))
+    assert default[:concurrency] == 10
+
+    config = Config.load(handler: MyApp.Handler, concurrency: 50)
+    [{Pipeline, opts}] = UOF.SDK.child_specs(config)
+    assert opts[:concurrency] == 50
+  end
+
   test "child_specs passes a custom producer spec through unchanged" do
     config = Config.load(handler: MyApp.Handler, producer: {Broadway.DummyProducer, []})
     [{Pipeline, opts}] = UOF.SDK.child_specs(config)

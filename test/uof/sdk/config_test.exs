@@ -37,6 +37,11 @@ defmodule UOF.SDK.ConfigTest do
     assert tuned.inactivity_seconds == 20
   end
 
+  test "defaults concurrency to 10 and accepts an override" do
+    assert Config.load(handler: MyApp.Handler).concurrency == 10
+    assert Config.load(handler: MyApp.Handler, concurrency: 50).concurrency == 50
+  end
+
   test "raises on missing :handler" do
     assert_raise ArgumentError, ~r/:handler/, fn -> Config.load([]) end
   end

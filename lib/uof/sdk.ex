@@ -74,6 +74,7 @@ defmodule UOF.SDK do
       {Pipeline,
        name: Pipeline,
        handler: config.handler,
+       concurrency: config.concurrency,
        producer: config.producer,
        routing_key_metadata_key: config.routing_key_metadata_key,
        connection_token_metadata_key: config.connection_token_metadata_key,

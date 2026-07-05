@@ -71,7 +71,8 @@ derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 | `:routing_key_metadata_key` | `:routing_key` | Metadata field carrying the UOF routing key (custom producers only) |
 | `:connection_token_metadata_key` | `nil` | Metadata field carrying a per-connection token for reconnect detection (custom producers only) |
 | `:checkpoint_store` | `UOF.SDK.CheckpointStore.ETS` | Recovery checkpoint persistence |
-| `:inactivity_seconds` | `20` | Down threshold for the two health axes |
+| `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |
+| `:max_processing_delay_seconds` | `20` | Consumer-lag threshold before a producer is marked `delayed?` (no recovery) |
 | `:min_interval_between_recoveries` | `30` | Recovery cooldown (seconds) |
 | `:max_recovery_time` | `3600` | Stall deadline before reissuing recovery (seconds) |
 

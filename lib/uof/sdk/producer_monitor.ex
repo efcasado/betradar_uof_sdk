@@ -12,10 +12,13 @@ defmodule UOF.SDK.ProducerMonitor do
       and recovery is initiated. It returns up via `:returned_from_inactivity`
       (or `:first_recovery_completed` the first time) when recovery completes.
 
-    * **Processing lag** — when messages being processed were generated more
-      than `inactivity_ms` ago, the producer is marked down + `delayed?` but
-      **no recovery is issued** — the remote producer is healthy. It returns
-      up via `:processing_queue_delay_stabilized` once processing catches up.
+    * **Processing lag** — when the newest processed message (content *or*
+      alive) was generated more than `max_processing_delay_ms` ago, the producer
+      is marked down + `delayed?` but **no recovery is issued** — the remote
+      producer is healthy. It returns up via `:processing_queue_delay_stabilized`
+      once processing catches up. This threshold is independent of
+      `inactivity_ms` so consumer-lag tolerance can be tuned separately from the
+      alive-gap/recovery trigger.
 
   ## Recovery orchestration
 
@@ -43,6 +46,7 @@ defmodule UOF.SDK.ProducerMonitor do
   require Logger
 
   @default_inactivity_ms 20_000
+  @default_max_processing_delay_ms 20_000
   @default_tick_ms 1_000
   @default_min_interval_ms 30_000
   @default_max_recovery_ms 5 * 60_000
@@ -102,6 +106,7 @@ defmodule UOF.SDK.ProducerMonitor do
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
+      max_processing_delay_ms: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       first_recovery_done: MapSet.new(),
       seen_connections: MapSet.new(),
@@ -242,6 +247,7 @@ defmodule UOF.SDK.ProducerMonitor do
   # remote feed is healthy and recovers when our consumer catches up. Without
   # this exclusion every alive re-triggers recovery for a slow consumer.
   defp recovery_needed?(%Producer{recovering?: true}, _subscribed?), do: false
+
   defp recovery_needed?(%Producer{down?: down?, delayed?: delayed?}, subscribed?) do
     not subscribed? or (down? and not delayed?)
   end
@@ -254,7 +260,7 @@ defmodule UOF.SDK.ProducerMonitor do
       alive_violation?(producer, now, state.inactivity_ms) ->
         trigger_recovery(state, producer, :alive_interval_violation)
 
-      processing_violation?(producer, now, state.inactivity_ms) and not producer.delayed? ->
+      processing_violation?(producer, now, state.max_processing_delay_ms) and not producer.delayed? ->
         apply_status(state, producer, %{
           down?: true,
           delayed?: true,
@@ -262,7 +268,7 @@ defmodule UOF.SDK.ProducerMonitor do
           processing_queue_delay: now - producer.last_message_timestamp
         })
 
-      producer.delayed? and not processing_violation?(producer, now, state.inactivity_ms) ->
+      producer.delayed? and not processing_violation?(producer, now, state.max_processing_delay_ms) ->
         apply_status(state, producer, %{
           down?: false,
           delayed?: false,

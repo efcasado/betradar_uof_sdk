@@ -54,6 +54,7 @@ defmodule UOF.SDK do
        producers: Producers.fetch(),
        handler: config.handler,
        inactivity_ms: config.inactivity_seconds * 1_000,
+       max_processing_delay_ms: config.max_processing_delay_seconds * 1_000,
        node_id: config.node_id,
        checkpoint_store: config.checkpoint_store,
        min_interval_ms: config.min_interval_between_recoveries * 1_000,

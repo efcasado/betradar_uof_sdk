@@ -27,6 +27,16 @@ defmodule UOF.SDK.ConfigTest do
     assert config.node_id == 42
   end
 
+  test "defaults the health thresholds and overrides max_processing_delay_seconds" do
+    defaults = Config.load(handler: MyApp.Handler)
+    assert defaults.inactivity_seconds == 20
+    assert defaults.max_processing_delay_seconds == 20
+
+    tuned = Config.load(handler: MyApp.Handler, max_processing_delay_seconds: 45)
+    assert tuned.max_processing_delay_seconds == 45
+    assert tuned.inactivity_seconds == 20
+  end
+
   test "raises on missing :handler" do
     assert_raise ArgumentError, ~r/:handler/, fn -> Config.load([]) end
   end

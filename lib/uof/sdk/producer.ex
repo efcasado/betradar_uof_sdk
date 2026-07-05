@@ -40,7 +40,6 @@ defmodule UOF.SDK.Producer do
           recovery_id: integer() | nil,
           last_alive_at: integer() | nil,
           last_message_timestamp: integer() | nil,
-          last_processed_message_gen_timestamp: integer() | nil,
           processing_queue_delay: integer() | nil
         }
 
@@ -53,7 +52,6 @@ defmodule UOF.SDK.Producer do
     :recovery_id,
     :last_alive_at,
     :last_message_timestamp,
-    :last_processed_message_gen_timestamp,
     :processing_queue_delay,
     down?: true,
     delayed?: false,

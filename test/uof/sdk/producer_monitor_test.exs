@@ -102,10 +102,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %Producer{down?: false}}
 
-    # a content message processed at t=1000, then a fresh alive at t=20000
-    ProducerMonitor.message(m, 1, 1_000)
+    # Local clock jumps to 20_000, but the newest message we've managed to
+    # process was generated back at 1_000 (a backed-up consumer draining a stale
+    # alive) -> ~19s behind. last_alive_at stays fresh, so the alive-interval
+    # path is quiet and it's the processing check that trips.
     set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 20_000, true)
+    ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
 
     tick(m)
@@ -113,8 +115,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     refute_received {:recover_called, _, _}
 
-    # processing catches up -> stabilized, back up
-    ProducerMonitor.message(m, 1, 20_000)
+    # a message generated at ~now arrives -> caught up -> stabilized, back up
+    ProducerMonitor.alive(m, 1, 20_000, true)
     tick(m)
 
     assert_receive {:status, %Producer{down?: false, delayed?: false, reason: :processing_queue_delay_stabilized}}
@@ -129,18 +131,19 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %Producer{down?: false}}
 
-    # drive it into processing lag (down? + delayed?): stale content but a fresh
-    # alive, so it's the processing check that trips, not the alive interval.
-    ProducerMonitor.message(m, 1, 1_000)
+    # drive it into processing lag (down? + delayed?): local clock at 20_000 but
+    # the last processed message was generated at 1_000, with a fresh alive so
+    # the alive-interval path stays quiet and the processing check is what trips.
     set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 20_000, true)
+    ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
     tick(m)
     assert_receive {:status, %Producer{down?: true, delayed?: true, reason: :processing_queue_delay_violation}}
 
-    # a subscribed alive arrives while still delayed: the remote feed is healthy,
-    # so this must NOT issue a recovery (the flop bug re-triggered on every alive).
-    ProducerMonitor.alive(m, 1, 20_000, true)
+    # another subscribed alive arrives while still delayed and still behind: the
+    # remote feed is healthy, so this must NOT issue a recovery (the flop bug
+    # re-triggered on every alive).
+    ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
     refute_received {:recover_called, _, _}
     assert {:ok, %Producer{recovering?: false, delayed?: true}} = ProducerMonitor.producer(m, 1)

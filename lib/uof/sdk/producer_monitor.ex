@@ -142,12 +142,7 @@ defmodule UOF.SDK.ProducerMonitor do
   def handle_cast({:message, id, gen_ts}, state) do
     state =
       with_producer(state, id, fn p ->
-        updated = %{
-          p
-          | last_message_timestamp: max_ts(p.last_message_timestamp, gen_ts),
-            last_processed_message_gen_timestamp: max_ts(p.last_processed_message_gen_timestamp, gen_ts)
-        }
-
+        updated = %{p | last_message_timestamp: max_ts(p.last_message_timestamp, gen_ts)}
         %{state | producers: Map.put(state.producers, id, updated)}
       end)
 
@@ -264,7 +259,7 @@ defmodule UOF.SDK.ProducerMonitor do
           down?: true,
           delayed?: true,
           reason: :processing_queue_delay_violation,
-          processing_queue_delay: now - producer.last_processed_message_gen_timestamp
+          processing_queue_delay: now - producer.last_message_timestamp
         })
 
       producer.delayed? and not processing_violation?(producer, now, state.inactivity_ms) ->
@@ -395,9 +390,13 @@ defmodule UOF.SDK.ProducerMonitor do
   defp alive_violation?(%Producer{last_alive_at: nil}, _now, _ms), do: false
   defp alive_violation?(%Producer{last_alive_at: t}, now, ms), do: now - t > ms
 
-  defp processing_violation?(%Producer{last_processed_message_gen_timestamp: nil}, _now, _ms), do: false
+  # "Behind" is measured against the newest message we've processed — content
+  # *or* alive. Alives arrive ~every 10s carrying the current feed time, so a
+  # quiet-but-healthy producer keeps this fresh; only a consumer that can't keep
+  # up (alives back up too) lets it fall past the threshold.
+  defp processing_violation?(%Producer{last_message_timestamp: nil}, _now, _ms), do: false
 
-  defp processing_violation?(%Producer{last_processed_message_gen_timestamp: t}, now, ms), do: now - t > ms
+  defp processing_violation?(%Producer{last_message_timestamp: t}, now, ms), do: now - t > ms
 
   defp with_producer(state, id, fun) do
     case Map.fetch(state.producers, id) do

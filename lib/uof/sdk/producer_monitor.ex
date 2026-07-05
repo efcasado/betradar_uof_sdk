@@ -234,11 +234,21 @@ defmodule UOF.SDK.ProducerMonitor do
         last_message_timestamp: max_ts(producer.last_message_timestamp, gen_ts)
     }
 
-    if (not subscribed? or producer.down?) and not producer.recovering? do
+    if recovery_needed?(producer, subscribed?) do
       trigger_recovery(state, producer, producer.reason)
     else
       %{state | producers: Map.put(state.producers, producer.id, producer)}
     end
+  end
+
+  # A live producer needs recovery only on a genuine desync: the feed reports us
+  # unsubscribed, or it's down for a delivery reason. A producer that's down
+  # purely because *local* processing lags (`delayed?`) must not recover — the
+  # remote feed is healthy and recovers when our consumer catches up. Without
+  # this exclusion every alive re-triggers recovery for a slow consumer.
+  defp recovery_needed?(%Producer{recovering?: true}, _subscribed?), do: false
+  defp recovery_needed?(%Producer{down?: down?, delayed?: delayed?}, subscribed?) do
+    not subscribed? or (down? and not delayed?)
   end
 
   defp check(state, producer, now) do

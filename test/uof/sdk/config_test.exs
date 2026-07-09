@@ -12,6 +12,7 @@ defmodule UOF.SDK.ConfigTest do
     assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
     assert content_opts[:connection] == conn
     assert system_opts[:connection] == conn
+    assert config.metadata_adapter == :amqp
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil
   end
@@ -49,9 +50,7 @@ defmodule UOF.SDK.ConfigTest do
            host: "pulsar://localhost:6650",
            topic: "uof-feed",
            subscription: "uof-sdk",
-           consumer_opts: [initial_position: :earliest],
-           routing_key_metadata_key: :pulsar_key,
-           connection_token_metadata_key: :pulsar_connection}
+           consumer_opts: [initial_position: :earliest]}
       )
 
     assert {Producer, content_opts} = config.content_producer
@@ -68,8 +67,9 @@ defmodule UOF.SDK.ConfigTest do
     assert system_opts[:consumer_opts][:initial_position] == :earliest
     assert system_opts[:consumer_opts][:subscription_type] == :Failover
 
-    assert config.routing_key_metadata_key == :pulsar_key
-    assert config.connection_token_metadata_key == :pulsar_connection
+    assert config.metadata_adapter == :pulsar_rabbitmq_source
+    assert config.routing_key_metadata_key == :routing_key
+    assert config.connection_token_metadata_key == nil
   end
 
   test "requires a Pulsar subscription" do

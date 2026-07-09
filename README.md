@@ -78,14 +78,15 @@ config :uof_sdk,
   transport: {:pulsar,
     host: "pulsar://localhost:6650",
     topic: "uof-feed",
-    subscription: "uof-sdk",
-    routing_key_metadata_key: :pulsar_key,
-    connection_token_metadata_key: :pulsar_connection
+    subscription: "uof-sdk"
   }
 ```
 
 Applications using Pulsar must include `{:off_broadway_pulsar, "~> 1.4"}` in
-their own dependencies.
+their own dependencies. Pulsar support assumes the SDK's RabbitMQ source
+connector contract: the AMQP routing key is published as the Pulsar message key,
+the original XML body is published as the Pulsar payload, and `queueName` /
+`consumerTag` are published as message properties.
 
 | Option | Default | Notes |
 |--------|---------|-------|
@@ -102,10 +103,10 @@ their own dependencies.
 
 > Recovery throttling defaults follow the official SDK guidance. `:recovery_overlap_seconds` is specific to this SDK and should be tuned for your deployment.
 
-For Pulsar transports, `:routing_key_metadata_key` must point at the original
-UOF routing key in the Broadway message metadata. `:connection_token_metadata_key`
-can point at a per-connection token used for reconnect detection on both
-pipelines.
+For Pulsar transports, the SDK reads the original AMQP routing key from the
+Pulsar partition key produced by the RabbitMQ source connector. That connector
+also publishes `queueName` and `consumerTag` properties; the SDK uses the pair
+as a reconnect token and triggers recovery when it changes.
 
 ## Usage
 

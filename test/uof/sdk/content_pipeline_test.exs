@@ -151,7 +151,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     refute_received {:message_sink, 3, 99}
   end
 
-  test "reads the routing key from a custom metadata field" do
+  test "reads the routing key from a custom AMQP metadata field" do
     name = Module.concat(__MODULE__, CustomRk)
 
     start_link_supervised!(%{
@@ -164,14 +164,42 @@ defmodule UOF.SDK.ContentPipelineTest do
              handler: Handler,
              concurrency: 1,
              producer: {Broadway.DummyProducer, []},
-             routing_key_metadata_key: :pulsar_key
+             routing_key_metadata_key: :custom_key
            ]
          ]}
     })
 
     xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
-    # routing key lives under :pulsar_key, not :routing_key
-    metadata = %{pulsar_key: "hi.-.live.odds_change.1.sr:match.12345.-"}
+    # routing key lives under :custom_key, not :routing_key
+    metadata = %{custom_key: "hi.-.live.odds_change.1.sr:match.12345.-"}
+
+    Broadway.test_message(name, xml, metadata: metadata)
+
+    assert_receive {:odds_change, %Feed.OddsChange{}, ctx}, 1_000
+    assert ctx.message_type == "odds_change"
+    assert ctx.event_urn == "sr:match:12345"
+  end
+
+  test "reads the routing key from the Pulsar RabbitMQ source partition key" do
+    name = Module.concat(__MODULE__, PulsarRabbitMQSource)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             metadata_adapter: :pulsar_rabbitmq_source
+           ]
+         ]}
+    })
+
+    xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
+    metadata = %{metadata: %{partition_key: "hi.-.live.odds_change.1.sr:match.12345.-"}}
 
     Broadway.test_message(name, xml, metadata: metadata)
 
@@ -259,5 +287,40 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:connection_sink, {:content, "conn-abc-123"}}
+  end
+
+  test "observes a connection token from Pulsar RabbitMQ source properties" do
+    name = Module.concat(__MODULE__, PulsarConnToken)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             metadata_adapter: :pulsar_rabbitmq_source,
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
+      metadata: %{
+        metadata: %{partition_key: "-.-.-.alive.-.-.-.-"},
+        single_metadata: %{
+          properties: [
+            %{key: "queueName", value: "uof-content"},
+            %{key: "consumerTag", value: "ctag-1"}
+          ]
+        }
+      }
+    )
+
+    assert_receive {:message_sink, 1, 1}
+    assert_receive {:connection_sink, {:content, {"uof-content", "ctag-1"}}}
   end
 end

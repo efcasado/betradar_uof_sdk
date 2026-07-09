@@ -20,6 +20,7 @@ defmodule UOF.SDK.Transport do
   @spec producers(term(), integer() | nil) :: %{
           content: producer_spec(),
           system: producer_spec(),
+          metadata_adapter: :amqp | :pulsar_rabbitmq_source,
           routing_key_metadata_key: atom(),
           connection_token_metadata_key: atom() | nil
         }
@@ -45,6 +46,7 @@ defmodule UOF.SDK.Transport do
     %{
       content: rabbitmq_producer(connection, content_bindings(node_id)),
       system: rabbitmq_producer(connection, system_bindings(node_id)),
+      metadata_adapter: :amqp,
       routing_key_metadata_key: :routing_key,
       connection_token_metadata_key: nil
     }
@@ -70,8 +72,9 @@ defmodule UOF.SDK.Transport do
     %{
       content: pulsar_producer(base_opts, subscription, :content, :Key_Shared),
       system: pulsar_producer(base_opts, subscription, :system, :Failover),
-      routing_key_metadata_key: Keyword.get(opts, :routing_key_metadata_key, :routing_key),
-      connection_token_metadata_key: Keyword.get(opts, :connection_token_metadata_key)
+      metadata_adapter: :pulsar_rabbitmq_source,
+      routing_key_metadata_key: :routing_key,
+      connection_token_metadata_key: nil
     }
   end
 

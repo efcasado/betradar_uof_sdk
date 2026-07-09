@@ -26,12 +26,12 @@ defmodule UOF.SDK.Config do
         transport: {:pulsar,
           host: "pulsar://localhost:6650",
           topic: "uof-feed",
-          subscription: "uof-sdk",
-          routing_key_metadata_key: :pulsar_key
+          subscription: "uof-sdk"
         }
   """
 
   alias UOF.SDK.CheckpointStore.ETS
+  alias UOF.SDK.MessageMetadata
   alias UOF.SDK.Transport
 
   @otp_app :uof_sdk
@@ -42,6 +42,7 @@ defmodule UOF.SDK.Config do
           transport: term(),
           content_producer: Transport.producer_spec(),
           system_producer: Transport.producer_spec(),
+          metadata_adapter: MessageMetadata.adapter(),
           routing_key_metadata_key: atom(),
           connection_token_metadata_key: atom() | nil,
           checkpoint_store: module(),
@@ -60,6 +61,7 @@ defmodule UOF.SDK.Config do
     :content_producer,
     :system_producer,
     :connection_token_metadata_key,
+    metadata_adapter: :amqp,
     routing_key_metadata_key: :routing_key,
     checkpoint_store: ETS,
     concurrency: 10,
@@ -86,6 +88,7 @@ defmodule UOF.SDK.Config do
       transport: transport,
       content_producer: producers.content,
       system_producer: producers.system,
+      metadata_adapter: producers.metadata_adapter,
       routing_key_metadata_key: producers.routing_key_metadata_key,
       connection_token_metadata_key: producers.connection_token_metadata_key,
       checkpoint_store: Keyword.get(cfg, :checkpoint_store, ETS),

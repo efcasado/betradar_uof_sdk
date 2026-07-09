@@ -85,7 +85,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     assert_receive {:connection_sink, {:system, ^conn}}
   end
 
-  test "reads the routing key from a custom metadata field" do
+  test "reads the routing key from a custom AMQP metadata field" do
     name = Module.concat(__MODULE__, CustomRk)
 
     start_link_supervised!(%{
@@ -96,17 +96,50 @@ defmodule UOF.SDK.SystemPipelineTest do
            [
              name: name,
              producer: {Broadway.DummyProducer, []},
-             routing_key_metadata_key: :pulsar_key
+             routing_key_metadata_key: :custom_key
            ]
          ]}
     })
 
     xml = ~s(<alive product="1" timestamp="42" subscribed="1"/>)
-    metadata = %{pulsar_key: "-.-.-.alive.-.-.-.-"}
+    metadata = %{custom_key: "-.-.-.alive.-.-.-.-"}
 
     ref = Broadway.test_message(name, xml, metadata: metadata)
 
     assert_receive {:ack, ^ref, [_successful], []}, 1_000
+  end
+
+  test "reads the routing key from the Pulsar RabbitMQ source partition key" do
+    name = Module.concat(__MODULE__, PulsarRabbitMQSource)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {SystemPipeline, :start_link,
+         [
+           [
+             name: name,
+             producer: {Broadway.DummyProducer, []},
+             metadata_adapter: :pulsar_rabbitmq_source,
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    Broadway.test_message(name, ~s(<alive product="1" timestamp="42" subscribed="1"/>),
+      metadata: %{
+        metadata: %{
+          partition_key: "-.-.-.alive.-.-.-.-",
+          properties: [
+            %{key: "queueName", value: "uof-system"},
+            %{key: "consumerTag", value: "ctag-1"}
+          ]
+        }
+      }
+    )
+
+    assert_receive {:alive_sink, 1, 42, true}
+    assert_receive {:connection_sink, {:system, {"uof-system", "ctag-1"}}}
   end
 
   test "observes a connection token from a custom metadata field" do

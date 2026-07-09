@@ -28,9 +28,11 @@ Messages flow in one direction: the pipelines receive raw AMQP messages, decode
 the XML payload, and call your `MessageHandler`. `SystemPipeline` owns system
 traffic (`alive`, `snapshot_complete`) and notifies `ProducerMonitor` for
 producer lifecycle, recovery correlation, and checkpoint advancement.
-`ContentPipeline` owns event content and reports content timestamps for lag
-detection. Producer state lives entirely in `ProducerMonitor`'s GenServer state;
-`UOF.SDK.producers/0` goes through a `GenServer.call`.
+`ContentPipeline` owns event content and reports content-queue timestamps for
+lag detection. It also consumes session-scoped `alive` messages only as lag
+freshness markers for quiet producers. Producer state lives entirely in
+`ProducerMonitor`'s GenServer state; `UOF.SDK.producers/0` goes through a
+`GenServer.call`.
 
 ## Configuration
 
@@ -193,18 +195,21 @@ When a gap is detected, the SDK:
 `snapshot_complete` is handled on the system pipeline by design. It means the
 feed has finished publishing a recovery replay, not that this SDK instance has
 finished executing all handler callbacks for replayed content. Local backlog is
-handled separately by the content lag monitor: if processed content timestamps
-fall behind by more than `:max_processing_delay_seconds`, the producer is marked
-`delayed?` / down until processing catches up. Recovery overlap and idempotent
-handlers cover the remaining crash/restart window.
+handled separately by the content lag monitor: if processed content-queue
+timestamps fall behind by more than `:max_processing_delay_seconds`, the
+producer is marked `delayed?` / down until processing catches up. Event messages
+and content-session `alive` messages both advance this lag timestamp; system
+`alive` messages do not. Recovery overlap and idempotent handlers cover the
+remaining crash/restart window.
 
 A stall guard (`:max_recovery_time`) reissues the request if no
 `snapshot_complete` arrives within the deadline, preserving the original
 timestamp so no messages are skipped on retry.
 
 **Checkpoints** are owned by `ProducerMonitor` and are advanced from subscribed
-`alive` heartbeats after the producer is already in sync. Content messages do
-not write checkpoints directly. On recovery, the SDK subtracts
+system `alive` heartbeats after the producer is already in sync. Content
+messages and content-session `alive` messages do not write checkpoints directly.
+On recovery, the SDK subtracts
 `:recovery_overlap_seconds` from the stored checkpoint before requesting
 incremental recovery. This intentionally replays a bounded amount of data to
 cover concurrent processing and distributed-consumer skew; handlers should be

@@ -176,6 +176,15 @@ defmodule UOF.SDK.ContentPipeline do
 
   ## lifecycle side-effects --------------------------------------------------
 
+  defp observe(ctx, %RoutingKey{message_type: "alive"}, msg) do
+    product = Map.get(msg, :product)
+    timestamp = Map.get(msg, :timestamp)
+
+    if product && timestamp do
+      notify(ctx.monitor, :message, [product, timestamp])
+    end
+  end
+
   defp observe(ctx, %RoutingKey{message_type: type}, msg) when type in @content_message_types do
     product = Map.get(msg, :product)
     timestamp = Map.get(msg, :timestamp)
@@ -189,12 +198,14 @@ defmodule UOF.SDK.ContentPipeline do
 
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
-  defp maybe_track_connection(%{monitor: monitor, connection_token_key: key}, _type, message) do
+  defp maybe_track_connection(%{monitor: monitor, connection_token_key: key}, "alive", message) do
     case connection_token(message, key) do
       nil -> :ok
       token -> monitor.observe_connection({:content, token})
     end
   end
+
+  defp maybe_track_connection(_context, _type, _message), do: :ok
 
   defp connection_token(message, nil), do: connection_pid(message)
   defp connection_token(%Message{metadata: metadata}, key), do: Map.get(metadata, key)
@@ -259,20 +270,26 @@ defmodule UOF.SDK.ContentPipeline do
   end
 
   defp feed_bindings(node_id) when is_integer(node_id) and node_id > 0 do
-    Enum.flat_map(@content_message_types, fn type ->
-      [
-        {@exchange, routing_key: "*.*.*.#{type}.*.*.*.-.#"},
-        {@exchange, routing_key: "*.*.*.#{type}.*.*.*.#{node_id}.#"}
-      ]
-    end)
+    [
+      {@exchange, routing_key: "-.-.-.alive.#"}
+      | Enum.flat_map(@content_message_types, fn type ->
+          [
+            {@exchange, routing_key: "*.*.*.#{type}.*.*.*.-.#"},
+            {@exchange, routing_key: "*.*.*.#{type}.*.*.*.#{node_id}.#"}
+          ]
+        end)
+    ]
   end
 
   defp feed_bindings(_node_id) do
-    Enum.flat_map(@content_message_types, fn type ->
-      [
-        {@exchange, routing_key: "*.*.*.#{type}.*.*.*.-.#"},
-        {@exchange, routing_key: "*.*.*.#{type}.*.*.*.#"}
-      ]
-    end)
+    [
+      {@exchange, routing_key: "-.-.-.alive.#"}
+      | Enum.flat_map(@content_message_types, fn type ->
+          [
+            {@exchange, routing_key: "*.*.*.#{type}.*.*.*.-.#"},
+            {@exchange, routing_key: "*.*.*.#{type}.*.*.*.#"}
+          ]
+        end)
+    ]
   end
 end

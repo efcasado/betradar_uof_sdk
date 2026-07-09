@@ -98,6 +98,32 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:message_sink, 3, 99}
   end
 
+  test "routes content-session alive timestamps to the monitor" do
+    name = Module.concat(__MODULE__, ContentAlive)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    Broadway.test_message(name, ~s(<alive product="3" timestamp="123" subscribed="1"/>),
+      metadata: %{routing_key: "-.-.-.alive.-.-.-.-"}
+    )
+
+    assert_receive {:message_sink, 3, 123}
+    refute_received {:odds_change, _, _}
+  end
+
   test "does not notify lifecycle side-effects when handler delivery fails" do
     name = Module.concat(__MODULE__, HandlerFailure)
 
@@ -154,8 +180,35 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert ctx.event_urn == "sr:match:12345"
   end
 
-  test "observes the content AMQP connection pid for reconnect detection" do
+  test "observes the content AMQP connection pid from content-session alives" do
     name = Module.concat(__MODULE__, ConnObserve)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    conn = spawn(fn -> :ok end)
+
+    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
+      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", amqp_channel: %{conn: %{pid: conn}}}
+    )
+
+    assert_receive {:connection_sink, {:content, ^conn}}
+  end
+
+  test "does not observe the content AMQP connection on every event message" do
+    name = Module.concat(__MODULE__, EventConnIgnored)
 
     start_link_supervised!(%{
       id: name,
@@ -178,7 +231,8 @@ defmodule UOF.SDK.ContentPipelineTest do
       metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-", amqp_channel: %{conn: %{pid: conn}}}
     )
 
-    assert_receive {:connection_sink, {:content, ^conn}}
+    assert_receive {:odds_change, _, _}
+    refute_received {:connection_sink, _}
   end
 
   test "observes a content connection token from a custom metadata field" do
@@ -200,8 +254,8 @@ defmodule UOF.SDK.ContentPipelineTest do
          ]}
     })
 
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
-      metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-", conn_id: "conn-abc-123"}
+    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
+      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", conn_id: "conn-abc-123"}
     )
 
     assert_receive {:connection_sink, {:content, "conn-abc-123"}}

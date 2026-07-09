@@ -12,10 +12,12 @@ defmodule UOF.SDK.ProducerMonitor do
       and recovery is initiated. It returns up via `:returned_from_inactivity`
       (or `:first_recovery_completed` the first time) when recovery completes.
 
-    * **Processing lag** — when the newest message processed by the content
-      pipeline was generated more than `max_processing_delay_ms` ago, the
-      producer is marked down + `delayed?` but **no recovery is issued** — the
-      remote producer is healthy. It returns up via
+    * **Processing lag** — when the newest content-queue timestamp processed by
+      the content pipeline was generated more than `max_processing_delay_ms`
+      ago, the producer is marked down + `delayed?` but **no recovery is
+      issued** — the remote producer is healthy. Content-session `alive`
+      messages refresh this timestamp for quiet producers because they queue
+      behind event content. It returns up via
       `:processing_queue_delay_stabilized` once processing catches up. This
       threshold is independent of
       `inactivity_ms` so consumer-lag tolerance can be tuned separately from the
@@ -107,10 +109,12 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @doc """
-  Observe the AMQP connection a message arrived on. The first time a given
-  connection token is seen, every producer is recovered — this fires on the
-  initial connection and again on each reconnect (a reconnect always yields a
-  new token), closing the message-gap a reconnect leaves behind.
+  Observe the AMQP connection a message arrived on.
+
+  The first observed connection token triggers startup recovery. The first token
+  from any later namespace only establishes its startup baseline; after that, a
+  token change in any namespace recovers every producer to close the message-gap
+  a reconnect leaves behind.
   """
   def observe_connection(server \\ __MODULE__, conn_pid) do
     GenServer.cast(server, {:observe_connection, conn_pid})
@@ -133,7 +137,8 @@ defmodule UOF.SDK.ProducerMonitor do
       max_processing_delay_ms: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       first_recovery_done: MapSet.new(),
-      seen_connections: MapSet.new(),
+      connection_tokens: %{},
+      connection_recovery_bootstrapped?: false,
       recover_fun: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
       checkpoint_store: Keyword.get(opts, :checkpoint_store, UOF.SDK.CheckpointStore.ETS),
       node_id: Keyword.get(opts, :node_id),
@@ -193,18 +198,30 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
-  def handle_cast({:observe_connection, conn_pid}, state) do
-    if MapSet.member?(state.seen_connections, conn_pid) do
-      {:noreply, state}
-    else
-      state =
-        state.producers
-        |> Map.values()
-        |> Enum.reject(& &1.recovering?)
-        |> Enum.reduce(state, fn p, acc -> trigger_recovery(acc, p, :connection_down) end)
+  def handle_cast({:observe_connection, {namespace, token}}, state) do
+    {action, state} = track_connection(state, namespace, token)
 
-      {:noreply, %{state | seen_connections: MapSet.put(state.seen_connections, conn_pid)}}
-    end
+    state =
+      if action == :recover do
+        recover_non_recovering_producers(state, :connection_down)
+      else
+        state
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:observe_connection, token}, state) do
+    {action, state} = track_connection(state, :default, token)
+
+    state =
+      if action == :recover do
+        recover_non_recovering_producers(state, :connection_down)
+      else
+        state
+      end
+
+    {:noreply, state}
   end
 
   def handle_cast({:snapshot_complete, id, request_id}, state) do
@@ -344,6 +361,33 @@ defmodule UOF.SDK.ProducerMonitor do
   defp notify(%{handler: nil}, _producer), do: :ok
   defp notify(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
 
+  defp track_connection(state, namespace, token) do
+    case Map.fetch(state.connection_tokens, namespace) do
+      {:ok, ^token} ->
+        {:ignore, state}
+
+      {:ok, _old_token} ->
+        {:recover, put_connection_token(state, namespace, token)}
+
+      :error when state.connection_recovery_bootstrapped? ->
+        {:ignore, put_connection_token(state, namespace, token)}
+
+      :error ->
+        {:recover, %{put_connection_token(state, namespace, token) | connection_recovery_bootstrapped?: true}}
+    end
+  end
+
+  defp put_connection_token(state, namespace, token) do
+    %{state | connection_tokens: Map.put(state.connection_tokens, namespace, token)}
+  end
+
+  defp recover_non_recovering_producers(state, reason) do
+    state.producers
+    |> Map.values()
+    |> Enum.reject(& &1.recovering?)
+    |> Enum.reduce(state, fn p, acc -> trigger_recovery(acc, p, reason) end)
+  end
+
   ## Recovery -----------------------------------------------------------------
 
   defp initiate(state, producer, after_ts) do
@@ -470,9 +514,10 @@ defmodule UOF.SDK.ProducerMonitor do
   defp alive_violation?(%Producer{last_alive_at: nil}, _now, _ms), do: false
   defp alive_violation?(%Producer{last_alive_at: t}, now, ms), do: now - t > ms
 
-  # "Behind" is measured against the newest content message processed by the
-  # content pipeline. Alives are intentionally excluded because they arrive on a
-  # separate system queue and no longer prove content processing is caught up.
+  # "Behind" is measured against the newest timestamp processed by the content
+  # pipeline: event content, plus content-session alives that queue behind it.
+  # System alives are intentionally excluded because they arrive on a separate
+  # queue and no longer prove content processing is caught up.
   defp processing_violation?(%Producer{last_message_timestamp: nil}, _now, _ms), do: false
 
   defp processing_violation?(%Producer{last_message_timestamp: t}, now, ms), do: now - t > ms

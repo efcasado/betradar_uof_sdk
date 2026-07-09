@@ -45,7 +45,8 @@ defmodule UOF.SDK.Config do
           inactivity_seconds: pos_integer(),
           max_processing_delay_seconds: pos_integer(),
           min_interval_between_recoveries: pos_integer(),
-          max_recovery_time: pos_integer()
+          max_recovery_time: pos_integer(),
+          recovery_overlap_seconds: non_neg_integer()
         }
 
   defstruct [
@@ -60,7 +61,8 @@ defmodule UOF.SDK.Config do
     inactivity_seconds: 20,
     max_processing_delay_seconds: 20,
     min_interval_between_recoveries: 30,
-    max_recovery_time: 3600
+    max_recovery_time: 3600,
+    recovery_overlap_seconds: 300
   ]
 
   @doc """
@@ -83,7 +85,8 @@ defmodule UOF.SDK.Config do
       inactivity_seconds: Keyword.get(cfg, :inactivity_seconds, 20),
       max_processing_delay_seconds: Keyword.get(cfg, :max_processing_delay_seconds, 20),
       min_interval_between_recoveries: Keyword.get(cfg, :min_interval_between_recoveries, 30),
-      max_recovery_time: Keyword.get(cfg, :max_recovery_time, 3600)
+      max_recovery_time: Keyword.get(cfg, :max_recovery_time, 3600),
+      recovery_overlap_seconds: Keyword.get(cfg, :recovery_overlap_seconds, 300)
     }
   end
 

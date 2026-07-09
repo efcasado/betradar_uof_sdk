@@ -40,7 +40,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
       now_fun: fn -> Agent.get(clock, & &1) end,
       inactivity_ms: @inactivity,
       max_processing_delay_ms: @inactivity,
-      tick_ms: 60_000
+      tick_ms: 60_000,
+      recovery_overlap_ms: 0
     ]
 
     start_supervised!({ProducerMonitor, Keyword.merge(defaults, overrides)})
@@ -72,6 +73,36 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %Producer{id: 1, down?: false, reason: :first_recovery_completed}}
+  end
+
+  test "checkpoints subscribed alive timestamps only after producer is up", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    sync(m)
+    assert CheckpointStore.ETS.get(1) == :none
+
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{down?: false}}
+
+    ProducerMonitor.alive(m, 1, 2_000, true)
+    sync(m)
+    assert CheckpointStore.ETS.get(1) == {:ok, 2_000}
+
+    ProducerMonitor.alive(m, 1, 1_500, true)
+    sync(m)
+    assert CheckpointStore.ETS.get(1) == {:ok, 2_000}
+  end
+
+  test "does not checkpoint unsubscribed alive timestamps", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, false)
+    assert_recovery_triggered()
+    sync(m)
+
+    assert CheckpointStore.ETS.get(1) == :none
   end
 
   test "silence (alive interval violation) marks down and recovers", %{clock: clock} do
@@ -201,6 +232,23 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert opts[:after] == @now - 60_000
   end
 
+  test "incremental recovery subtracts configured overlap from checkpoint", %{clock: clock} do
+    CheckpointStore.ETS.put(1, @now - 60_000)
+
+    m =
+      start_monitor(
+        [
+          now_fun: fn -> @now end,
+          recovery_overlap_ms: 30_000
+        ],
+        clock
+      )
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == @now - 90_000
+  end
+
   test "clamps :after to the producer's recovery window", %{clock: clock} do
     # checkpoint is 2 h old, window is 60 min -> clamp to now - 60 min
     CheckpointStore.ETS.put(1, @now - 2 * 60 * 60_000)
@@ -285,6 +333,34 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}, 200
     assert_receive {:recover_called, "pre", _}, 500
     assert Agent.get(attempts, & &1) >= 2
+  end
+
+  test "API failure retry preserves the original :after timestamp", %{clock: clock} do
+    CheckpointStore.ETS.put(1, @now - 60_000)
+
+    test_pid = self()
+    attempts = start_supervised!(%{id: :attempts_for_retry_after, start: {Agent, :start_link, [fn -> 0 end]}})
+
+    flaky = fn product, opts ->
+      n = Agent.get_and_update(attempts, fn n -> {n, n + 1} end)
+      send(test_pid, {:recover_called, product, opts})
+
+      if n == 0 do
+        CheckpointStore.ETS.put(1, @now)
+        {:error, :boom}
+      else
+        {:ok, :accepted}
+      end
+    end
+
+    m = start_monitor([recover_fun: flaky, min_interval_ms: 10, now_fun: fn -> @now end], clock)
+    ProducerMonitor.alive(m, 1, 1_000, true)
+
+    assert_receive {:recover_called, "pre", first}, 200
+    assert_receive {:recover_called, "pre", second}, 500
+
+    assert first[:after] == @now - 60_000
+    assert second[:after] == first[:after]
   end
 
   test "a rejection response envelope schedules a retry", %{clock: clock} do

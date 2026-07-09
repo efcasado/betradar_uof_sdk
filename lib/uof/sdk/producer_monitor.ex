@@ -22,6 +22,13 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Recovery orchestration
 
+  Recovery checkpoints are owned here, not by the Broadway pipeline. Subscribed
+  `alive` heartbeats advance the checkpoint only after the producer is already
+  up; content messages update processing-delay state but do not move the
+  recovery checkpoint. Incremental recovery subtracts `recovery_overlap_ms`
+  from the stored checkpoint, intentionally replaying a bounded window to cover
+  concurrent processing and distributed-consumer skew.
+
   When a delivery gap is detected, this module:
 
     * computes the `after:` timestamp from `UOF.SDK.CheckpointStore` (clamped
@@ -52,6 +59,7 @@ defmodule UOF.SDK.ProducerMonitor do
   @default_tick_ms 1_000
   @default_min_interval_ms 30_000
   @default_max_recovery_ms 5 * 60_000
+  @default_recovery_overlap_ms 5 * 60_000
 
   ## Client API ---------------------------------------------------------------
 
@@ -131,6 +139,7 @@ defmodule UOF.SDK.ProducerMonitor do
       node_id: Keyword.get(opts, :node_id),
       min_interval_ms: Keyword.get(opts, :min_interval_ms, @default_min_interval_ms),
       max_recovery_ms: Keyword.get(opts, :max_recovery_ms, @default_max_recovery_ms),
+      recovery_overlap_ms: Keyword.get(opts, :recovery_overlap_ms, @default_recovery_overlap_ms),
       gen_request_id:
         Keyword.get(opts, :gen_request_id, fn ->
           System.unique_integer([:positive, :monotonic])
@@ -178,7 +187,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state =
       with_producer(state, id, fn p ->
         updated = %{p | last_message_timestamp: max_ts(p.last_message_timestamp, gen_ts)}
-        %{state | producers: Map.put(state.producers, id, updated)}
+        put_producer(state, updated)
       end)
 
     {:noreply, state}
@@ -247,11 +256,11 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  def handle_info({:retry, producer}, state) do
+  def handle_info({:retry, producer, after_ts}, state) do
     if Map.has_key?(state.recoveries, producer.id) do
       {:noreply, state}
     else
-      {:noreply, initiate(state, producer, after_from_checkpoint(state, producer))}
+      {:noreply, initiate(state, producer, after_ts)}
     end
   end
 
@@ -267,7 +276,8 @@ defmodule UOF.SDK.ProducerMonitor do
     if recovery_needed?(producer, subscribed?) do
       trigger_recovery(state, producer, producer.reason)
     else
-      %{state | producers: Map.put(state.producers, producer.id, producer)}
+      maybe_checkpoint_alive(state, producer, gen_ts, subscribed?)
+      put_producer(state, producer)
     end
   end
 
@@ -317,14 +327,14 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp trigger_recovery(state, before, reason, after_ts) do
     after_ = %{before | down?: true, recovering?: true, reason: reason}
-    state = %{state | producers: Map.put(state.producers, after_.id, after_)}
+    state = put_producer(state, after_)
     maybe_notify(state, before, after_)
     initiate(state, after_, after_ts)
   end
 
   defp apply_status(state, before, attrs) do
     after_ = struct(before, attrs)
-    state = %{state | producers: Map.put(state.producers, after_.id, after_)}
+    state = put_producer(state, after_)
     maybe_notify(state, before, after_)
     state
   end
@@ -365,7 +375,7 @@ defmodule UOF.SDK.ProducerMonitor do
             "retrying in #{state.min_interval_ms}ms"
         )
 
-        Process.send_after(self(), {:retry, producer}, state.min_interval_ms)
+        Process.send_after(self(), {:retry, producer, after_ts}, state.min_interval_ms)
         state
     end
   end
@@ -397,10 +407,33 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp after_from_checkpoint(state, producer) do
     case state.checkpoint_store.get(producer.id) do
-      {:ok, timestamp} -> clamp_to_window(timestamp, producer, state.now_fun.())
-      :none -> nil
+      {:ok, timestamp} ->
+        timestamp
+        |> checkpoint_after_overlap(state.recovery_overlap_ms)
+        |> clamp_to_window(producer, state.now_fun.())
+
+      :none ->
+        nil
     end
   end
+
+  defp put_producer(state, %Producer{} = producer) do
+    %{state | producers: Map.put(state.producers, producer.id, producer)}
+  end
+
+  defp checkpoint_after_overlap(timestamp, overlap_ms), do: max(timestamp - overlap_ms, 0)
+
+  defp put_checkpoint(state, id, timestamp) do
+    case state.checkpoint_store.get(id) do
+      {:ok, existing} when existing >= timestamp -> :ok
+      _other -> state.checkpoint_store.put(id, timestamp)
+    end
+  end
+
+  defp maybe_checkpoint_alive(_state, _producer, _timestamp, false), do: :ok
+  defp maybe_checkpoint_alive(_state, %Producer{down?: true}, _timestamp, true), do: :ok
+  defp maybe_checkpoint_alive(_state, %Producer{recovering?: true}, _timestamp, true), do: :ok
+  defp maybe_checkpoint_alive(state, producer, timestamp, true), do: put_checkpoint(state, producer.id, timestamp)
 
   defp clamp_to_window(timestamp, %Producer{recovery_window_minutes: nil}, _now), do: timestamp
 

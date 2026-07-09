@@ -259,6 +259,32 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert Agent.get(attempts, & &1) >= 2
   end
 
+  test "a rejection response envelope schedules a retry", %{clock: clock} do
+    test_pid = self()
+    attempts = start_supervised!(%{id: :attempts, start: {Agent, :start_link, [fn -> 0 end]}})
+
+    throttled = fn product, opts ->
+      n = Agent.get_and_update(attempts, fn n -> {n, n + 1} end)
+      send(test_pid, {:recover_called, product, opts})
+
+      response_code = if n == 0, do: "FORBIDDEN", else: "ACCEPTED"
+      {:ok, %UOF.Schemas.Common.Response{response_code: response_code, message: "max requests exceeded"}}
+    end
+
+    m = start_monitor([recover_fun: throttled, min_interval_ms: 10], clock)
+    ProducerMonitor.alive(m, 1, 1_000, true)
+
+    # rejected request must not count as in-flight: no snapshot_complete is
+    # coming, so a retry (new request_id) has to be issued
+    assert_receive {:recover_called, "pre", first}, 200
+    assert_receive {:recover_called, "pre", second}, 500
+    assert second[:request_id] != first[:request_id]
+
+    # the accepted retry is the one snapshot_complete correlates against
+    ProducerMonitor.snapshot_complete(m, 1, second[:request_id])
+    assert_receive {:status, %Producer{id: 1, down?: false, reason: :first_recovery_completed}}
+  end
+
   test "stall guard reissues with the original :after timestamp", %{clock: clock} do
     CheckpointStore.ETS.put(1, @now - 60_000)
     m = start_monitor([now_fun: fn -> @now end, max_recovery_ms: 20], clock)

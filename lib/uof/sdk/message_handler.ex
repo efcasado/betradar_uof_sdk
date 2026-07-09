@@ -29,7 +29,6 @@ defmodule UOF.SDK.MessageHandler do
   @callback handle_rollback_bet_cancel(message :: map(), Context.t()) :: :ok
   @callback handle_rollback_bet_settlement(message :: map(), Context.t()) :: :ok
   @callback handle_fixture_change(message :: map(), Context.t()) :: :ok
-  @callback handle_alive(message :: map(), Context.t()) :: :ok
 
   @doc """
   Called whenever a producer's health changes (up/down, delayed, recovery). The
@@ -56,8 +55,6 @@ defmodule UOF.SDK.MessageHandler do
       @impl true
       def handle_fixture_change(_message, _context), do: :ok
       @impl true
-      def handle_alive(_message, _context), do: :ok
-      @impl true
       def handle_producer_status(_producer), do: :ok
 
       defoverridable handle_odds_change: 2,
@@ -67,7 +64,6 @@ defmodule UOF.SDK.MessageHandler do
                      handle_rollback_bet_cancel: 2,
                      handle_rollback_bet_settlement: 2,
                      handle_fixture_change: 2,
-                     handle_alive: 2,
                      handle_producer_status: 1
     end
   end

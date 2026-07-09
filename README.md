@@ -127,11 +127,14 @@ end
 | `handle_rollback_bet_cancel/2` | [Rollback Bet Cancel](https://docs.sportradar.com/uof/data-and-features/messages/event/rollback-bet-cancel) |
 | `handle_rollback_bet_settlement/2` | [Rollback Bet Settlements](https://docs.sportradar.com/uof/data-and-features/messages/event/rollback-bet-settlements) |
 | `handle_fixture_change/2` | [Fixture Change](https://docs.sportradar.com/uof/data-and-features/messages/event/fixture-change) |
-| `handle_alive/2` | [Alive](https://docs.sportradar.com/uof/data-and-features/messages/system/alive) |
 | `handle_producer_status/1` | SDK producer lifecycle state, derived from [alive](https://docs.sportradar.com/uof/data-and-features/messages/system/alive) and recovery handling |
 
 Every callback except `handle_producer_status/1` receives the decoded feed struct
 and a `UOF.SDK.Context` (`producer_id`, `event_urn`, `routing_key`, `message_type`).
+
+Raw `alive` messages are consumed internally for recovery, checkpointing, and
+producer health. Applications should use `handle_producer_status/1` instead of
+reacting to heartbeat traffic directly.
 
 > Return quickly from callbacks — a slow handler delays that event's later messages and may trigger a "slow processing" down. Offload heavy work asynchronously.
 

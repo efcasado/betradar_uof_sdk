@@ -85,7 +85,6 @@ defmodule UOF.SDK do
     [
       {SystemPipeline,
        name: SystemPipeline,
-       handler: config.handler,
        producer: config.system_producer,
        routing_key_metadata_key: config.routing_key_metadata_key,
        connection_token_metadata_key: config.connection_token_metadata_key,

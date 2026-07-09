@@ -5,13 +5,12 @@ defmodule UOF.SDKTest do
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.SystemPipeline
 
-  test "child_specs produces system and content pipelines with the configured handler and connection" do
+  test "child_specs produces system and content pipelines with the configured connection" do
     conn = [host: "stgmq.betradar.com", username: "tok", password: "", ssl_options: []]
     config = Config.load(handler: MyApp.Handler, connection: conn)
 
     assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
     assert system_opts[:name] == SystemPipeline
-    assert system_opts[:handler] == MyApp.Handler
     assert system_opts[:connection] == conn
     assert content_opts[:name] == ContentPipeline
     assert content_opts[:handler] == MyApp.Handler

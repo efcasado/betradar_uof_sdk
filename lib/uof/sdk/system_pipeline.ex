@@ -10,7 +10,6 @@ defmodule UOF.SDK.SystemPipeline do
   ## Options
 
     * `:name` (required) - pipeline name.
-    * `:handler` (required) - module implementing `UOF.SDK.MessageHandler`.
     * `:connection` - keyword list passed to `BroadwayRabbitMQ.Producer`.
       Ignored when `:producer` is set.
     * `:node_id` - integer identifying this SDK instance on a shared account.
@@ -29,7 +28,6 @@ defmodule UOF.SDK.SystemPipeline do
 
   alias Broadway.Message
   alias UOF.Schemas
-  alias UOF.SDK.Context
   alias UOF.SDK.RoutingKey
 
   require Logger
@@ -47,7 +45,6 @@ defmodule UOF.SDK.SystemPipeline do
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
-    handler = Keyword.fetch!(opts, :handler)
     routing_key_key = Keyword.get(opts, :routing_key_metadata_key, :routing_key)
     connection_token_key = Keyword.get(opts, :connection_token_metadata_key)
 
@@ -57,7 +54,6 @@ defmodule UOF.SDK.SystemPipeline do
       processors: [default: [concurrency: 1]],
       partition_by: &partition(&1, routing_key_key),
       context: %{
-        handler: handler,
         monitor: Keyword.get(opts, :monitor),
         routing_key_key: routing_key_key,
         connection_token_key: connection_token_key
@@ -71,14 +67,6 @@ defmodule UOF.SDK.SystemPipeline do
 
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
-        ctx = %Context{
-          producer_id: Map.get(decoded, :product),
-          message_type: rk.message_type,
-          routing_key: rk.raw,
-          event_urn: rk.event_urn
-        }
-
-        deliver(context.handler, rk.message_type, decoded, ctx)
         maybe_track_connection(context, rk.message_type, message)
         observe(context, rk, decoded)
         message
@@ -147,11 +135,6 @@ defmodule UOF.SDK.SystemPipeline do
 
   defp notify(nil, _fun, _args), do: :ok
   defp notify(mod, fun, args), do: apply(mod, fun, args)
-
-  ## delivery to the user handler --------------------------------------------
-
-  defp deliver(handler, "alive", msg, ctx), do: handler.handle_alive(msg, ctx)
-  defp deliver(_handler, _system_type, _msg, _ctx), do: :ok
 
   ## partitioning ------------------------------------------------------------
 

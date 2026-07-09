@@ -133,8 +133,6 @@ defmodule UOF.SDK.Pipeline do
 
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
-        maybe_track_connection(context, rk.message_type, message)
-
         ctx = %Context{
           producer_id: Map.get(decoded, :product),
           message_type: rk.message_type,
@@ -142,8 +140,9 @@ defmodule UOF.SDK.Pipeline do
           event_urn: rk.event_urn
         }
 
-        observe(context, rk.message_type, decoded)
         deliver(context.handler, rk.message_type, decoded, ctx)
+        maybe_track_connection(context, rk.message_type, message)
+        observe(context, rk.message_type, decoded)
         message
 
       {:error, reason} ->

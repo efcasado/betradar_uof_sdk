@@ -2,12 +2,13 @@ defmodule UOF.SDK.PipelineTest do
   use ExUnit.Case, async: false
 
   alias UOF.Schemas.Feed
+  alias UOF.SDK.MessageHandler
   alias UOF.SDK.Pipeline
 
   # Test handler: forwards every callback to the pid registered in app env.
   defmodule Handler do
     @moduledoc false
-    use UOF.SDK.MessageHandler
+    use MessageHandler
 
     @impl true
     def handle_odds_change(msg, ctx), do: notify({:odds_change, msg, ctx})
@@ -28,6 +29,14 @@ defmodule UOF.SDK.PipelineTest do
     def observe_connection(conn_pid), do: emit({:connection_sink, conn_pid})
 
     defp emit(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
+  end
+
+  defmodule RaisingHandler do
+    @moduledoc false
+    use MessageHandler
+
+    @impl true
+    def handle_odds_change(_msg, _ctx), do: raise("handler failed")
   end
 
   setup context do
@@ -121,6 +130,35 @@ defmodule UOF.SDK.PipelineTest do
     )
 
     assert_receive {:snapshot_sink, 3, 77}
+  end
+
+  test "does not checkpoint when handler delivery fails" do
+    name = Module.concat(__MODULE__, HandlerFailure)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {Pipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: RaisingHandler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink,
+             checkpoint_store: Sink
+           ]
+         ]}
+    })
+
+    ref =
+      Broadway.test_message(name, ~s(<odds_change product="3" event_id="sr:match:1" timestamp="99"/>),
+        metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-"}
+      )
+
+    assert_receive {:ack, ^ref, [], [_failed]}, 1_000
+    refute_received {:message_sink, 3, 99}
+    refute_received {:checkpoint_sink, 3, 99}
   end
 
   test "observes the AMQP connection pid for reconnect detection" do

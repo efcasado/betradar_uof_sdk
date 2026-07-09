@@ -218,10 +218,14 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:ok, %Producer{recovering?: false, delayed?: true}} = ProducerMonitor.producer(m, 1)
   end
 
-  test "observing a new connection recovers; same connection is deduped", %{clock: clock} do
+  test "startup connection recovery waits for both system and content namespaces", %{clock: clock} do
     m = start_monitor(clock)
 
     ProducerMonitor.observe_connection(m, {:system, :conn_a})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :conn_a})
     rid1 = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid1)
     assert_receive {:status, %Producer{down?: false}}
@@ -237,33 +241,46 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
-  test "first token from the second connection namespace only establishes its startup baseline", %{clock: clock} do
+  test "first token from the second connection namespace triggers one startup recovery", %{clock: clock} do
     m = start_monitor(clock)
 
     ProducerMonitor.observe_connection(m, {:system, :same_underlying_token})
+    sync(m)
+    refute_received {:status, %Producer{down?: true, reason: :connection_down}}
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :same_underlying_token})
     assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
     rid1 = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid1)
     assert_receive {:status, %Producer{down?: false}}
+  end
 
-    ProducerMonitor.observe_connection(m, {:content, :same_underlying_token})
+  test "same namespace token changes before startup is ready do not recover early", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, :system_a})
+    ProducerMonitor.observe_connection(m, {:system, :system_b})
     sync(m)
-    refute_received {:status, %Producer{down?: true, reason: :connection_down}}
     refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :content_a})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
   end
 
   test "token changes in either connection namespace trigger recovery after startup", %{clock: clock} do
     m = start_monitor(clock)
 
     ProducerMonitor.observe_connection(m, {:system, :system_a})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :content_a})
     assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
     rid1 = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid1)
     assert_receive {:status, %Producer{down?: false}}
-
-    ProducerMonitor.observe_connection(m, {:content, :content_a})
-    sync(m)
-    refute_received {:recover_called, _, _}
 
     ProducerMonitor.observe_connection(m, {:content, :content_b})
     assert_receive {:status, %Producer{down?: true, reason: :connection_down}}

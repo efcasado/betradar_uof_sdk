@@ -62,6 +62,7 @@ defmodule UOF.SDK.ProducerMonitor do
   @default_min_interval_ms 30_000
   @default_max_recovery_ms 5 * 60_000
   @default_recovery_overlap_ms 5 * 60_000
+  @startup_connection_count 2
 
   ## Client API ---------------------------------------------------------------
 
@@ -111,10 +112,10 @@ defmodule UOF.SDK.ProducerMonitor do
   @doc """
   Observe the AMQP connection a message arrived on.
 
-  The first observed connection token triggers startup recovery. The first token
-  from any later namespace only establishes its startup baseline; after that, a
-  token change in any namespace recovers every producer to close the message-gap
-  a reconnect leaves behind.
+  Startup recovery waits until both the system and content connection namespaces
+  have been observed, so replay starts only after both consumers are ready. After
+  startup, a token change in any namespace recovers every producer to close the
+  message-gap a reconnect leaves behind.
   """
   def observe_connection(server \\ __MODULE__, conn_pid) do
     GenServer.cast(server, {:observe_connection, conn_pid})
@@ -138,7 +139,6 @@ defmodule UOF.SDK.ProducerMonitor do
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       first_recovery_done: MapSet.new(),
       connection_tokens: %{},
-      connection_recovery_bootstrapped?: false,
       recover_fun: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
       checkpoint_store: Keyword.get(opts, :checkpoint_store, UOF.SDK.CheckpointStore.ETS),
       node_id: Keyword.get(opts, :node_id),
@@ -362,18 +362,13 @@ defmodule UOF.SDK.ProducerMonitor do
   defp notify(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
 
   defp track_connection(state, namespace, token) do
-    case Map.fetch(state.connection_tokens, namespace) do
-      {:ok, ^token} ->
-        {:ignore, state}
+    changed? = Map.get(state.connection_tokens, namespace) != token
+    state = put_connection_token(state, namespace, token)
 
-      {:ok, _old_token} ->
-        {:recover, put_connection_token(state, namespace, token)}
-
-      :error when state.connection_recovery_bootstrapped? ->
-        {:ignore, put_connection_token(state, namespace, token)}
-
-      :error ->
-        {:recover, %{put_connection_token(state, namespace, token) | connection_recovery_bootstrapped?: true}}
+    if changed? and map_size(state.connection_tokens) == @startup_connection_count do
+      {:recover, state}
+    else
+      {:ignore, state}
     end
   end
 

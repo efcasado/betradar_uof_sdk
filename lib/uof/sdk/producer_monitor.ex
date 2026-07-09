@@ -29,7 +29,8 @@ defmodule UOF.SDK.ProducerMonitor do
     * keeps at most one in-flight recovery per producer,
     * **reissues** with the *original* timestamp if no `snapshot_complete`
       arrives within `max_recovery_ms` (the stall guard),
-    * **retries** after `min_interval_ms` if the API call itself fails, and
+    * **retries** after `min_interval_ms` if the API call fails or the request
+      is rejected (a non-accepted `<response>` envelope), and
     * marks the producer up on the matching `snapshot_complete`.
 
   The defaults for `min_interval_ms` / `max_recovery_ms` mirror the official
@@ -38,6 +39,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   use GenServer
 
+  alias UOF.Schemas.Common.Response
   alias UOF.SDK.Producer
 
   require Logger
@@ -325,10 +327,21 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
+  # The HTTP layer decodes any parseable body — including rejection envelopes
+  # (throttling, 403) — into `{:ok, %Response{}}` without surfacing the status
+  # code, so acceptance must be checked here: mistaking a rejection for an
+  # in-flight recovery leaves the producer waiting on a `snapshot_complete`
+  # that was never scheduled.
   defp safe_recover(state, product, opts) do
     case state.recover_fun.(product, opts) do
-      {:ok, _response} -> :ok
-      {:error, reason} -> log_failure(inspect(reason))
+      {:ok, %Response{response_code: code} = response} when code != "ACCEPTED" ->
+        log_failure("#{code}: #{response.message || response.errors || "(no message)"}")
+
+      {:ok, _response} ->
+        :ok
+
+      {:error, reason} ->
+        log_failure(inspect(reason))
     end
   rescue
     exception -> log_failure(Exception.message(exception))

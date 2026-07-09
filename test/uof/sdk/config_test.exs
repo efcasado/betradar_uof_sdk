@@ -22,6 +22,27 @@ defmodule UOF.SDK.ConfigTest do
     assert config.checkpoint_store == MyApp.PgStore
   end
 
+  test "requires a system producer when the content producer is custom" do
+    assert_raise ArgumentError, ~r/:system_producer is required/, fn ->
+      Config.load(handler: MyApp.Handler, producer: {Broadway.DummyProducer, []})
+    end
+  end
+
+  test "accepts custom content and system producers" do
+    content_producer = {Broadway.DummyProducer, []}
+    system_producer = {Broadway.DummyProducer, transformer: :system}
+
+    config =
+      Config.load(
+        handler: MyApp.Handler,
+        producer: content_producer,
+        system_producer: system_producer
+      )
+
+    assert config.producer == content_producer
+    assert config.system_producer == system_producer
+  end
+
   test "stores node_id when provided" do
     config = Config.load(handler: MyApp.Handler, node_id: 42)
     assert config.node_id == 42

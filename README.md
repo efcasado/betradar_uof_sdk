@@ -20,25 +20,26 @@ Built on [Broadway](https://hexdocs.pm/broadway); depends on
 UOF.SDK
 ├── CheckpointStore   – last stable alive timestamp per producer
 ├── ProducerMonitor   – producer state, health monitoring, and recovery
-└── Pipeline          – AMQP consumer; decodes and dispatches messages
+├── SystemPipeline    – AMQP consumer for alive and snapshot_complete
+└── Pipeline          – AMQP consumer for event content
 ```
 
-Messages flow in one direction: the `Pipeline` receives raw AMQP messages, decodes
-the XML payload, and calls your `MessageHandler`. As a side-effect it notifies
-`ProducerMonitor` of each `alive` heartbeat, content-message timestamp, and
-`snapshot_complete`. Producer state lives entirely in `ProducerMonitor`'s GenServer
-state; `UOF.SDK.producers/0` goes through a `GenServer.call`.
+Messages flow in one direction: the pipelines receive raw AMQP messages, decode
+the XML payload, and call your `MessageHandler`. `SystemPipeline` owns system
+traffic (`alive`, `snapshot_complete`) and notifies `ProducerMonitor` for
+recovery/checkpoint lifecycle. `Pipeline` owns event content and only reports
+content timestamps for lag detection. Producer state lives entirely in
+`ProducerMonitor`'s GenServer state; `UOF.SDK.producers/0` goes through a
+`GenServer.call`.
 
 ## Configuration
 
 > [!NOTE]
-> The SDK uses [`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html) by default. Set `:producer` to use a
-> custom Broadway producer instead (e.g. Pulsar), and omit `:connection`. With a
-> custom producer, two settings matter: `:routing_key_metadata_key` (the metadata
-> field carrying the UOF routing key — partitioning, dispatch, and lifecycle all
-> derive from it) and `:connection_token_metadata_key` (a per-connection token for
-> reconnect detection; without it, micro-disconnections may go unnoticed and leave
-> a message gap silently unfilled).
+> The SDK uses [`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html) by default. Set `:producer` for event
+> content and `:system_producer` for system messages when using a custom
+> transport such as Pulsar. `:routing_key_metadata_key` must point at the
+> original UOF routing key, and `:connection_token_metadata_key` can provide a
+> per-connection token for reconnect detection on the system pipeline.
 
 ```elixir
 config :uof_sdk,
@@ -65,9 +66,10 @@ derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 | Option | Default | Notes |
 |--------|---------|-------|
 | `:handler` | — (required) | Your `UOF.SDK.MessageHandler` module |
-| `:connection` | `[]` | `BroadwayRabbitMQ.Producer` connection options (ignored when `:producer` is set) |
+| `:connection` | `[]` | `BroadwayRabbitMQ.Producer` connection options for default pipelines |
 | `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
-| `:producer` | `nil` | Custom Broadway producer spec; overrides `:connection` |
+| `:producer` | `nil` | Custom Broadway producer spec for event content; overrides `:connection` for `Pipeline` |
+| `:system_producer` | `nil` | Custom Broadway producer spec for `alive` / `snapshot_complete`; overrides `:connection` for `SystemPipeline` |
 | `:routing_key_metadata_key` | `:routing_key` | Metadata field carrying the UOF routing key (custom producers only) |
 | `:connection_token_metadata_key` | `nil` | Metadata field carrying a per-connection token for reconnect detection (custom producers only) |
 | `:checkpoint_store` | `UOF.SDK.CheckpointStore.ETS` | Recovery checkpoint persistence |
@@ -79,6 +81,10 @@ derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 | `:recovery_overlap_seconds` | `300` | Seconds subtracted from the stored checkpoint when requesting incremental recovery |
 
 > Recovery throttling defaults follow the official SDK guidance. `:recovery_overlap_seconds` is specific to this SDK and should be tuned for your deployment.
+
+When `:producer` is configured, `:system_producer` is required too. The two
+streams must not share a Key-Shared subscription, otherwise content and system
+messages can be delivered to the wrong Broadway pipeline and be ignored.
 
 ## Usage
 

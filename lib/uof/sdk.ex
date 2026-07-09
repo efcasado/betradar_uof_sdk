@@ -17,9 +17,9 @@ defmodule UOF.SDK do
   override per start.
 
   It supervises (in order, with `:rest_for_one`) the checkpoint store, producer
-  monitor, and one `UOF.SDK.Pipeline` per configured session. Producer state is
-  managed entirely within `UOF.SDK.ProducerMonitor`'s GenServer state — no
-  separate registry process is needed.
+  monitor, a system-message pipeline, and a content-message pipeline. Producer
+  state is managed entirely within `UOF.SDK.ProducerMonitor`'s GenServer state
+  — no separate registry process is needed.
   """
 
   use Supervisor
@@ -29,6 +29,7 @@ defmodule UOF.SDK do
   alias UOF.SDK.Producer
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.Producers
+  alias UOF.SDK.SystemPipeline
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -76,12 +77,21 @@ defmodule UOF.SDK do
   end
 
   @doc """
-  Build the feed pipeline child spec for a resolved `config`. Exposed so the
+  Build the feed pipeline child specs for a resolved `config`. Exposed so the
   wiring (bindings, connection) can be inspected/tested without connecting.
   """
   @spec child_specs(Config.t()) :: [Supervisor.child_spec()]
   def child_specs(%Config{} = config) do
     [
+      {SystemPipeline,
+       name: SystemPipeline,
+       handler: config.handler,
+       producer: config.system_producer,
+       routing_key_metadata_key: config.routing_key_metadata_key,
+       connection_token_metadata_key: config.connection_token_metadata_key,
+       connection: config.connection,
+       node_id: config.node_id,
+       monitor: ProducerMonitor},
       {Pipeline,
        name: Pipeline,
        handler: config.handler,

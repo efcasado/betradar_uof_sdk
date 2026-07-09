@@ -21,12 +21,13 @@ defmodule UOF.SDK.Config do
       config :uof_sdk,
         handler: MyApp.FeedHandler,
         node_id: 1,
-        producer: {MyPulsarProducer, topic: "uof-feed"},
+        producer: {MyPulsarProducer, topic: "uof-feed-content"},
+        system_producer: {MyPulsarProducer, topic: "uof-feed-system"},
         routing_key_metadata_key: :pulsar_key
 
   `:connection` is passed directly to `BroadwayRabbitMQ.Producer` and is
-  ignored when `:producer` is set. No fields are derived or defaulted — what
-  you pass is exactly what the broker sees.
+  ignored when `:producer` or `:system_producer` is set. No fields are derived
+  or defaulted — what you pass is exactly what the broker sees.
   """
 
   alias UOF.SDK.CheckpointStore.ETS
@@ -37,6 +38,7 @@ defmodule UOF.SDK.Config do
           handler: module(),
           node_id: integer() | nil,
           producer: {module(), keyword()} | module() | nil,
+          system_producer: {module(), keyword()} | module() | nil,
           connection: keyword(),
           routing_key_metadata_key: atom(),
           connection_token_metadata_key: atom() | nil,
@@ -53,6 +55,7 @@ defmodule UOF.SDK.Config do
     :handler,
     :node_id,
     :producer,
+    :system_producer,
     :connection_token_metadata_key,
     connection: [],
     routing_key_metadata_key: :routing_key,
@@ -72,11 +75,20 @@ defmodule UOF.SDK.Config do
   @spec load(keyword()) :: t()
   def load(overrides \\ []) do
     cfg = Keyword.merge(Application.get_all_env(@otp_app), overrides)
+    producer = Keyword.get(cfg, :producer)
+    system_producer = Keyword.get(cfg, :system_producer)
+
+    if producer && is_nil(system_producer) do
+      raise ArgumentError,
+            ":system_producer is required when :producer is set; " <>
+              "system messages must be consumed separately from event content"
+    end
 
     %__MODULE__{
       handler: fetch!(cfg, :handler),
       node_id: Keyword.get(cfg, :node_id),
-      producer: Keyword.get(cfg, :producer),
+      producer: producer,
+      system_producer: system_producer,
       connection: Keyword.get(cfg, :connection, []),
       routing_key_metadata_key: Keyword.get(cfg, :routing_key_metadata_key, :routing_key),
       connection_token_metadata_key: Keyword.get(cfg, :connection_token_metadata_key),

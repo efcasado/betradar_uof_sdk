@@ -31,10 +31,16 @@ defmodule UOF.SDK.ConfigTest do
     defaults = Config.load(handler: MyApp.Handler)
     assert defaults.inactivity_seconds == 20
     assert defaults.max_processing_delay_seconds == 20
+    assert defaults.recovery_overlap_seconds == 300
 
     tuned = Config.load(handler: MyApp.Handler, max_processing_delay_seconds: 45)
     assert tuned.max_processing_delay_seconds == 45
     assert tuned.inactivity_seconds == 20
+  end
+
+  test "accepts a recovery overlap override" do
+    config = Config.load(handler: MyApp.Handler, recovery_overlap_seconds: 900)
+    assert config.recovery_overlap_seconds == 900
   end
 
   test "defaults concurrency to 10 and accepts an override" do

@@ -68,7 +68,8 @@ defmodule UOF.SDK do
        node_id: config.node_id,
        checkpoint_store: config.checkpoint_store,
        min_interval_ms: config.min_interval_between_recoveries * 1_000,
-       max_recovery_ms: config.max_recovery_time * 1_000}
+       max_recovery_ms: config.max_recovery_time * 1_000,
+       recovery_overlap_ms: config.recovery_overlap_seconds * 1_000}
     ]
 
     Supervisor.init(lifecycle ++ child_specs(config), strategy: :rest_for_one)
@@ -90,8 +91,7 @@ defmodule UOF.SDK do
        connection_token_metadata_key: config.connection_token_metadata_key,
        connection: config.connection,
        node_id: config.node_id,
-       monitor: ProducerMonitor,
-       checkpoint_store: config.checkpoint_store}
+       monitor: ProducerMonitor}
     ]
   end
 end

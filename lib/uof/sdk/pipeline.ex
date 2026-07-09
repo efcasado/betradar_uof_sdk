@@ -25,9 +25,9 @@ defmodule UOF.SDK.Pipeline do
     * `:producer` — a custom Broadway producer spec, overriding the built-in
       `BroadwayRabbitMQ.Producer`. Tests pass `{Broadway.DummyProducer, []}`;
       see "Custom producers" below for rolling your own transport.
-    * `:monitor` / `:checkpoint_store` — modules that receive the lifecycle
-      side-effects (`alive`, content timestamps, `snapshot_complete`). Default
-      `nil`, in which case messages are only delivered to the handler.
+    * `:monitor` — module that receives the lifecycle side-effects (`alive`,
+      content timestamps, `snapshot_complete`). Default `nil`, in which case
+      messages are only delivered to the handler.
     * `:routing_key_metadata_key` — the `message.metadata` field carrying the
       UOF routing key (default `:routing_key`). See "Custom producers".
     * `:connection_token_metadata_key` — the `message.metadata` field carrying a
@@ -120,7 +120,6 @@ defmodule UOF.SDK.Pipeline do
       context: %{
         handler: handler,
         monitor: Keyword.get(opts, :monitor),
-        checkpoint_store: Keyword.get(opts, :checkpoint_store),
         routing_key_key: routing_key_key,
         connection_token_key: connection_token_key
       }
@@ -142,7 +141,7 @@ defmodule UOF.SDK.Pipeline do
 
         deliver(context.handler, rk.message_type, decoded, ctx)
         maybe_track_connection(context, rk.message_type, message)
-        observe(context, rk.message_type, decoded)
+        observe(context, rk, decoded)
         message
 
       {:error, reason} ->
@@ -183,27 +182,22 @@ defmodule UOF.SDK.Pipeline do
 
   ## lifecycle side-effects --------------------------------------------------
 
-  defp observe(ctx, "alive", msg) do
+  defp observe(ctx, %RoutingKey{message_type: "alive"}, msg) do
     notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
-    checkpoint(ctx, msg.product, msg.timestamp)
   end
 
-  defp observe(ctx, "snapshot_complete", msg) do
+  defp observe(ctx, %RoutingKey{message_type: "snapshot_complete"}, msg) do
     notify(ctx.monitor, :snapshot_complete, [msg.product, msg.request_id])
   end
 
-  defp observe(ctx, _content_type, msg) do
+  defp observe(ctx, %RoutingKey{}, msg) do
     product = Map.get(msg, :product)
     timestamp = Map.get(msg, :timestamp)
 
     if product && timestamp do
       notify(ctx.monitor, :message, [product, timestamp])
-      checkpoint(ctx, product, timestamp)
     end
   end
-
-  defp checkpoint(%{checkpoint_store: nil}, _product, _timestamp), do: :ok
-  defp checkpoint(%{checkpoint_store: store}, product, timestamp), do: store.put(product, timestamp)
 
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 

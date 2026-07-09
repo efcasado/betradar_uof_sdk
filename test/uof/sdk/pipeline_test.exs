@@ -18,14 +18,12 @@ defmodule UOF.SDK.PipelineTest do
     defp notify(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
   end
 
-  # One module standing in for monitor + recovery + checkpoint store; the
-  # function names don't collide, so the pipeline can target it for all three.
+  # One module standing in for monitor/recovery lifecycle notifications.
   defmodule Sink do
     @moduledoc false
     def alive(product, ts, subscribed?), do: emit({:alive_sink, product, ts, subscribed?})
     def message(product, ts), do: emit({:message_sink, product, ts})
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
-    def put(product, ts), do: emit({:checkpoint_sink, product, ts})
     def observe_connection(conn_pid), do: emit({:connection_sink, conn_pid})
 
     defp emit(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
@@ -89,7 +87,7 @@ defmodule UOF.SDK.PipelineTest do
     assert_receive {:ack, ^ref, [], [_failed]}, 1_000
   end
 
-  test "routes lifecycle side-effects to monitor/recovery/checkpoint" do
+  test "routes lifecycle side-effects to monitor/recovery" do
     name = Module.concat(__MODULE__, Sinks)
 
     start_link_supervised!(%{
@@ -102,27 +100,24 @@ defmodule UOF.SDK.PipelineTest do
              handler: Handler,
              concurrency: 1,
              producer: {Broadway.DummyProducer, []},
-             monitor: Sink,
-             checkpoint_store: Sink
+             monitor: Sink
            ]
          ]}
     })
 
-    # alive -> monitor.alive + checkpoint
+    # alive -> monitor.alive
     Broadway.test_message(name, ~s(<alive product="1" timestamp="42" subscribed="1"/>),
       metadata: %{routing_key: "-.-.-.alive.-.-.-.-"}
     )
 
     assert_receive {:alive_sink, 1, 42, true}
-    assert_receive {:checkpoint_sink, 1, 42}
 
-    # content message -> monitor.message + checkpoint
+    # content message -> monitor.message
     Broadway.test_message(name, ~s(<odds_change product="3" event_id="sr:match:1" timestamp="99"/>),
       metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-"}
     )
 
     assert_receive {:message_sink, 3, 99}
-    assert_receive {:checkpoint_sink, 3, 99}
 
     # snapshot_complete -> monitor.snapshot_complete
     Broadway.test_message(name, ~s(<snapshot_complete product="3" timestamp="1" request_id="77"/>),
@@ -132,7 +127,7 @@ defmodule UOF.SDK.PipelineTest do
     assert_receive {:snapshot_sink, 3, 77}
   end
 
-  test "does not checkpoint when handler delivery fails" do
+  test "does not notify lifecycle side-effects when handler delivery fails" do
     name = Module.concat(__MODULE__, HandlerFailure)
 
     start_link_supervised!(%{
@@ -145,8 +140,7 @@ defmodule UOF.SDK.PipelineTest do
              handler: RaisingHandler,
              concurrency: 1,
              producer: {Broadway.DummyProducer, []},
-             monitor: Sink,
-             checkpoint_store: Sink
+             monitor: Sink
            ]
          ]}
     })
@@ -158,7 +152,6 @@ defmodule UOF.SDK.PipelineTest do
 
     assert_receive {:ack, ^ref, [], [_failed]}, 1_000
     refute_received {:message_sink, 3, 99}
-    refute_received {:checkpoint_sink, 3, 99}
   end
 
   test "observes the AMQP connection pid for reconnect detection" do

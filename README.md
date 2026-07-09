@@ -76,6 +76,7 @@ derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 | `:max_processing_delay_seconds` | `20` | Consumer-lag threshold before a producer is marked `delayed?` (no recovery) |
 | `:min_interval_between_recoveries` | `30` | Recovery cooldown (seconds) |
 | `:max_recovery_time` | `3600` | Stall deadline before reissuing recovery (seconds) |
+| `:recovery_overlap_seconds` | `300` | Seconds subtracted from the stored checkpoint when requesting incremental recovery |
 
 > Recovery defaults mirror the official SDK. Change with care — see Betradar's recovery docs on throttling.
 
@@ -171,7 +172,7 @@ safe to act on. A gap in the message stream — on first connect, reconnect, or
 alive heartbeat timeout — leaves local state out of sync with the remote producer.
 When a gap is detected, the SDK:
 
-1. Reads `CheckpointStore` for the last processed timestamp for that producer.
+1. Reads `CheckpointStore` for the last stable alive timestamp for that producer.
 2. Issues a `UOF.API.Recovery.recover/2` call with a unique `request_id` —
    incremental (from the checkpoint timestamp) if one exists, full otherwise.
 3. Betradar replays the missing messages back over the same AMQP feed.
@@ -182,11 +183,16 @@ A stall guard (`:max_recovery_time`) reissues the request if no
 `snapshot_complete` arrives within the deadline, preserving the original
 timestamp so no messages are skipped on retry.
 
-**Checkpoints** are the timestamp of the last processed message per producer.
-With a valid checkpoint, recovery is incremental — only missed messages are
-replayed. Without one, a full recovery is issued. To persist checkpoints across
-VM restarts, implement the `UOF.SDK.CheckpointStore` behaviour (`get/1`, `put/2`,
-`delete/1`) and configure it:
+**Checkpoints** are owned by `ProducerMonitor` and are advanced from subscribed
+`alive` heartbeats after the producer is already in sync. Content messages do
+not write checkpoints directly. On recovery, the SDK subtracts
+`:recovery_overlap_seconds` from the stored checkpoint before requesting
+incremental recovery. This intentionally replays a bounded amount of data to
+cover concurrent processing and distributed-consumer skew; handlers should be
+idempotent and tolerate duplicates. Without a checkpoint, a full recovery is
+issued. To persist checkpoints across VM restarts, implement the
+`UOF.SDK.CheckpointStore` behaviour (`get/1`, `put/2`, `delete/1`) and configure
+it:
 
 ```elixir
 config :uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore

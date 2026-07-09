@@ -14,28 +14,16 @@ defmodule UOF.SDK.ContentPipeline do
     * `:name` (required) — pipeline name.
     * `:handler` (required) — module implementing `UOF.SDK.MessageHandler`.
     * `:concurrency` — processor concurrency (default `10`).
-    * `:connection` — keyword list passed verbatim to `BroadwayRabbitMQ.Producer`
-      as its `:connection` option. Typically includes `:host`, `:username`,
-      `:password`, `:virtual_host`, `:ssl_options`. Ignored when `:producer`
-      is set.
-    * `:node_id` — integer identifying this SDK instance on a shared account.
-      Used to scope the AMQP queue bindings and recovery requests. When set,
-      the queue subscribes only to broadcast (`-`) and this node's content
-      messages.
-    * `:producer` — a custom Broadway producer spec, overriding the built-in
-      `BroadwayRabbitMQ.Producer`. Tests pass `{Broadway.DummyProducer, []}`;
-      see "Custom producers" below for rolling your own transport.
+    * `:producer` — Broadway producer spec for event content.
     * `:monitor` — module that receives content timestamp side-effects.
       Default `nil`, in which case messages are only delivered to the handler.
     * `:routing_key_metadata_key` — the `message.metadata` field carrying the
       UOF routing key (default `:routing_key`). See "Custom producers".
 
-  ## Custom producers
+  ## Producer contract
 
-  The default `BroadwayRabbitMQ.Producer` is what Betradar's docs recommend, but
-  any Broadway producer works (e.g. an `off_broadway_*` producer fed by a
-  RabbitMQ source connector). Pass it as `:producer` (`{Module, opts}`). A custom
-  producer must honour this contract — it's the whole interface:
+  The SDK derives the producer spec from `UOF.SDK.Config` transport settings.
+  The producer must honour this contract:
 
     1. **Routing key in `message.metadata`** (a binary). Dispatch, partitioning
        and content timestamp observation derive from it (`UOF.SDK.RoutingKey`);
@@ -106,7 +94,7 @@ defmodule UOF.SDK.ContentPipeline do
 
     Broadway.start_link(__MODULE__,
       name: name,
-      producer: [module: build_producer(opts), concurrency: 1],
+      producer: [module: Keyword.fetch!(opts, :producer), concurrency: 1],
       processors: [default: [concurrency: concurrency]],
       # `partition_by` runs in the producer's dispatcher (no context), so the
       # routing-key field is captured in the closure rather than read from context.
@@ -246,50 +234,5 @@ defmodule UOF.SDK.ContentPipeline do
       rk when is_binary(rk) -> rk
       _ -> ""
     end
-  end
-
-  ## producer ----------------------------------------------------------------
-
-  # The unifiedfeed topic exchange on Betradar's AMQP broker.
-  @exchange "unifiedfeed"
-
-  defp build_producer(opts) do
-    case Keyword.get(opts, :producer) do
-      nil ->
-        {BroadwayRabbitMQ.Producer,
-         queue: "",
-         connection: Keyword.get(opts, :connection, []),
-         declare: [exclusive: true, auto_delete: true],
-         bindings: feed_bindings(Keyword.get(opts, :node_id)),
-         on_failure: :reject,
-         metadata: [:routing_key, :redelivered, :delivery_tag]}
-
-      producer ->
-        producer
-    end
-  end
-
-  defp feed_bindings(node_id) when is_integer(node_id) and node_id > 0 do
-    [
-      {@exchange, routing_key: "-.-.-.alive.#"}
-      | Enum.flat_map(@content_message_types, fn type ->
-          [
-            {@exchange, routing_key: "*.*.*.#{type}.*.*.*.-.#"},
-            {@exchange, routing_key: "*.*.*.#{type}.*.*.*.#{node_id}.#"}
-          ]
-        end)
-    ]
-  end
-
-  defp feed_bindings(_node_id) do
-    [
-      {@exchange, routing_key: "-.-.-.alive.#"}
-      | Enum.flat_map(@content_message_types, fn type ->
-          [
-            {@exchange, routing_key: "*.*.*.#{type}.*.*.*.-.#"},
-            {@exchange, routing_key: "*.*.*.#{type}.*.*.*.#"}
-          ]
-        end)
-    ]
   end
 end

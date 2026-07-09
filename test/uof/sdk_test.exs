@@ -5,23 +5,19 @@ defmodule UOF.SDKTest do
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.SystemPipeline
 
-  test "child_specs produces system and content pipelines with the configured connection" do
+  test "child_specs passes normalized producer specs to system and content pipelines" do
     conn = [host: "stgmq.betradar.com", username: "tok", password: "", ssl_options: []]
-    config = Config.load(handler: MyApp.Handler, connection: conn)
+    config = Config.load(handler: MyApp.Handler, transport: {:amqp, connection: conn})
 
     assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
     assert system_opts[:name] == SystemPipeline
-    assert system_opts[:connection] == conn
+    assert {BroadwayRabbitMQ.Producer, system_producer_opts} = system_opts[:producer]
+    assert system_producer_opts[:connection] == conn
+
     assert content_opts[:name] == ContentPipeline
     assert content_opts[:handler] == MyApp.Handler
-    assert content_opts[:connection] == conn
-  end
-
-  test "child_specs passes node_id through to both pipelines" do
-    config = Config.load(handler: MyApp.Handler, node_id: 7)
-    [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
-    assert system_opts[:node_id] == 7
-    assert content_opts[:node_id] == 7
+    assert {BroadwayRabbitMQ.Producer, content_producer_opts} = content_opts[:producer]
+    assert content_producer_opts[:connection] == conn
   end
 
   test "child_specs passes concurrency through to the content pipeline" do
@@ -33,21 +29,5 @@ defmodule UOF.SDKTest do
     config = Config.load(handler: MyApp.Handler, concurrency: 50)
     [{SystemPipeline, _system}, {ContentPipeline, opts}] = UOF.SDK.child_specs(config)
     assert opts[:concurrency] == 50
-  end
-
-  test "child_specs passes custom producer specs through unchanged" do
-    content_producer = {Broadway.DummyProducer, []}
-    system_producer = {Broadway.DummyProducer, transformer: :system}
-
-    config =
-      Config.load(
-        handler: MyApp.Handler,
-        producer: content_producer,
-        system_producer: system_producer
-      )
-
-    [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
-    assert system_opts[:producer] == system_producer
-    assert content_opts[:producer] == content_producer
   end
 end

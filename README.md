@@ -37,23 +37,22 @@ freshness markers for quiet producers. Producer state lives entirely in
 ## Configuration
 
 > [!NOTE]
-> The SDK uses [`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html) by default. Set `:producer` for event
-> content and `:system_producer` for system messages when using a custom
-> transport such as Pulsar. `:routing_key_metadata_key` must point at the
-> original UOF routing key, and `:connection_token_metadata_key` can provide a
-> per-connection token for reconnect detection on both pipelines.
+> Configure one transport. The SDK derives the separate Broadway producers it
+> needs for content and system messages.
 
 ```elixir
 config :uof_sdk,
   handler: MyApp.FeedHandler,
   node_id: 1,
-  connection: [
-    host: "stgmq.betradar.com",
-    username: System.get_env("UOF_ACCESS_TOKEN"),
-    password: "",
-    virtual_host: "/unifiedfeed/12345",
-    ssl_options: []
-  ]
+  transport: {:amqp,
+    connection: [
+      host: "stgmq.betradar.com",
+      username: System.get_env("UOF_ACCESS_TOKEN"),
+      password: "",
+      virtual_host: "/unifiedfeed/12345",
+      ssl_options: []
+    ]
+  }
 
 # The HTTP client (recovery + producer descriptions)
 config :uof_api,
@@ -61,19 +60,38 @@ config :uof_api,
   auth_token: System.get_env("UOF_ACCESS_TOKEN")
 ```
 
-`:connection` is passed verbatim to `BroadwayRabbitMQ.Producer` — no fields are
-derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
+For AMQP, `transport: {:amqp, connection: [...]}` is passed verbatim to
+[`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html)
+for both pipelines, with SDK-owned bindings for content and system traffic.
+Known Betradar AMQP hosts: `mq.betradar.com` (production),
 `stgmq.betradar.com` (integration), `replaymq.betradar.com` (replay).
+Applications using AMQP must include `{:broadway_rabbitmq, "~> 0.8"}` in their
+own dependencies.
+
+For Pulsar, configure one topic and base subscription. The SDK derives the
+content subscription as Key-Shared and the system subscription as Failover:
+
+```elixir
+config :uof_sdk,
+  handler: MyApp.FeedHandler,
+  node_id: 1,
+  transport: {:pulsar,
+    host: "pulsar://localhost:6650",
+    topic: "uof-feed",
+    subscription: "uof-sdk",
+    routing_key_metadata_key: :pulsar_key,
+    connection_token_metadata_key: :pulsar_connection
+  }
+```
+
+Applications using Pulsar must include `{:off_broadway_pulsar, "~> 1.4"}` in
+their own dependencies.
 
 | Option | Default | Notes |
 |--------|---------|-------|
 | `:handler` | — (required) | Your `UOF.SDK.MessageHandler` module |
-| `:connection` | `[]` | `BroadwayRabbitMQ.Producer` connection options for default pipelines |
+| `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}` |
 | `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
-| `:producer` | `nil` | Custom Broadway producer spec for event content; overrides `:connection` for `ContentPipeline` |
-| `:system_producer` | `nil` | Custom Broadway producer spec for `alive` / `snapshot_complete`; overrides `:connection` for `SystemPipeline` |
-| `:routing_key_metadata_key` | `:routing_key` | Metadata field carrying the UOF routing key (custom producers only) |
-| `:connection_token_metadata_key` | `nil` | Metadata field carrying a per-connection token for reconnect detection (custom producers only) |
 | `:checkpoint_store` | `UOF.SDK.CheckpointStore.ETS` | Recovery checkpoint persistence |
 | `:concurrency` | `10` | Broadway processor concurrency per feed session |
 | `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |
@@ -84,11 +102,10 @@ derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 
 > Recovery throttling defaults follow the official SDK guidance. `:recovery_overlap_seconds` is specific to this SDK and should be tuned for your deployment.
 
-When either custom producer is configured, both `:producer` and
-`:system_producer` are required. The content stream must receive event messages;
-the system stream must receive `alive` and `snapshot_complete`. These streams
-must not share a Key-Shared subscription, otherwise messages can be delivered to
-the wrong Broadway pipeline and be ignored.
+For Pulsar transports, `:routing_key_metadata_key` must point at the original
+UOF routing key in the Broadway message metadata. `:connection_token_metadata_key`
+can point at a per-connection token used for reconnect detection on both
+pipelines.
 
 ## Usage
 

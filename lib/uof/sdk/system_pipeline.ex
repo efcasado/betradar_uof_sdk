@@ -10,11 +10,7 @@ defmodule UOF.SDK.SystemPipeline do
   ## Options
 
     * `:name` (required) - pipeline name.
-    * `:connection` - keyword list passed to `BroadwayRabbitMQ.Producer`.
-      Ignored when `:producer` is set.
-    * `:node_id` - integer identifying this SDK instance on a shared account.
-      Used to scope `snapshot_complete` messages to this node.
-    * `:producer` - a custom Broadway producer spec for system messages.
+    * `:producer` - Broadway producer spec for system messages.
     * `:monitor` - module that receives lifecycle side-effects (`alive` and
       `snapshot_complete`). Default `nil`.
     * `:routing_key_metadata_key` - the `message.metadata` field carrying the
@@ -50,7 +46,7 @@ defmodule UOF.SDK.SystemPipeline do
 
     Broadway.start_link(__MODULE__,
       name: name,
-      producer: [module: build_producer(opts), concurrency: 1],
+      producer: [module: Keyword.fetch!(opts, :producer), concurrency: 1],
       processors: [default: [concurrency: 1]],
       partition_by: &partition(&1, routing_key_key),
       context: %{
@@ -151,39 +147,5 @@ defmodule UOF.SDK.SystemPipeline do
       rk when is_binary(rk) -> rk
       _ -> ""
     end
-  end
-
-  ## producer ----------------------------------------------------------------
-
-  @exchange "unifiedfeed"
-
-  defp build_producer(opts) do
-    case Keyword.get(opts, :producer) do
-      nil ->
-        {BroadwayRabbitMQ.Producer,
-         queue: "",
-         connection: Keyword.get(opts, :connection, []),
-         declare: [exclusive: true, auto_delete: true],
-         bindings: system_bindings(Keyword.get(opts, :node_id)),
-         on_failure: :reject,
-         metadata: [:routing_key, :redelivered, :delivery_tag]}
-
-      producer ->
-        producer
-    end
-  end
-
-  defp system_bindings(node_id) when is_integer(node_id) and node_id > 0 do
-    [
-      {@exchange, routing_key: "-.-.-.alive.#"},
-      {@exchange, routing_key: "-.-.-.snapshot_complete.*.*.*.#{node_id}.#"}
-    ]
-  end
-
-  defp system_bindings(_node_id) do
-    [
-      {@exchange, routing_key: "-.-.-.alive.#"},
-      {@exchange, routing_key: "-.-.-.snapshot_complete.#"}
-    ]
   end
 end

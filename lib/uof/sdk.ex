@@ -78,7 +78,7 @@ defmodule UOF.SDK do
 
   @doc """
   Build the feed pipeline child specs for a resolved `config`. Exposed so the
-  wiring (bindings, connection) can be inspected/tested without connecting.
+  normalized transport wiring can be inspected/tested without connecting.
   """
   @spec child_specs(Config.t()) :: [Supervisor.child_spec()]
   def child_specs(%Config{} = config) do
@@ -88,18 +88,14 @@ defmodule UOF.SDK do
        producer: config.system_producer,
        routing_key_metadata_key: config.routing_key_metadata_key,
        connection_token_metadata_key: config.connection_token_metadata_key,
-       connection: config.connection,
-       node_id: config.node_id,
        monitor: ProducerMonitor},
       {ContentPipeline,
        name: ContentPipeline,
        handler: config.handler,
        concurrency: config.concurrency,
-       producer: config.producer,
+       producer: config.content_producer,
        routing_key_metadata_key: config.routing_key_metadata_key,
        connection_token_metadata_key: config.connection_token_metadata_key,
-       connection: config.connection,
-       node_id: config.node_id,
        monitor: ProducerMonitor}
     ]
   end

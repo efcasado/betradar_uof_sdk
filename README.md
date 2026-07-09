@@ -18,7 +18,7 @@ Built on [Broadway](https://hexdocs.pm/broadway); depends on
 
 ```
 UOF.SDK
-├── CheckpointStore   – last-seen feed timestamp per producer
+├── CheckpointStore   – last stable alive timestamp per producer
 ├── ProducerMonitor   – producer state, health monitoring, and recovery
 └── Pipeline          – AMQP consumer; decodes and dispatches messages
 ```
@@ -78,7 +78,7 @@ derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 | `:max_recovery_time` | `3600` | Stall deadline before reissuing recovery (seconds) |
 | `:recovery_overlap_seconds` | `300` | Seconds subtracted from the stored checkpoint when requesting incremental recovery |
 
-> Recovery defaults mirror the official SDK. Change with care — see Betradar's recovery docs on throttling.
+> Recovery throttling defaults follow the official SDK guidance. `:recovery_overlap_seconds` is specific to this SDK and should be tuned for your deployment.
 
 ## Usage
 
@@ -110,17 +110,17 @@ defmodule MyApp.FeedHandler do
 end
 ```
 
-| Callback | When it fires |
-|----------|---------------|
-| `handle_odds_change/2` | Odds updated for a sport event |
-| `handle_bet_settlement/2` | Markets settled after an event |
-| `handle_bet_stop/2` | Betting suspended on a market |
-| `handle_bet_cancel/2` | Bets cancelled on a market |
-| `handle_rollback_bet_cancel/2` | Cancellation rolled back |
-| `handle_rollback_bet_settlement/2` | Settlement rolled back |
-| `handle_fixture_change/2` | Fixture metadata changed |
-| `handle_alive/2` | Heartbeat from the producer (~10 s cadence) |
-| `handle_producer_status/1` | Producer health changed (up / down / recovering) |
+| Callback | Source / concept |
+|----------|------------------|
+| `handle_odds_change/2` | [Odds Change](https://docs.sportradar.com/uof/data-and-features/messages/event/odds-change) |
+| `handle_bet_settlement/2` | [Bet Settlement](https://docs.sportradar.com/uof/data-and-features/messages/event/bet-settlement) |
+| `handle_bet_stop/2` | [Bet Stop](https://docs.sportradar.com/uof/data-and-features/messages/event/bet-stop) |
+| `handle_bet_cancel/2` | [Bet Cancel](https://docs.sportradar.com/uof/data-and-features/messages/event/bet-cancel) |
+| `handle_rollback_bet_cancel/2` | [Rollback Bet Cancel](https://docs.sportradar.com/uof/data-and-features/messages/event/rollback-bet-cancel) |
+| `handle_rollback_bet_settlement/2` | [Rollback Bet Settlements](https://docs.sportradar.com/uof/data-and-features/messages/event/rollback-bet-settlements) |
+| `handle_fixture_change/2` | [Fixture Change](https://docs.sportradar.com/uof/data-and-features/messages/event/fixture-change) |
+| `handle_alive/2` | [Alive](https://docs.sportradar.com/uof/data-and-features/messages/system/alive) |
+| `handle_producer_status/1` | SDK producer lifecycle state, derived from [alive](https://docs.sportradar.com/uof/data-and-features/messages/system/alive) and recovery handling |
 
 Every callback except `handle_producer_status/1` receives the decoded feed struct
 and a `UOF.SDK.Context` (`producer_id`, `event_urn`, `routing_key`, `message_type`).

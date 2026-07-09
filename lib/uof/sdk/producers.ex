@@ -10,28 +10,27 @@ defmodule UOF.SDK.Producers do
 
   alias UOF.SDK.Producer
 
-  require Logger
-
   @doc """
-  Fetch producer descriptions from the API and build the tracked list. Logs and
-  returns `[]` on failure so a transient API issue doesn't stop the SDK from
-  starting (the monitor seeds nothing and recovers once descriptions are
-  available on a later run).
+  Fetch producer descriptions from the API and build the tracked list.
+
+  Raises on failure. Starting the SDK without producer descriptions would leave
+  the monitor with no known producers, which disables health tracking and
+  recovery until the VM is restarted.
   """
   @spec fetch() :: [Producer.t()]
   def fetch do
-    case UOF.API.Descriptions.producers() do
-      {:ok, %{producer: descriptions}} when is_list(descriptions) ->
-        build(descriptions)
-
-      other ->
-        Logger.warning("UOF.SDK.Producers: could not load producers: #{inspect(other)}")
-        []
-    end
+    fetch(UOF.API.Descriptions.producers())
   rescue
     exception ->
-      Logger.warning("UOF.SDK.Producers: error loading producers: #{Exception.message(exception)}")
-      []
+      raise RuntimeError, "could not load UOF producers: #{Exception.message(exception)}"
+  end
+
+  @doc false
+  @spec fetch(term()) :: [Producer.t()]
+  def fetch({:ok, %{producer: descriptions}}) when is_list(descriptions), do: build(descriptions)
+
+  def fetch(other) do
+    raise RuntimeError, "could not load UOF producers: #{inspect(other)}"
   end
 
   @doc "Build `UOF.SDK.Producer` structs from a list of API producer descriptions."

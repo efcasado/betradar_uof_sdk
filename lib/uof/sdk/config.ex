@@ -84,6 +84,12 @@ defmodule UOF.SDK.Config do
               "system messages must be consumed separately from event content"
     end
 
+    if system_producer && is_nil(producer) do
+      raise ArgumentError,
+            ":producer is required when :system_producer is set; " <>
+              "event content must be consumed separately from system messages"
+    end
+
     %__MODULE__{
       handler: fetch!(cfg, :handler),
       node_id: Keyword.get(cfg, :node_id),

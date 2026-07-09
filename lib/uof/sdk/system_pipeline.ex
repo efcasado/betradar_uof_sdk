@@ -4,8 +4,8 @@ defmodule UOF.SDK.SystemPipeline do
 
   This pipeline consumes `alive` and `snapshot_complete` messages separately
   from event content. Keeping system traffic isolated lets `ProducerMonitor`
-  own producer lifecycle and checkpoint advancement, while content processing
-  remains partitioned by sport-event URN in `UOF.SDK.Pipeline`.
+  own producer lifecycle and recovery correlation, while content processing
+  remains partitioned by sport-event URN in `UOF.SDK.ContentPipeline`.
 
   ## Options
 
@@ -133,7 +133,7 @@ defmodule UOF.SDK.SystemPipeline do
   defp maybe_track_connection(%{monitor: monitor, connection_token_key: key}, "alive", message) do
     case connection_token(message, key) do
       nil -> :ok
-      token -> monitor.observe_connection(token)
+      token -> monitor.observe_connection({:system, token})
     end
   end
 

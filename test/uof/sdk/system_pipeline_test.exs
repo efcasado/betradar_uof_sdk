@@ -142,7 +142,7 @@ defmodule UOF.SDK.SystemPipelineTest do
       metadata: %{routing_key: "-.-.-.alive.-.-.-.-", amqp_channel: %{conn: %{pid: conn}}}
     )
 
-    assert_receive {:connection_sink, ^conn}
+    assert_receive {:connection_sink, {:system, ^conn}}
   end
 
   test "reads the routing key from a custom metadata field" do
@@ -193,6 +193,6 @@ defmodule UOF.SDK.SystemPipelineTest do
       metadata: %{routing_key: "-.-.-.alive.-.-.-.-", conn_id: "conn-abc-123"}
     )
 
-    assert_receive {:connection_sink, "conn-abc-123"}
+    assert_receive {:connection_sink, {:system, "conn-abc-123"}}
   end
 end

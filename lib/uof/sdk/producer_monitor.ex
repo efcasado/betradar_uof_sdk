@@ -12,11 +12,12 @@ defmodule UOF.SDK.ProducerMonitor do
       and recovery is initiated. It returns up via `:returned_from_inactivity`
       (or `:first_recovery_completed` the first time) when recovery completes.
 
-    * **Processing lag** — when the newest processed message (content *or*
-      alive) was generated more than `max_processing_delay_ms` ago, the producer
-      is marked down + `delayed?` but **no recovery is issued** — the remote
-      producer is healthy. It returns up via `:processing_queue_delay_stabilized`
-      once processing catches up. This threshold is independent of
+    * **Processing lag** — when the newest message processed by the content
+      pipeline was generated more than `max_processing_delay_ms` ago, the
+      producer is marked down + `delayed?` but **no recovery is issued** — the
+      remote producer is healthy. It returns up via
+      `:processing_queue_delay_stabilized` once processing catches up. This
+      threshold is independent of
       `inactivity_ms` so consumer-lag tolerance can be tuned separately from the
       alive-gap/recovery trigger.
 
@@ -24,10 +25,9 @@ defmodule UOF.SDK.ProducerMonitor do
 
   Recovery checkpoints are owned here, not by the Broadway pipeline. Subscribed
   `alive` heartbeats advance the checkpoint only after the producer is already
-  up; content messages update processing-delay state but do not move the
-  recovery checkpoint. Incremental recovery subtracts `recovery_overlap_ms`
-  from the stored checkpoint, intentionally replaying a bounded window to cover
-  concurrent processing and distributed-consumer skew.
+  up. Incremental recovery subtracts `recovery_overlap_ms` from the stored
+  checkpoint, intentionally replaying a bounded window to cover concurrent
+  processing and distributed-consumer skew.
 
   When a delivery gap is detected, this module:
 
@@ -82,7 +82,7 @@ defmodule UOF.SDK.ProducerMonitor do
     GenServer.cast(server, {:alive, producer_id, gen_timestamp, subscribed?})
   end
 
-  @doc "Record a processed content message's generation timestamp."
+  @doc "Record a generation timestamp processed by the content pipeline."
   def message(server \\ __MODULE__, producer_id, gen_timestamp) do
     GenServer.cast(server, {:message, producer_id, gen_timestamp})
   end
@@ -267,11 +267,7 @@ defmodule UOF.SDK.ProducerMonitor do
   ## Health transitions -------------------------------------------------------
 
   defp on_alive(state, producer, gen_ts, subscribed?) do
-    producer = %{
-      producer
-      | last_alive_at: state.now_fun.(),
-        last_message_timestamp: max_ts(producer.last_message_timestamp, gen_ts)
-    }
+    producer = %{producer | last_alive_at: state.now_fun.()}
 
     if recovery_needed?(producer, subscribed?) do
       trigger_recovery(state, producer, producer.reason)
@@ -474,10 +470,9 @@ defmodule UOF.SDK.ProducerMonitor do
   defp alive_violation?(%Producer{last_alive_at: nil}, _now, _ms), do: false
   defp alive_violation?(%Producer{last_alive_at: t}, now, ms), do: now - t > ms
 
-  # "Behind" is measured against the newest message we've processed — content
-  # *or* alive. Alives arrive ~every 10s carrying the current feed time, so a
-  # quiet-but-healthy producer keeps this fresh; only a consumer that can't keep
-  # up (alives back up too) lets it fall past the threshold.
+  # "Behind" is measured against the newest content message processed by the
+  # content pipeline. Alives are intentionally excluded because they arrive on a
+  # separate system queue and no longer prove content processing is caught up.
   defp processing_violation?(%Producer{last_message_timestamp: nil}, _now, _ms), do: false
 
   defp processing_violation?(%Producer{last_message_timestamp: t}, now, ms), do: now - t > ms

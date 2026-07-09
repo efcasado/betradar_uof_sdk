@@ -25,7 +25,7 @@ defmodule UOF.SDK do
   use Supervisor
 
   alias UOF.SDK.Config
-  alias UOF.SDK.Pipeline
+  alias UOF.SDK.ContentPipeline
   alias UOF.SDK.Producer
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.Producers
@@ -92,8 +92,8 @@ defmodule UOF.SDK do
        connection: config.connection,
        node_id: config.node_id,
        monitor: ProducerMonitor},
-      {Pipeline,
-       name: Pipeline,
+      {ContentPipeline,
+       name: ContentPipeline,
        handler: config.handler,
        concurrency: config.concurrency,
        producer: config.producer,

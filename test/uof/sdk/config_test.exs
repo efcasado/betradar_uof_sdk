@@ -28,6 +28,12 @@ defmodule UOF.SDK.ConfigTest do
     end
   end
 
+  test "requires a content producer when the system producer is custom" do
+    assert_raise ArgumentError, ~r/:producer is required/, fn ->
+      Config.load(handler: MyApp.Handler, system_producer: {Broadway.DummyProducer, []})
+    end
+  end
+
   test "accepts custom content and system producers" do
     content_producer = {Broadway.DummyProducer, []}
     system_producer = {Broadway.DummyProducer, transformer: :system}

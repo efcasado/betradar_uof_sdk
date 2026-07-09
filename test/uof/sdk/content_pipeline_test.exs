@@ -1,9 +1,9 @@
-defmodule UOF.SDK.PipelineTest do
+defmodule UOF.SDK.ContentPipelineTest do
   use ExUnit.Case, async: false
 
   alias UOF.Schemas.Feed
+  alias UOF.SDK.ContentPipeline
   alias UOF.SDK.MessageHandler
-  alias UOF.SDK.Pipeline
 
   # Test handler: forwards every callback to the pid registered in app env.
   defmodule Handler do
@@ -20,6 +20,8 @@ defmodule UOF.SDK.PipelineTest do
   defmodule Sink do
     @moduledoc false
     def message(product, ts), do: emit({:message_sink, product, ts})
+    def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
+    def observe_connection(token), do: emit({:connection_sink, token})
 
     defp emit(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
   end
@@ -39,7 +41,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {Pipeline, :start_link,
+        {ContentPipeline, :start_link,
          [
            [
              name: name,
@@ -77,7 +79,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {Pipeline, :start_link,
+        {ContentPipeline, :start_link,
          [
            [
              name: name,
@@ -102,7 +104,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {Pipeline, :start_link,
+        {ContentPipeline, :start_link,
          [
            [
              name: name,
@@ -129,7 +131,7 @@ defmodule UOF.SDK.PipelineTest do
     start_link_supervised!(%{
       id: name,
       start:
-        {Pipeline, :start_link,
+        {ContentPipeline, :start_link,
          [
            [
              name: name,
@@ -150,5 +152,58 @@ defmodule UOF.SDK.PipelineTest do
     assert_receive {:odds_change, %Feed.OddsChange{}, ctx}, 1_000
     assert ctx.message_type == "odds_change"
     assert ctx.event_urn == "sr:match:12345"
+  end
+
+  test "observes the content AMQP connection pid for reconnect detection" do
+    name = Module.concat(__MODULE__, ConnObserve)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    conn = spawn(fn -> :ok end)
+
+    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+      metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-", amqp_channel: %{conn: %{pid: conn}}}
+    )
+
+    assert_receive {:connection_sink, {:content, ^conn}}
+  end
+
+  test "observes a content connection token from a custom metadata field" do
+    name = Module.concat(__MODULE__, CustomToken)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink,
+             connection_token_metadata_key: :conn_id
+           ]
+         ]}
+    })
+
+    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+      metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-", conn_id: "conn-abc-123"}
+    )
+
+    assert_receive {:connection_sink, {:content, "conn-abc-123"}}
   end
 end

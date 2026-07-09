@@ -1,12 +1,13 @@
-defmodule UOF.SDK.Pipeline do
+defmodule UOF.SDK.ContentPipeline do
   @moduledoc """
   Broadway pipeline that consumes one AMQP scope session (live / prematch /
   virt), decodes each message and dispatches it to the configured
   `UOF.SDK.MessageHandler`.
 
-  Messages are partitioned across processors by sport-event URN (`partition_by`)
-  so that all messages for a given event are handled in order by the same
-  processor. System messages are handled by `UOF.SDK.SystemPipeline`.
+  Event messages are partitioned across processors by sport-event URN
+  (`partition_by`) so that all messages for a given event are handled in order
+  by the same processor. System messages are handled by
+  `UOF.SDK.SystemPipeline`.
 
   ## Options
 
@@ -19,8 +20,8 @@ defmodule UOF.SDK.Pipeline do
       is set.
     * `:node_id` — integer identifying this SDK instance on a shared account.
       Used to scope the AMQP queue bindings and recovery requests. When set,
-      the queue subscribes only to broadcast (`-`) and this node's messages;
-      `snapshot_complete` completions from other nodes are not received.
+      the queue subscribes only to broadcast (`-`) and this node's content
+      messages.
     * `:producer` — a custom Broadway producer spec, overriding the built-in
       `BroadwayRabbitMQ.Producer`. Tests pass `{Broadway.DummyProducer, []}`;
       see "Custom producers" below for rolling your own transport.
@@ -28,6 +29,7 @@ defmodule UOF.SDK.Pipeline do
       Default `nil`, in which case messages are only delivered to the handler.
     * `:routing_key_metadata_key` — the `message.metadata` field carrying the
       UOF routing key (default `:routing_key`). See "Custom producers".
+
   ## Custom producers
 
   The default `BroadwayRabbitMQ.Producer` is what Betradar's docs recommend, but
@@ -185,7 +187,20 @@ defmodule UOF.SDK.Pipeline do
 
   defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
 
-  defp maybe_track_connection(_context, _type, _message), do: :ok
+  defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
+
+  defp maybe_track_connection(%{monitor: monitor, connection_token_key: key}, _type, message) do
+    case connection_token(message, key) do
+      nil -> :ok
+      token -> monitor.observe_connection({:content, token})
+    end
+  end
+
+  defp connection_token(message, nil), do: connection_pid(message)
+  defp connection_token(%Message{metadata: metadata}, key), do: Map.get(metadata, key)
+
+  defp connection_pid(%Message{metadata: %{amqp_channel: %{conn: %{pid: pid}}}}), do: pid
+  defp connection_pid(_message), do: nil
 
   defp notify(nil, _fun, _args), do: :ok
   defp notify(mod, fun, args), do: apply(mod, fun, args)

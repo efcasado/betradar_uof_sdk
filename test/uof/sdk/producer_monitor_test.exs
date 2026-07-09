@@ -134,12 +134,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %Producer{down?: false}}
 
-    # Local clock jumps to 20_000, but the newest message we've managed to
-    # process was generated back at 1_000 (a backed-up consumer draining a stale
-    # alive) -> ~19s behind. last_alive_at stays fresh, so the alive-interval
-    # path is quiet and it's the processing check that trips.
+    # Local clock jumps to 20_000, but the newest message the content pipeline
+    # processed was generated back at 1_000. A fresh system alive keeps the
+    # alive-interval path quiet, so the processing check is what trips.
     set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 1_000, true)
+    ProducerMonitor.alive(m, 1, 20_000, true)
+    ProducerMonitor.message(m, 1, 1_000)
     sync(m)
 
     tick(m)
@@ -147,8 +147,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     refute_received {:recover_called, _, _}
 
-    # a message generated at ~now arrives -> caught up -> stabilized, back up
-    ProducerMonitor.alive(m, 1, 20_000, true)
+    # content progress generated at ~now arrives -> caught up -> stabilized
+    ProducerMonitor.message(m, 1, 20_000)
     tick(m)
 
     assert_receive {:status, %Producer{down?: false, delayed?: false, reason: :processing_queue_delay_stabilized}}
@@ -164,10 +164,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %Producer{down?: false}}
 
     # drive it into processing lag (down? + delayed?): local clock at 20_000 but
-    # the last processed message was generated at 1_000, with a fresh alive so
-    # the alive-interval path stays quiet and the processing check is what trips.
+    # content progress is still back at 1_000, with a fresh alive so the
+    # alive-interval path stays quiet and the processing check is what trips.
     set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 1_000, true)
+    ProducerMonitor.alive(m, 1, 20_000, true)
+    ProducerMonitor.message(m, 1, 1_000)
     sync(m)
     tick(m)
     assert_receive {:status, %Producer{down?: true, delayed?: true, reason: :processing_queue_delay_violation}}
@@ -184,18 +185,31 @@ defmodule UOF.SDK.ProducerMonitorTest do
   test "observing a new connection recovers; same connection is deduped", %{clock: clock} do
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, :conn_a)
+    ProducerMonitor.observe_connection(m, {:system, :conn_a})
     rid1 = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid1)
     assert_receive {:status, %Producer{down?: false}}
 
     # same connection token -> deduped, no recovery
-    ProducerMonitor.observe_connection(m, :conn_a)
+    ProducerMonitor.observe_connection(m, {:system, :conn_a})
     sync(m)
     refute_received {:recover_called, _, _}
 
     # new connection token (a reconnect) -> down + recover
-    ProducerMonitor.observe_connection(m, :conn_b)
+    ProducerMonitor.observe_connection(m, {:system, :conn_b})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
+  end
+
+  test "system and content connection tokens are deduped independently", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, :same_underlying_token})
+    rid1 = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid1)
+    assert_receive {:status, %Producer{down?: false}}
+
+    ProducerMonitor.observe_connection(m, {:content, :same_underlying_token})
     assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
     assert_receive {:recover_called, "pre", _}
   end

@@ -21,16 +21,16 @@ UOF.SDK
 ├── CheckpointStore   – last stable alive timestamp per producer
 ├── ProducerMonitor   – producer state, health monitoring, and recovery
 ├── SystemPipeline    – AMQP consumer for alive and snapshot_complete
-└── Pipeline          – AMQP consumer for event content
+└── ContentPipeline   – AMQP consumer for event content
 ```
 
 Messages flow in one direction: the pipelines receive raw AMQP messages, decode
 the XML payload, and call your `MessageHandler`. `SystemPipeline` owns system
 traffic (`alive`, `snapshot_complete`) and notifies `ProducerMonitor` for
-recovery/checkpoint lifecycle. `Pipeline` owns event content and only reports
-content timestamps for lag detection. Producer state lives entirely in
-`ProducerMonitor`'s GenServer state; `UOF.SDK.producers/0` goes through a
-`GenServer.call`.
+producer lifecycle, recovery correlation, and checkpoint advancement.
+`ContentPipeline` owns event content and reports content timestamps for lag
+detection. Producer state lives entirely in `ProducerMonitor`'s GenServer state;
+`UOF.SDK.producers/0` goes through a `GenServer.call`.
 
 ## Configuration
 
@@ -39,7 +39,7 @@ content timestamps for lag detection. Producer state lives entirely in
 > content and `:system_producer` for system messages when using a custom
 > transport such as Pulsar. `:routing_key_metadata_key` must point at the
 > original UOF routing key, and `:connection_token_metadata_key` can provide a
-> per-connection token for reconnect detection on the system pipeline.
+> per-connection token for reconnect detection on both pipelines.
 
 ```elixir
 config :uof_sdk,
@@ -68,7 +68,7 @@ derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 | `:handler` | — (required) | Your `UOF.SDK.MessageHandler` module |
 | `:connection` | `[]` | `BroadwayRabbitMQ.Producer` connection options for default pipelines |
 | `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
-| `:producer` | `nil` | Custom Broadway producer spec for event content; overrides `:connection` for `Pipeline` |
+| `:producer` | `nil` | Custom Broadway producer spec for event content; overrides `:connection` for `ContentPipeline` |
 | `:system_producer` | `nil` | Custom Broadway producer spec for `alive` / `snapshot_complete`; overrides `:connection` for `SystemPipeline` |
 | `:routing_key_metadata_key` | `:routing_key` | Metadata field carrying the UOF routing key (custom producers only) |
 | `:connection_token_metadata_key` | `nil` | Metadata field carrying a per-connection token for reconnect detection (custom producers only) |
@@ -82,9 +82,11 @@ derived or defaulted. Known Betradar AMQP hosts: `mq.betradar.com` (production),
 
 > Recovery throttling defaults follow the official SDK guidance. `:recovery_overlap_seconds` is specific to this SDK and should be tuned for your deployment.
 
-When `:producer` is configured, `:system_producer` is required too. The two
-streams must not share a Key-Shared subscription, otherwise content and system
-messages can be delivered to the wrong Broadway pipeline and be ignored.
+When either custom producer is configured, both `:producer` and
+`:system_producer` are required. The content stream must receive event messages;
+the system stream must receive `alive` and `snapshot_complete`. These streams
+must not share a Key-Shared subscription, otherwise messages can be delivered to
+the wrong Broadway pipeline and be ignored.
 
 ## Usage
 
@@ -184,6 +186,14 @@ When a gap is detected, the SDK:
 3. Betradar replays the missing messages back over the same AMQP feed.
 4. When `snapshot_complete` arrives with the matching `request_id`, the producer
    is marked up and `handle_producer_status/1` fires.
+
+`snapshot_complete` is handled on the system pipeline by design. It means the
+feed has finished publishing a recovery replay, not that this SDK instance has
+finished executing all handler callbacks for replayed content. Local backlog is
+handled separately by the content lag monitor: if processed content timestamps
+fall behind by more than `:max_processing_delay_seconds`, the producer is marked
+`delayed?` / down until processing catches up. Recovery overlap and idempotent
+handlers cover the remaining crash/restart window.
 
 A stall guard (`:max_recovery_time`) reissues the request if no
 `snapshot_complete` arrives within the deadline, preserving the original

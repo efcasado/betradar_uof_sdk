@@ -44,6 +44,16 @@ defmodule UOF.SDK do
   @spec producer(integer()) :: {:ok, Producer.t()} | :error
   defdelegate producer(id), to: ProducerMonitor
 
+  @doc """
+  Manually trigger an odds recovery for a producer. Unlike calling the recovery
+  API directly, this goes through the producer monitor: the producer shows as
+  recovering and the request is correlated with its `snapshot_complete` and
+  stall-guarded, healing exactly like an automatic recovery. Pass `full: true`
+  to ignore the checkpoint and request a full snapshot.
+  """
+  @spec recover(integer(), keyword()) :: :ok | {:error, :already_recovering | :unknown_producer}
+  def recover(producer_id, opts \\ []), do: ProducerMonitor.recover(producer_id, opts)
+
   @impl true
   def init(opts) do
     config = Config.load(opts)

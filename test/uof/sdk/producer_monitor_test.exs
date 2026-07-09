@@ -241,6 +241,34 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:ok, %Producer{recovering?: true}} = ProducerMonitor.producer(m, 1)
   end
 
+  test "manual recover goes through the full lifecycle", %{clock: clock} do
+    CheckpointStore.ETS.put(1, @now - 60_000)
+    m = start_monitor([now_fun: fn -> @now end], clock)
+
+    assert :ok = ProducerMonitor.recover(m, 1, [])
+    assert_receive {:status, %Producer{down?: true, recovering?: true, reason: :other}}
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == @now - 60_000
+
+    # a second trigger while one is in flight is refused
+    assert {:error, :already_recovering} = ProducerMonitor.recover(m, 1, [])
+
+    # and the completion correlates like any automatic recovery
+    ProducerMonitor.snapshot_complete(m, 1, opts[:request_id])
+    assert_receive {:status, %Producer{down?: false, reason: :first_recovery_completed}}
+  end
+
+  test "manual full recover ignores the checkpoint", %{clock: clock} do
+    CheckpointStore.ETS.put(1, @now - 60_000)
+    m = start_monitor([now_fun: fn -> @now end], clock)
+
+    assert :ok = ProducerMonitor.recover(m, 1, full: true)
+    assert_receive {:recover_called, "pre", opts}
+    refute Keyword.has_key?(opts, :after)
+
+    assert {:error, :unknown_producer} = ProducerMonitor.recover(m, 99, full: true)
+  end
+
   test "API failure schedules a retry", %{clock: clock} do
     test_pid = self()
     attempts = start_supervised!(%{id: :attempts, start: {Agent, :start_link, [fn -> 0 end]}})

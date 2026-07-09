@@ -85,6 +85,20 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @doc """
+  Manually trigger a recovery for `producer_id` (e.g. from an admin UI), going
+  through the normal recovery lifecycle: the producer is marked down and
+  recovering, the completion is correlated via `snapshot_complete`, and the
+  stall guard reissues if it goes missing. Pass `full: true` to ignore the
+  checkpoint and request a full snapshot. Refused when a recovery is already
+  in flight.
+  """
+  @spec recover(GenServer.server(), integer(), keyword()) ::
+          :ok | {:error, :already_recovering | :unknown_producer}
+  def recover(server \\ __MODULE__, producer_id, opts) do
+    GenServer.call(server, {:recover, producer_id, opts})
+  end
+
+  @doc """
   Observe the AMQP connection a message arrived on. The first time a given
   connection token is seen, every producer is recovered — this fires on the
   initial connection and again on each reconnect (a reconnect always yields a
@@ -136,6 +150,20 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def handle_call({:get_producer, id}, _from, state) do
     {:reply, Map.fetch(state.producers, id), state}
+  end
+
+  def handle_call({:recover, id, opts}, _from, state) do
+    case Map.fetch(state.producers, id) do
+      {:ok, %Producer{recovering?: true}} ->
+        {:reply, {:error, :already_recovering}, state}
+
+      {:ok, producer} ->
+        after_ts = if !opts[:full], do: after_from_checkpoint(state, producer)
+        {:reply, :ok, trigger_recovery(state, producer, :other, after_ts)}
+
+      :error ->
+        {:reply, {:error, :unknown_producer}, state}
+    end
   end
 
   def handle_call(:sync, _from, state), do: {:reply, :ok, state}
@@ -284,10 +312,14 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp trigger_recovery(state, before, reason) do
+    trigger_recovery(state, before, reason, after_from_checkpoint(state, before))
+  end
+
+  defp trigger_recovery(state, before, reason, after_ts) do
     after_ = %{before | down?: true, recovering?: true, reason: reason}
     state = %{state | producers: Map.put(state.producers, after_.id, after_)}
     maybe_notify(state, before, after_)
-    initiate(state, after_, after_from_checkpoint(state, after_))
+    initiate(state, after_, after_ts)
   end
 
   defp apply_status(state, before, attrs) do

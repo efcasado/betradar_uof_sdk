@@ -241,6 +241,21 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
+  test "startup alive does not recover while only one connection namespace is ready", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, :conn_a})
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    sync(m)
+
+    refute_received {:recover_called, _, _}
+    assert {:ok, %Producer{down?: true, recovering?: false}} = ProducerMonitor.producer(m, 1)
+
+    ProducerMonitor.observe_connection(m, {:content, :conn_a})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
+  end
+
   test "first token from the second connection namespace triggers one startup recovery", %{clock: clock} do
     m = start_monitor(clock)
 

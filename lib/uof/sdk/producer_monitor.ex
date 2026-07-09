@@ -287,7 +287,11 @@ defmodule UOF.SDK.ProducerMonitor do
     producer = %{producer | last_alive_at: state.now_fun.()}
 
     if recovery_needed?(producer, subscribed?) do
-      trigger_recovery(state, producer, producer.reason)
+      if startup_connection_recovery_pending?(state) do
+        put_producer(state, producer)
+      else
+        trigger_recovery(state, producer, producer.reason)
+      end
     else
       maybe_checkpoint_alive(state, producer, gen_ts, subscribed?)
       put_producer(state, producer)
@@ -370,6 +374,10 @@ defmodule UOF.SDK.ProducerMonitor do
     else
       {:ignore, state}
     end
+  end
+
+  defp startup_connection_recovery_pending?(state) do
+    map_size(state.connection_tokens) in 1..(@startup_connection_count - 1)
   end
 
   defp put_connection_token(state, namespace, token) do

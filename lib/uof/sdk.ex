@@ -16,10 +16,10 @@ defmodule UOF.SDK do
   keyword list as the child argument (`{UOF.SDK, sessions: [:live]}`) to
   override per start.
 
-  It supervises (in order, with `:rest_for_one`) the checkpoint store, producer
-  monitor, a system-message pipeline, and a content-message pipeline. Producer
-  state is managed entirely within `UOF.SDK.ProducerMonitor`'s GenServer state
-  — no separate registry process is needed.
+  It supervises (in order, with `:rest_for_one`) an optional checkpoint store,
+  producer monitor, a system-message pipeline, and a content-message pipeline.
+  Producer state is managed entirely within `UOF.SDK.ProducerMonitor`'s
+  GenServer state — no separate registry process is needed.
   """
 
   use Supervisor
@@ -59,19 +59,20 @@ defmodule UOF.SDK do
   def init(opts) do
     config = Config.load(opts)
 
-    lifecycle = [
-      config.checkpoint_store,
-      {ProducerMonitor,
-       producers: Producers.fetch(),
-       handler: config.handler,
-       inactivity_ms: config.inactivity_seconds * 1_000,
-       max_processing_delay_ms: config.max_processing_delay_seconds * 1_000,
-       node_id: config.node_id,
-       checkpoint_store: config.checkpoint_store,
-       min_interval_ms: config.min_interval_between_recoveries * 1_000,
-       max_recovery_ms: config.max_recovery_time * 1_000,
-       recovery_overlap_ms: config.recovery_overlap_seconds * 1_000}
-    ]
+    lifecycle =
+      checkpoint_store_child_specs(config.checkpoint_store) ++
+        [
+          {ProducerMonitor,
+           producers: Producers.fetch(),
+           handler: config.handler,
+           inactivity_ms: config.inactivity_seconds * 1_000,
+           max_processing_delay_ms: config.max_processing_delay_seconds * 1_000,
+           node_id: config.node_id,
+           checkpoint_store: config.checkpoint_store,
+           min_interval_ms: config.min_interval_between_recoveries * 1_000,
+           max_recovery_ms: config.max_recovery_time * 1_000,
+           recovery_overlap_ms: config.recovery_overlap_seconds * 1_000}
+        ]
 
     Supervisor.init(lifecycle ++ child_specs(config), strategy: :rest_for_one)
   end
@@ -100,5 +101,11 @@ defmodule UOF.SDK do
        connection_token_metadata_key: config.connection_token_metadata_key,
        monitor: ProducerMonitor}
     ]
+  end
+
+  @doc false
+  @spec checkpoint_store_child_specs(module()) :: [module()]
+  def checkpoint_store_child_specs(store) do
+    if Code.ensure_loaded?(store) and function_exported?(store, :child_spec, 1), do: [store], else: []
   end
 end

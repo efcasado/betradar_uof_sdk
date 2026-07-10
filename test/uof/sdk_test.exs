@@ -1,9 +1,53 @@
 defmodule UOF.SDKTest do
   use ExUnit.Case, async: true
 
+  alias UOF.SDK.CheckpointStore
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.SystemPipeline
+
+  defmodule CallbackOnlyCheckpointStore do
+    @moduledoc false
+    @behaviour CheckpointStore
+
+    @impl true
+    def get(_producer_id), do: :none
+
+    @impl true
+    def put(_producer_id, _timestamp), do: :ok
+
+    @impl true
+    def delete(_producer_id), do: :ok
+  end
+
+  defmodule StartableCheckpointStore do
+    @moduledoc false
+    @behaviour CheckpointStore
+
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl GenServer
+    def init(opts), do: {:ok, opts}
+
+    @impl true
+    def get(_producer_id), do: :none
+
+    @impl true
+    def put(_producer_id, _timestamp), do: :ok
+
+    @impl true
+    def delete(_producer_id), do: :ok
+  end
+
+  test "checkpoint_store_child_specs omits callback-only stores" do
+    assert UOF.SDK.checkpoint_store_child_specs(CallbackOnlyCheckpointStore) == []
+  end
+
+  test "checkpoint_store_child_specs includes stores with child specs" do
+    assert UOF.SDK.checkpoint_store_child_specs(StartableCheckpointStore) == [StartableCheckpointStore]
+  end
 
   test "child_specs passes normalized producer specs to system and content pipelines" do
     conn = [host: "stgmq.betradar.com", username: "tok", password: "", ssl_options: []]

@@ -235,8 +235,8 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:connection_sink, {:content, ^conn}}
   end
 
-  test "does not observe the content AMQP connection on every event message" do
-    name = Module.concat(__MODULE__, EventConnIgnored)
+  test "observes the content AMQP connection on event messages" do
+    name = Module.concat(__MODULE__, EventConnObserved)
 
     start_link_supervised!(%{
       id: name,
@@ -260,7 +260,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:odds_change, _, _}
-    refute_received {:connection_sink, _}
+    assert_receive {:connection_sink, {:content, ^conn}}
   end
 
   test "observes a content connection token from a custom metadata field" do
@@ -321,6 +321,41 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:message_sink, 1, 1}
+    assert_receive {:connection_sink, {:content, {"uof-content", "ctag-1"}}}
+  end
+
+  test "observes a Pulsar RabbitMQ source connection token from event messages" do
+    name = Module.concat(__MODULE__, PulsarEventConnToken)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             metadata_adapter: :pulsar_rabbitmq_source,
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+      metadata: %{
+        metadata: %{
+          partition_key: "hi.-.live.odds_change.1.sr:match.1.-",
+          properties: [
+            %{key: "queueName", value: "uof-content"},
+            %{key: "consumerTag", value: "ctag-1"}
+          ]
+        }
+      }
+    )
+
+    assert_receive {:odds_change, _, _}
     assert_receive {:connection_sink, {:content, {"uof-content", "ctag-1"}}}
   end
 end

@@ -191,8 +191,8 @@ defmodule UOF.SDK.ContentPipeline do
 
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
-  defp maybe_track_connection(%{monitor: monitor, connection_token_key: key} = context, "alive", message) do
-    case connection_token(message, %{context | connection_token_key: key}) do
+  defp maybe_track_connection(%{monitor: monitor} = context, _type, message) do
+    case connection_token(message, context) do
       nil -> :ok
       token -> monitor.observe_connection({:content, token})
     end

@@ -62,7 +62,7 @@ defmodule UOF.SDK.ProducerMonitor do
   @default_min_interval_ms 30_000
   @default_max_recovery_ms 5 * 60_000
   @default_recovery_overlap_ms 5 * 60_000
-  @startup_connection_count 2
+  @startup_connection_namespaces [:system, :content]
 
   ## Client API ---------------------------------------------------------------
 
@@ -200,19 +200,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def handle_cast({:observe_connection, {namespace, token}}, state) do
     {action, state} = track_connection(state, namespace, token)
-
-    state =
-      if action == :recover do
-        recover_non_recovering_producers(state, :connection_down)
-      else
-        state
-      end
-
-    {:noreply, state}
-  end
-
-  def handle_cast({:observe_connection, token}, state) do
-    {action, state} = track_connection(state, :default, token)
 
     state =
       if action == :recover do
@@ -369,7 +356,7 @@ defmodule UOF.SDK.ProducerMonitor do
     changed? = Map.get(state.connection_tokens, namespace) != token
     state = put_connection_token(state, namespace, token)
 
-    if changed? and map_size(state.connection_tokens) == @startup_connection_count do
+    if changed? and startup_connections_ready?(state) do
       {:recover, state}
     else
       {:ignore, state}
@@ -377,7 +364,11 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp startup_connection_recovery_pending?(state) do
-    map_size(state.connection_tokens) in 1..(@startup_connection_count - 1)
+    map_size(state.connection_tokens) > 0 and not startup_connections_ready?(state)
+  end
+
+  defp startup_connections_ready?(state) do
+    Enum.all?(@startup_connection_namespaces, &Map.has_key?(state.connection_tokens, &1))
   end
 
   defp put_connection_token(state, namespace, token) do

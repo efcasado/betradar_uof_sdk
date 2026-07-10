@@ -284,6 +284,19 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
+  test "startup gate requires system and content namespaces explicitly", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:default, :default_a})
+    ProducerMonitor.observe_connection(m, {:system, :system_a})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :content_a})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
+  end
+
   test "token changes in either connection namespace trigger recovery after startup", %{clock: clock} do
     m = start_monitor(clock)
 

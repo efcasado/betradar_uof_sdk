@@ -134,12 +134,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %Producer{down?: false}}
 
-    # Local clock jumps to 20_000, but the newest message we've managed to
-    # process was generated back at 1_000 (a backed-up consumer draining a stale
-    # alive) -> ~19s behind. last_alive_at stays fresh, so the alive-interval
-    # path is quiet and it's the processing check that trips.
+    # Local clock jumps to 20_000, but the newest message the content pipeline
+    # processed was generated back at 1_000. A fresh system alive keeps the
+    # alive-interval path quiet, so the processing check is what trips.
     set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 1_000, true)
+    ProducerMonitor.alive(m, 1, 20_000, true)
+    ProducerMonitor.message(m, 1, 1_000)
     sync(m)
 
     tick(m)
@@ -147,11 +147,47 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     refute_received {:recover_called, _, _}
 
-    # a message generated at ~now arrives -> caught up -> stabilized, back up
-    ProducerMonitor.alive(m, 1, 20_000, true)
+    # content progress generated at ~now arrives -> caught up -> stabilized
+    ProducerMonitor.message(m, 1, 20_000)
     tick(m)
 
     assert_receive {:status, %Producer{down?: false, delayed?: false, reason: :processing_queue_delay_stabilized}}
+  end
+
+  test "content-session alive freshness prevents quiet producers from being marked delayed", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{down?: false}}
+
+    set_clock(clock, 20_000)
+
+    # System alive keeps delivery health/checkpointing fresh. The content
+    # session's own alive is queued behind content and therefore proves local
+    # content processing is not lagging, even when there are no event messages.
+    ProducerMonitor.alive(m, 1, 20_000, true)
+    ProducerMonitor.message(m, 1, 20_000)
+    tick(m)
+
+    refute_received {:status, %Producer{reason: :processing_queue_delay_violation}}
+    refute_received {:recover_called, _, _}
+    assert {:ok, %Producer{down?: false, delayed?: false}} = ProducerMonitor.producer(m, 1)
+  end
+
+  test "content-session alive freshness does not write checkpoints", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{down?: false}}
+
+    ProducerMonitor.message(m, 1, 2_000)
+    sync(m)
+
+    assert CheckpointStore.ETS.get(1) == :none
   end
 
   test "alive on a delayed producer does not trigger recovery", %{clock: clock} do
@@ -164,10 +200,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %Producer{down?: false}}
 
     # drive it into processing lag (down? + delayed?): local clock at 20_000 but
-    # the last processed message was generated at 1_000, with a fresh alive so
-    # the alive-interval path stays quiet and the processing check is what trips.
+    # content progress is still back at 1_000, with a fresh alive so the
+    # alive-interval path stays quiet and the processing check is what trips.
     set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 1_000, true)
+    ProducerMonitor.alive(m, 1, 20_000, true)
+    ProducerMonitor.message(m, 1, 1_000)
     sync(m)
     tick(m)
     assert_receive {:status, %Producer{down?: true, delayed?: true, reason: :processing_queue_delay_violation}}
@@ -181,21 +218,125 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:ok, %Producer{recovering?: false, delayed?: true}} = ProducerMonitor.producer(m, 1)
   end
 
-  test "observing a new connection recovers; same connection is deduped", %{clock: clock} do
+  test "startup connection recovery waits for both system and content namespaces", %{clock: clock} do
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, :conn_a)
+    ProducerMonitor.observe_connection(m, {:system, :conn_a})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :conn_a})
     rid1 = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid1)
     assert_receive {:status, %Producer{down?: false}}
 
     # same connection token -> deduped, no recovery
-    ProducerMonitor.observe_connection(m, :conn_a)
+    ProducerMonitor.observe_connection(m, {:system, :conn_a})
     sync(m)
     refute_received {:recover_called, _, _}
 
     # new connection token (a reconnect) -> down + recover
-    ProducerMonitor.observe_connection(m, :conn_b)
+    ProducerMonitor.observe_connection(m, {:system, :conn_b})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
+  end
+
+  test "startup alive does not recover while only one connection namespace is ready", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, :conn_a})
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    sync(m)
+
+    refute_received {:recover_called, _, _}
+    assert {:ok, %Producer{down?: true, recovering?: false}} = ProducerMonitor.producer(m, 1)
+
+    ProducerMonitor.observe_connection(m, {:content, :conn_a})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
+  end
+
+  test "startup alive interval violation does not recover while only one connection namespace is ready", %{
+    clock: clock
+  } do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, :conn_a})
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    sync(m)
+
+    set_clock(clock, 1_000 + @inactivity + 1)
+    tick(m)
+
+    refute_received {:recover_called, _, _}
+    assert {:ok, %Producer{down?: true, recovering?: false}} = ProducerMonitor.producer(m, 1)
+
+    ProducerMonitor.observe_connection(m, {:content, :conn_a})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
+  end
+
+  test "first token from the second connection namespace triggers one startup recovery", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, :same_underlying_token})
+    sync(m)
+    refute_received {:status, %Producer{down?: true, reason: :connection_down}}
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :same_underlying_token})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    rid1 = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid1)
+    assert_receive {:status, %Producer{down?: false}}
+  end
+
+  test "same namespace token changes before startup is ready do not recover early", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, :system_a})
+    ProducerMonitor.observe_connection(m, {:system, :system_b})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :content_a})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
+  end
+
+  test "startup gate requires system and content namespaces explicitly", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:default, :default_a})
+    ProducerMonitor.observe_connection(m, {:system, :system_a})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :content_a})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", _}
+  end
+
+  test "token changes in either connection namespace trigger recovery after startup", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, :system_a})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, :content_a})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    rid1 = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid1)
+    assert_receive {:status, %Producer{down?: false}}
+
+    ProducerMonitor.observe_connection(m, {:content, :content_b})
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    rid2 = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid2)
+    assert_receive {:status, %Producer{down?: false}}
+
+    ProducerMonitor.observe_connection(m, {:system, :system_b})
     assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
     assert_receive {:recover_called, "pre", _}
   end

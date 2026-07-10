@@ -1,70 +1,44 @@
-defmodule UOF.SDK.Pipeline do
+defmodule UOF.SDK.ContentPipeline do
   @moduledoc """
   Broadway pipeline that consumes one AMQP scope session (live / prematch /
   virt), decodes each message and dispatches it to the configured
   `UOF.SDK.MessageHandler`.
 
-  Messages are partitioned across processors by sport-event URN
+  Event messages are partitioned across processors by sport-event URN
   (`partition_by`) so that all messages for a given event are handled in order
-  by the same processor; system messages without an event collapse into a
-  single partition.
+  by the same processor. System messages are handled by
+  `UOF.SDK.SystemPipeline`.
 
   ## Options
 
     * `:name` (required) — pipeline name.
     * `:handler` (required) — module implementing `UOF.SDK.MessageHandler`.
     * `:concurrency` — processor concurrency (default `10`).
-    * `:connection` — keyword list passed verbatim to `BroadwayRabbitMQ.Producer`
-      as its `:connection` option. Typically includes `:host`, `:username`,
-      `:password`, `:virtual_host`, `:ssl_options`. Ignored when `:producer`
-      is set.
-    * `:node_id` — integer identifying this SDK instance on a shared account.
-      Used to scope the AMQP queue bindings and recovery requests. When set,
-      the queue subscribes only to broadcast (`-`) and this node's messages;
-      `snapshot_complete` completions from other nodes are not received.
-    * `:producer` — a custom Broadway producer spec, overriding the built-in
-      `BroadwayRabbitMQ.Producer`. Tests pass `{Broadway.DummyProducer, []}`;
-      see "Custom producers" below for rolling your own transport.
-    * `:monitor` — module that receives the lifecycle side-effects (`alive`,
-      content timestamps, `snapshot_complete`). Default `nil`, in which case
-      messages are only delivered to the handler.
+    * `:producer` — Broadway producer spec for event content.
+    * `:monitor` — module that receives content timestamp side-effects.
+      Default `nil`, in which case messages are only delivered to the handler.
+    * `:metadata_adapter` — message metadata shape (`:amqp` or
+      `:pulsar_rabbitmq_source`; default `:amqp`).
     * `:routing_key_metadata_key` — the `message.metadata` field carrying the
-      UOF routing key (default `:routing_key`). See "Custom producers".
-    * `:connection_token_metadata_key` — the `message.metadata` field carrying a
-      per-connection token for reconnect detection (default `nil`, i.e. the
-      AMQP connection pid). See "Custom producers".
+      UOF routing key for AMQP/custom producers (default `:routing_key`).
 
-  ## Custom producers
+  ## Producer contract
 
-  The default `BroadwayRabbitMQ.Producer` is what Betradar's docs recommend, but
-  any Broadway producer works (e.g. an `off_broadway_*` producer fed by a
-  RabbitMQ source connector). Pass it as `:producer` (`{Module, opts}`). A custom
-  producer must honour this contract — it's the whole interface:
+  The SDK derives the producer spec from `UOF.SDK.Config` transport settings.
+  The producer must honour this contract:
 
-    1. **Routing key in `message.metadata`** (a binary). Dispatch, partitioning
-       and lifecycle observation all derive from it (`UOF.SDK.RoutingKey`);
-       without it nothing routes. The original AMQP routing key must survive the
-       transport hop. If the transport surfaces it under a different field than
-       `:routing_key` (e.g. a Pulsar source connector that maps it to the
-       message key), point `:routing_key_metadata_key` at that field.
+    1. **Routing key available through the configured metadata adapter**.
+       Dispatch, partitioning and content timestamp observation derive from it
+       (`UOF.SDK.RoutingKey`); without it nothing routes. AMQP/custom producers
+       read a flat `message.metadata[:routing_key]` by default. The built-in
+       Pulsar adapter reads the Pulsar message key emitted by the SDK's RabbitMQ
+       source connector.
     2. **Raw UOF XML → `message.data`**, byte-for-byte. `UOF.Schemas.XML.decode/1`
        expects the verbatim feed payload; a connector that wraps or re-encodes
        the body breaks decoding.
     3. **Failure/ack semantics are the producer's own.** The RabbitMQ default
        rejects without requeue (see "Failure handling"); a custom producer
        brings its own equivalent (e.g. a Pulsar DLQ topic + bounded redelivery).
-
-  ### Reconnect detection across transports
-
-  A reconnect produces a message gap that must trigger recovery. The default
-  (RabbitMQ) keys off the `amqp_channel.conn.pid` in metadata — a new pid means
-  a new connection. A custom transport can restore this by emitting a
-  **per-connection-unique** token as a flat metadata field and pointing
-  `:connection_token_metadata_key` at it (the monitor dedups by value, so any
-  token that changes on reconnect works). The token must actually roll per
-  connection — a stable endpoint string won't trip it. Omit it and reconnect
-  recovery is forgone, falling back to `alive`-heartbeat gap detection; this
-  degrades cleanly (no crash) but is a real capability difference.
 
   ## Failure handling
 
@@ -88,9 +62,20 @@ defmodule UOF.SDK.Pipeline do
   alias Broadway.Message
   alias UOF.Schemas
   alias UOF.SDK.Context
+  alias UOF.SDK.MessageMetadata
   alias UOF.SDK.RoutingKey
 
   require Logger
+
+  @content_message_types ~w[
+    odds_change
+    bet_settlement
+    bet_stop
+    bet_cancel
+    rollback_bet_cancel
+    rollback_bet_settlement
+    fixture_change
+  ]
 
   @doc false
   def child_spec(opts) do
@@ -107,19 +92,21 @@ defmodule UOF.SDK.Pipeline do
     name = Keyword.fetch!(opts, :name)
     handler = Keyword.fetch!(opts, :handler)
     concurrency = Keyword.get(opts, :concurrency, 10)
+    metadata_adapter = Keyword.get(opts, :metadata_adapter, :amqp)
     routing_key_key = Keyword.get(opts, :routing_key_metadata_key, :routing_key)
     connection_token_key = Keyword.get(opts, :connection_token_metadata_key)
 
     Broadway.start_link(__MODULE__,
       name: name,
-      producer: [module: build_producer(opts), concurrency: 1],
+      producer: [module: Keyword.fetch!(opts, :producer), concurrency: 1],
       processors: [default: [concurrency: concurrency]],
       # `partition_by` runs in the producer's dispatcher (no context), so the
       # routing-key field is captured in the closure rather than read from context.
-      partition_by: &partition(&1, routing_key_key),
+      partition_by: &partition(&1, metadata_adapter, routing_key_key),
       context: %{
         handler: handler,
         monitor: Keyword.get(opts, :monitor),
+        metadata_adapter: metadata_adapter,
         routing_key_key: routing_key_key,
         connection_token_key: connection_token_key
       }
@@ -128,7 +115,7 @@ defmodule UOF.SDK.Pipeline do
 
   @impl Broadway
   def handle_message(_processor, %Message{} = message, context) do
-    rk = message |> routing_key(context.routing_key_key) |> RoutingKey.parse()
+    rk = message |> routing_key(context) |> RoutingKey.parse()
 
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
@@ -152,7 +139,7 @@ defmodule UOF.SDK.Pipeline do
   @impl Broadway
   def handle_failed(messages, context) do
     for message <- messages do
-      rk = message |> routing_key(context.routing_key_key) |> RoutingKey.parse()
+      rk = message |> routing_key(context) |> RoutingKey.parse()
 
       :telemetry.execute(
         [:uof_sdk, :message, :failed],
@@ -183,14 +170,6 @@ defmodule UOF.SDK.Pipeline do
   ## lifecycle side-effects --------------------------------------------------
 
   defp observe(ctx, %RoutingKey{message_type: "alive"}, msg) do
-    notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
-  end
-
-  defp observe(ctx, %RoutingKey{message_type: "snapshot_complete"}, msg) do
-    notify(ctx.monitor, :snapshot_complete, [msg.product, msg.request_id])
-  end
-
-  defp observe(ctx, %RoutingKey{}, msg) do
     product = Map.get(msg, :product)
     timestamp = Map.get(msg, :timestamp)
 
@@ -199,22 +178,39 @@ defmodule UOF.SDK.Pipeline do
     end
   end
 
+  defp observe(ctx, %RoutingKey{message_type: type}, msg) when type in @content_message_types do
+    product = Map.get(msg, :product)
+    timestamp = Map.get(msg, :timestamp)
+
+    if product && timestamp do
+      notify(ctx.monitor, :message, [product, timestamp])
+    end
+  end
+
+  defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
+
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
-  defp maybe_track_connection(%{monitor: monitor, connection_token_key: key}, "alive", message) do
-    case connection_token(message, key) do
-      nil -> :ok
-      token -> monitor.observe_connection(token)
-    end
+  defp maybe_track_connection(%{metadata_adapter: :amqp} = context, "alive", message) do
+    notify_connection(context, message)
+  end
+
+  defp maybe_track_connection(%{metadata_adapter: :pulsar_rabbitmq_source} = context, _type, message) do
+    notify_connection(context, message)
   end
 
   defp maybe_track_connection(_context, _type, _message), do: :ok
 
-  defp connection_token(message, nil), do: connection_pid(message)
-  defp connection_token(%Message{metadata: metadata}, key), do: Map.get(metadata, key)
+  defp notify_connection(%{monitor: monitor} = context, message) do
+    case connection_token(message, context) do
+      nil -> :ok
+      token -> monitor.observe_connection({:content, token})
+    end
+  end
 
-  defp connection_pid(%Message{metadata: %{amqp_channel: %{conn: %{pid: pid}}}}), do: pid
-  defp connection_pid(_message), do: nil
+  defp connection_token(message, context) do
+    MessageMetadata.connection_token(message, context.metadata_adapter, context.connection_token_key)
+  end
 
   defp notify(nil, _fun, _args), do: :ok
   defp notify(mod, fun, args), do: apply(mod, fun, args)
@@ -232,64 +228,19 @@ defmodule UOF.SDK.Pipeline do
 
   defp deliver(handler, "fixture_change", msg, ctx), do: handler.handle_fixture_change(msg, ctx)
 
-  defp deliver(handler, "alive", msg, ctx), do: handler.handle_alive(msg, ctx)
-
-  defp deliver(_handler, _system_type, _msg, _ctx), do: :ok
+  defp deliver(_handler, _unknown_type, _msg, _ctx), do: :ok
 
   ## partitioning ------------------------------------------------------------
 
-  defp partition(%Message{} = message, routing_key_key) do
+  defp partition(%Message{} = message, metadata_adapter, routing_key_key) do
     message
-    |> routing_key(routing_key_key)
+    |> routing_key(%{metadata_adapter: metadata_adapter, routing_key_key: routing_key_key})
     |> RoutingKey.parse()
     |> RoutingKey.partition_key()
     |> :erlang.phash2()
   end
 
-  defp routing_key(%Message{metadata: metadata}, key) do
-    case Map.get(metadata, key) do
-      rk when is_binary(rk) -> rk
-      _ -> ""
-    end
-  end
-
-  ## producer ----------------------------------------------------------------
-
-  # The unifiedfeed topic exchange on Betradar's AMQP broker.
-  # Two routing key patterns cover all UOF messages for a given node:
-  #   *.*.*.*.*.*.*.<node_id>.#  — messages addressed to this node
-  #   *.*.*.*.*.*.*.-.#          — broadcast messages (node field = -)
-  # alive heartbeats (-.-.-.alive.*) and snapshot_complete (-.-.-.snapshot_complete.-.-.-.NODE)
-  # are both caught by these two patterns, so no explicit system-key bindings are needed.
-  @exchange "unifiedfeed"
-
-  defp build_producer(opts) do
-    case Keyword.get(opts, :producer) do
-      nil ->
-        {BroadwayRabbitMQ.Producer,
-         queue: "",
-         connection: Keyword.get(opts, :connection, []),
-         declare: [exclusive: true, auto_delete: true],
-         bindings: feed_bindings(Keyword.get(opts, :node_id)),
-         on_failure: :reject,
-         metadata: [:routing_key, :redelivered, :delivery_tag]}
-
-      producer ->
-        producer
-    end
-  end
-
-  defp feed_bindings(node_id) when is_integer(node_id) and node_id > 0 do
-    [
-      {@exchange, routing_key: "*.*.*.*.*.*.*.-.#"},
-      {@exchange, routing_key: "*.*.*.*.*.*.*.#{node_id}.#"}
-    ]
-  end
-
-  defp feed_bindings(_node_id) do
-    [
-      {@exchange, routing_key: "*.*.*.*.*.*.*.-.#"},
-      {@exchange, routing_key: "*.*.*.*.*.*.*.#"}
-    ]
+  defp routing_key(%Message{} = message, context) do
+    MessageMetadata.routing_key(message, context.metadata_adapter, context.routing_key_key)
   end
 end

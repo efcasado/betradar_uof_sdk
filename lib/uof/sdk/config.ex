@@ -3,41 +3,46 @@ defmodule UOF.SDK.Config do
   Resolves the SDK configuration from application env (plus per-call overrides)
   into a normalized struct.
 
-  ## Example — built-in AMQP producer
+  ## Example — AMQP transport
 
       config :uof_sdk,
         handler: MyApp.FeedHandler,
         node_id: 1,
-        connection: [
-          host: "stgmq.betradar.com",
-          username: System.get_env("UOF_ACCESS_TOKEN"),
-          password: "",
-          virtual_host: "/unifiedfeed/12345",
-          ssl_options: []
-        ]
+        transport: {:amqp,
+          connection: [
+            host: "stgmq.betradar.com",
+            username: System.get_env("UOF_ACCESS_TOKEN"),
+            password: "",
+            virtual_host: "/unifiedfeed/12345",
+            ssl_options: []
+          ]
+        }
 
-  ## Example — custom producer (e.g. Pulsar)
+  ## Example — Pulsar transport
 
       config :uof_sdk,
         handler: MyApp.FeedHandler,
         node_id: 1,
-        producer: {MyPulsarProducer, topic: "uof-feed"},
-        routing_key_metadata_key: :pulsar_key
-
-  `:connection` is passed directly to `BroadwayRabbitMQ.Producer` and is
-  ignored when `:producer` is set. No fields are derived or defaulted — what
-  you pass is exactly what the broker sees.
+        transport: {:pulsar,
+          host: "pulsar://localhost:6650",
+          topic: "uof-feed",
+          subscription: "uof-sdk"
+        }
   """
 
   alias UOF.SDK.CheckpointStore.ETS
+  alias UOF.SDK.MessageMetadata
+  alias UOF.SDK.Transport
 
   @otp_app :uof_sdk
 
   @type t :: %__MODULE__{
           handler: module(),
           node_id: integer() | nil,
-          producer: {module(), keyword()} | module() | nil,
-          connection: keyword(),
+          transport: term(),
+          content_producer: Transport.producer_spec(),
+          system_producer: Transport.producer_spec(),
+          metadata_adapter: MessageMetadata.adapter(),
           routing_key_metadata_key: atom(),
           connection_token_metadata_key: atom() | nil,
           checkpoint_store: module(),
@@ -52,9 +57,11 @@ defmodule UOF.SDK.Config do
   defstruct [
     :handler,
     :node_id,
-    :producer,
+    :transport,
+    :content_producer,
+    :system_producer,
     :connection_token_metadata_key,
-    connection: [],
+    metadata_adapter: :amqp,
     routing_key_metadata_key: :routing_key,
     checkpoint_store: ETS,
     concurrency: 10,
@@ -73,13 +80,18 @@ defmodule UOF.SDK.Config do
   def load(overrides \\ []) do
     cfg = Keyword.merge(Application.get_all_env(@otp_app), overrides)
 
+    transport = Keyword.get(cfg, :transport, :amqp)
+    producers = Transport.producers(transport, Keyword.get(cfg, :node_id))
+
     %__MODULE__{
       handler: fetch!(cfg, :handler),
       node_id: Keyword.get(cfg, :node_id),
-      producer: Keyword.get(cfg, :producer),
-      connection: Keyword.get(cfg, :connection, []),
-      routing_key_metadata_key: Keyword.get(cfg, :routing_key_metadata_key, :routing_key),
-      connection_token_metadata_key: Keyword.get(cfg, :connection_token_metadata_key),
+      transport: transport,
+      content_producer: producers.content,
+      system_producer: producers.system,
+      metadata_adapter: producers.metadata_adapter,
+      routing_key_metadata_key: producers.routing_key_metadata_key,
+      connection_token_metadata_key: producers.connection_token_metadata_key,
       checkpoint_store: Keyword.get(cfg, :checkpoint_store, ETS),
       concurrency: Keyword.get(cfg, :concurrency, 10),
       inactivity_seconds: Keyword.get(cfg, :inactivity_seconds, 20),

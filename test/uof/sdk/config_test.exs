@@ -1,25 +1,93 @@
 defmodule UOF.SDK.ConfigTest do
   use ExUnit.Case, async: true
 
+  alias OffBroadway.Pulsar.Producer
   alias UOF.SDK.Config
 
-  test "passes :connection through verbatim" do
+  test "builds AMQP producer specs from the transport connection" do
     conn = [host: "stgmq.betradar.com", username: "tok", password: "", ssl_options: []]
-    config = Config.load(handler: MyApp.Handler, connection: conn)
+    config = Config.load(handler: MyApp.Handler, transport: {:amqp, connection: conn})
 
-    assert config.connection == conn
+    assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
+    assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
+    assert content_opts[:connection] == conn
+    assert system_opts[:connection] == conn
+    assert config.metadata_adapter == :amqp
+    assert config.routing_key_metadata_key == :routing_key
+    assert config.connection_token_metadata_key == nil
   end
 
-  test "defaults to empty connection and ETS checkpoint store" do
+  test "defaults to AMQP transport with empty connection and ETS checkpoint store" do
     config = Config.load(handler: MyApp.Handler)
 
-    assert config.connection == []
+    assert config.transport == :amqp
+    assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
+    assert content_opts[:connection] == []
     assert config.checkpoint_store == UOF.SDK.CheckpointStore.ETS
+  end
+
+  test "scopes AMQP bindings by node_id" do
+    config = Config.load(handler: MyApp.Handler, node_id: 42)
+
+    assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
+    assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
+
+    assert {"unifiedfeed", routing_key: "*.*.*.odds_change.*.*.*.42.#"} in content_opts[:bindings]
+    assert {"unifiedfeed", routing_key: "-.-.-.snapshot_complete.*.*.*.42.#"} in system_opts[:bindings]
   end
 
   test "accepts a custom checkpoint store" do
     config = Config.load(handler: MyApp.Handler, checkpoint_store: MyApp.PgStore)
     assert config.checkpoint_store == MyApp.PgStore
+  end
+
+  test "builds Pulsar producer specs from one topic and subscription" do
+    config =
+      Config.load(
+        handler: MyApp.Handler,
+        transport:
+          {:pulsar,
+           host: "pulsar://localhost:6650",
+           topic: "uof-feed",
+           subscription: "uof-sdk",
+           consumer_opts: [initial_position: :earliest]}
+      )
+
+    assert {Producer, content_opts} = config.content_producer
+    assert {Producer, system_opts} = config.system_producer
+
+    assert content_opts[:host] == "pulsar://localhost:6650"
+    assert content_opts[:topic] == "uof-feed"
+    assert content_opts[:subscription] == "uof-sdk-content"
+    assert content_opts[:consumer_opts][:initial_position] == :earliest
+    assert content_opts[:consumer_opts][:subscription_type] == :Key_Shared
+
+    assert system_opts[:topic] == "uof-feed"
+    assert system_opts[:subscription] == "uof-sdk-system"
+    assert system_opts[:consumer_opts][:initial_position] == :earliest
+    assert system_opts[:consumer_opts][:subscription_type] == :Failover
+
+    assert config.metadata_adapter == :pulsar_rabbitmq_source
+    assert config.routing_key_metadata_key == :routing_key
+    assert config.connection_token_metadata_key == nil
+  end
+
+  test "requires a Pulsar subscription" do
+    assert_raise KeyError, fn ->
+      Config.load(handler: MyApp.Handler, transport: {:pulsar, topic: "uof-feed"})
+    end
+  end
+
+  test "requires a Pulsar topic" do
+    assert_raise KeyError, fn ->
+      Config.load(handler: MyApp.Handler, transport: {:pulsar, subscription: "uof-sdk"})
+    end
+  end
+
+  test "rejects unsupported transports" do
+    assert_raise ArgumentError, ~r/unsupported UOF.SDK transport/, fn ->
+      Config.load(handler: MyApp.Handler, transport: {:kafka, []})
+    end
   end
 
   test "stores node_id when provided" do

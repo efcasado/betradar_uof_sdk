@@ -311,6 +311,21 @@ The behaviour requires:
 - `put/2`
 - `delete/1`
 
+Stores that are backed by infrastructure your application already supervises,
+such as an Ecto repo, do not need to be started by the SDK. Configure the store
+module and make sure the repo is part of your application supervision tree
+before `UOF.SDK`.
+
+```elixir
+children = [
+  MyApp.Repo,
+  UOF.SDK
+]
+```
+
+If a store owns a process of its own, implement `child_spec/1`; the SDK will
+start it before the producer monitor.
+
 ## Architecture
 
 `UOF.SDK` is a library supervisor that starts three components in order:

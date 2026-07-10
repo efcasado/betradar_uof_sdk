@@ -7,11 +7,14 @@ defmodule UOF.SDK.CheckpointStore do
   timestamp is **milliseconds since the Unix epoch** — the same unit feed
   messages carry and `recover/2` expects.
 
-  The configured store module is added to the SDK supervision tree, so it must
-  be startable. The bundled `UOF.SDK.CheckpointStore.ETS` is a `GenServer` that
-  owns a public ETS table (fast, zero-dependency, lost on VM restart). A custom
-  adapter that needs no process of its own (e.g. one backed by an existing Ecto
-  repo) can implement `child_spec/1`/`start_link/1` to return `:ignore`.
+  The bundled `UOF.SDK.CheckpointStore.ETS` is a `GenServer` that owns a public
+  ETS table (fast, zero-dependency, lost on VM restart), so the SDK starts it
+  automatically. A custom adapter that needs no process of its own (for example
+  one backed by an existing Ecto repo) only needs to implement this behaviour;
+  its external dependencies should be supervised by the host application.
+
+  If a custom adapter does need its own process, expose `child_spec/1` and the
+  SDK will add it to its supervision tree before the producer monitor.
 
       config :uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore
   """
@@ -29,4 +32,9 @@ defmodule UOF.SDK.CheckpointStore do
 
   @doc "Drop the checkpoint for `producer_id` (forcing a full recovery next time)."
   @callback delete(producer_id) :: :ok
+
+  @doc "Optional child spec for stores that own a process."
+  @callback child_spec(term()) :: Supervisor.child_spec()
+
+  @optional_callbacks child_spec: 1
 end

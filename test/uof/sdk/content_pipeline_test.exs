@@ -235,8 +235,8 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:connection_sink, {:content, ^conn}}
   end
 
-  test "observes the content AMQP connection on event messages" do
-    name = Module.concat(__MODULE__, EventConnObserved)
+  test "does not observe the content AMQP connection on event messages" do
+    name = Module.concat(__MODULE__, EventConnIgnored)
 
     start_link_supervised!(%{
       id: name,
@@ -260,7 +260,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:odds_change, _, _}
-    assert_receive {:connection_sink, {:content, ^conn}}
+    refute_received {:connection_sink, _}
   end
 
   test "observes a content connection token from a custom metadata field" do

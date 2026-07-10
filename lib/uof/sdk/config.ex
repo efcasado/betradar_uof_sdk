@@ -79,6 +79,7 @@ defmodule UOF.SDK.Config do
   @spec load(keyword()) :: t()
   def load(overrides \\ []) do
     cfg = Keyword.merge(Application.get_all_env(@otp_app), overrides)
+
     transport = Keyword.get(cfg, :transport, :amqp)
     producers = Transport.producers(transport, Keyword.get(cfg, :node_id))
 

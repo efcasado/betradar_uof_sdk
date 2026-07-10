@@ -142,6 +142,31 @@ defmodule UOF.SDK.SystemPipelineTest do
     assert_receive {:connection_sink, {:system, {"uof-system", "ctag-1"}}}
   end
 
+  test "acks non-system messages without decoding them" do
+    name = Module.concat(__MODULE__, FastDiscard)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {SystemPipeline, :start_link,
+         [
+           [
+             name: name,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    ref =
+      Broadway.test_message(name, "<not valid UOF XML>", metadata: %{routing_key: "hi.-.live.odds_change.1.sr:match.1.-"})
+
+    assert_receive {:ack, ^ref, [_successful], []}, 1_000
+    refute_received {:alive_sink, _, _, _}
+    refute_received {:snapshot_sink, _, _}
+    refute_received {:connection_sink, _}
+  end
+
   test "observes a connection token from a custom metadata field" do
     name = Module.concat(__MODULE__, CustomToken)
 

@@ -301,7 +301,7 @@ defmodule UOF.SDK.ProducerMonitor do
       producer.recovering? ->
         state
 
-      alive_violation?(producer, now, state.inactivity_ms) ->
+      alive_violation?(producer, now, state.inactivity_ms) and not startup_connection_recovery_pending?(state) ->
         trigger_recovery(state, producer, :alive_interval_violation)
 
       processing_violation?(producer, now, state.max_processing_delay_ms) and not producer.delayed? ->

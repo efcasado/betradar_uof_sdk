@@ -66,6 +66,14 @@ defmodule UOF.SDK.SystemPipeline do
   def handle_message(_processor, %Message{} = message, context) do
     rk = message |> routing_key(context) |> RoutingKey.parse()
 
+    if rk.message_type in ["alive", "snapshot_complete"] do
+      handle_system_message(message, context, rk)
+    else
+      message
+    end
+  end
+
+  defp handle_system_message(%Message{} = message, context, rk) do
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
         maybe_track_connection(context, rk.message_type, message)

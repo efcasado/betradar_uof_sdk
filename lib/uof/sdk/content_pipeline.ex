@@ -191,14 +191,22 @@ defmodule UOF.SDK.ContentPipeline do
 
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
-  defp maybe_track_connection(%{monitor: monitor} = context, _type, message) do
+  defp maybe_track_connection(%{metadata_adapter: :amqp} = context, "alive", message) do
+    notify_connection(context, message)
+  end
+
+  defp maybe_track_connection(%{metadata_adapter: :pulsar_rabbitmq_source} = context, _type, message) do
+    notify_connection(context, message)
+  end
+
+  defp maybe_track_connection(_context, _type, _message), do: :ok
+
+  defp notify_connection(%{monitor: monitor} = context, message) do
     case connection_token(message, context) do
       nil -> :ok
       token -> monitor.observe_connection({:content, token})
     end
   end
-
-  defp maybe_track_connection(_context, _type, _message), do: :ok
 
   defp connection_token(message, context) do
     MessageMetadata.connection_token(message, context.metadata_adapter, context.connection_token_key)

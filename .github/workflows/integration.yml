@@ -1,0 +1,30 @@
+name: integration
+
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pulsar-transport:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: efcasado/pulsar-connectors
+          ref: improve/rabbitmq-source-connector
+          path: pulsar-connectors
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: jdx/mise-action@v4
+      - run: mix deps.get
+      - run: integration/run.sh
+        env:
+          PULSAR_CONNECTORS_DIR: ${{ github.workspace }}/pulsar-connectors

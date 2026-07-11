@@ -131,8 +131,8 @@ defmodule UOF.SDK.SystemPipelineTest do
         metadata: %{
           partition_key: "-.-.-.alive.-.-.-.-",
           properties: [
-            %{key: "queueName", value: "uof-system"},
-            %{key: "consumerTag", value: "ctag-1"}
+            %{key: "__rabbitmq_queue_name", value: "uof-system"},
+            %{key: "__rabbitmq_consumer_tag", value: "ctag-1"}
           ]
         }
       }

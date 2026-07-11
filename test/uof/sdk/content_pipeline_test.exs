@@ -313,8 +313,8 @@ defmodule UOF.SDK.ContentPipelineTest do
         metadata: %{partition_key: "-.-.-.alive.-.-.-.-"},
         single_metadata: %{
           properties: [
-            %{key: "queueName", value: "uof-content"},
-            %{key: "consumerTag", value: "ctag-1"}
+            %{key: "__rabbitmq_queue_name", value: "uof-content"},
+            %{key: "__rabbitmq_consumer_tag", value: "ctag-1"}
           ]
         }
       }
@@ -348,8 +348,8 @@ defmodule UOF.SDK.ContentPipelineTest do
         metadata: %{
           partition_key: "hi.-.live.odds_change.1.sr:match.1.-",
           properties: [
-            %{key: "queueName", value: "uof-content"},
-            %{key: "consumerTag", value: "ctag-1"}
+            %{key: "__rabbitmq_queue_name", value: "uof-content"},
+            %{key: "__rabbitmq_consumer_tag", value: "ctag-1"}
           ]
         }
       }

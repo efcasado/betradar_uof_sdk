@@ -149,9 +149,9 @@ Pulsar support assumes the SDK's RabbitMQ source connector contract:
 
 - The AMQP routing key is published as the Pulsar message key.
 - The original XML body is published as the Pulsar payload.
-- `queueName` and `consumerTag` are published as message properties.
+- `__rabbitmq_queue_name` and `__rabbitmq_consumer_tag` are published as message properties.
 
-The SDK uses the `queueName` / `consumerTag` pair as a reconnect token and
+The SDK uses the queue-name / consumer-tag pair as a reconnect token and
 triggers recovery when it changes.
 
 ### Options
@@ -357,3 +357,17 @@ Producer state lives entirely in `ProducerMonitor`'s GenServer state.
 
 For Pulsar transports, the SDK reads the original AMQP routing key from the
 Pulsar partition key produced by the RabbitMQ source connector.
+
+## Integration testing
+
+The Pulsar transport test builds the RabbitMQ source NAR from a local
+`pulsar-connectors` checkout, starts RabbitMQ and Pulsar with Docker Compose,
+publishes synthetic UOF XML, and verifies delivery through the SDK handler:
+
+```bash
+integration/run.sh
+```
+
+By default, the runner expects `pulsar-connectors` next to this repository. Set
+`PULSAR_CONNECTORS_DIR` to use a different checkout. The ordinary `mix test`
+suite excludes this Docker-backed test.

@@ -360,14 +360,23 @@ Pulsar partition key produced by the RabbitMQ source connector.
 
 ## Integration testing
 
-The Pulsar transport test builds the RabbitMQ source NAR from a local
-`pulsar-connectors` checkout, starts RabbitMQ and Pulsar with Docker Compose,
-publishes synthetic UOF XML, and verifies delivery through the SDK handler:
+The Pulsar transport test uses the RabbitMQ source NAR from a local
+`pulsar-connectors` checkout. Docker Compose starts RabbitMQ and Pulsar, creates
+the exchange and source, and waits for the connector to run. The test then
+publishes synthetic UOF XML and verifies delivery through the SDK handler.
 
 ```bash
-integration/run.sh
+PULSAR_CONNECTORS_DIR=${PULSAR_CONNECTORS_DIR:-../pulsar-connectors}
+"$PULSAR_CONNECTORS_DIR/gradlew" -p "$PULSAR_CONNECTORS_DIR" :rabbitmq:assemble
+export RABBITMQ_CONNECTOR_NAR="$(find "$PULSAR_CONNECTORS_DIR/rabbitmq/build/libs" \
+  -maxdepth 1 -name 'rabbitmq-*.nar' -print -quit)"
+
+docker compose up --detach --wait
+mix test --only integration
+docker compose down --volumes --remove-orphans
 ```
 
-By default, the runner expects `pulsar-connectors` next to this repository. Set
-`PULSAR_CONNECTORS_DIR` to use a different checkout. The ordinary `mix test`
-suite excludes this Docker-backed test.
+Gradle performs the connector build incrementally, so repeated local runs reuse
+its build cache. CI checks out the connector development branch explicitly and
+caches the Gradle user home. The ordinary `mix test` suite excludes this
+Docker-backed test.

@@ -1,0 +1,64 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-15672}:5672"
+      - "${RABBITMQ_HTTP_PORT:-25672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  pulsar:
+    image: apachepulsar/pulsar:4.2.0
+    command: ["sh", "-c", "bin/apply-config-from-env.py conf/standalone.conf && exec bin/pulsar standalone"]
+    environment:
+      PULSAR_PREFIX_advertisedListeners: "internal:pulsar://pulsar:6650,external:pulsar://localhost:${PULSAR_BROKER_PORT:-16650}"
+      PULSAR_PREFIX_bindAddresses: "internal:pulsar://0.0.0.0:6650,external:pulsar://0.0.0.0:${PULSAR_BROKER_PORT:-16650}"
+      PULSAR_PREFIX_brokerServicePort: ""
+      PULSAR_PREFIX_internalListenerName: internal
+    ports:
+      - "${PULSAR_BROKER_PORT:-16650}:${PULSAR_BROKER_PORT:-16650}"
+      - "${PULSAR_HTTP_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD", "bin/pulsar-admin", "brokers", "healthcheck"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  initialize:
+    image: apachepulsar/pulsar:4.2.0
+    depends_on:
+      pulsar:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - "${RABBITMQ_CONNECTOR_NAR:?set RABBITMQ_CONNECTOR_NAR}:/pulsar/connectors/rabbitmq.nar:ro"
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        curl --fail --silent --show-error \
+          --user guest:guest \
+          --header 'content-type: application/json' \
+          --request PUT \
+          --data '{"type":"topic","durable":true,"auto_delete":false,"internal":false,"arguments":{}}' \
+          http://rabbitmq:15672/api/exchanges/%2f/unifiedfeed
+        bin/pulsar-admin --admin-url http://pulsar:8080 sources create \
+          --archive /pulsar/connectors/rabbitmq.nar \
+          --name uof-rabbitmq \
+          --destination-topic-name persistent://public/default/uof-feed \
+          --source-config '{"host":"rabbitmq","port":5672,"virtualHost":"/","username":"guest","password":"guest","queueName":"uof-integration","exchangeName":"unifiedfeed","routingKey":"#","durable":true,"connectionName":"uof-integration"}'
+        attempts=0
+        until bin/pulsar-admin --admin-url http://pulsar:8080 sources status \
+          --name uof-rabbitmq | grep --quiet '"running"[[:space:]]*:[[:space:]]*true'; do
+          attempts=$$((attempts + 1))
+          if [ "$$attempts" -ge 60 ]; then
+            echo 'RabbitMQ source did not reach the running state' >&2
+            exit 1
+          fi
+          sleep 2
+        done

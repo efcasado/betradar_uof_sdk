@@ -23,8 +23,15 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
       - uses: jdx/mise-action@v4
       - run: mix deps.get
-      - run: integration/run.sh
-        env:
-          PULSAR_CONNECTORS_DIR: ${{ github.workspace }}/pulsar-connectors
+      - name: Build RabbitMQ connector
+        run: pulsar-connectors/gradlew -p pulsar-connectors :rabbitmq:assemble
+      - name: Locate RabbitMQ connector NAR
+        run: echo "RABBITMQ_CONNECTOR_NAR=$(find "$GITHUB_WORKSPACE/pulsar-connectors/rabbitmq/build/libs" -maxdepth 1 -name 'rabbitmq-*.nar' -print -quit)" >> "$GITHUB_ENV"
+      - run: docker compose up --detach --wait
+      - run: mix test --only integration
+      - name: Stop integration services
+        if: always()
+        run: RABBITMQ_CONNECTOR_NAR="${RABBITMQ_CONNECTOR_NAR:-/tmp/rabbitmq.nar}" docker compose down --volumes --remove-orphans

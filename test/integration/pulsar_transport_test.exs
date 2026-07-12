@@ -4,11 +4,11 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
   alias UOF.Schemas.Feed
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.MessageHandler
+  alias UOF.SDK.TestSupport
   alias UOF.SDK.Transport
 
   @moduletag :integration
   @pulsar_port System.get_env("PULSAR_BROKER_PORT", "16650")
-  @pulsar_http_port System.get_env("PULSAR_HTTP_PORT", "18080")
   @rabbitmq_port "RABBITMQ_AMQP_PORT" |> System.get_env("15672") |> String.to_integer()
 
   defmodule Handler do
@@ -35,7 +35,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
   setup do
     Application.put_env(:uof_sdk, :integration_test_pid, self())
-    {:ok, _apps} = Application.ensure_all_started(:inets)
+    TestSupport.start_http_client!()
 
     on_exit(fn -> Application.delete_env(:uof_sdk, :integration_test_pid) end)
 
@@ -46,8 +46,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
         {:pulsar,
          host: "pulsar://localhost:#{@pulsar_port}",
          topic: "persistent://public/default/uof-feed",
-         subscription: subscription,
-         consumer_opts: [initial_position: :earliest]},
+         subscription: subscription},
         nil
       )
 
@@ -61,7 +60,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
        monitor: Monitor}
     )
 
-    wait_for_subscription("#{subscription}-content")
+    TestSupport.wait_for_subscription!("#{subscription}-content")
 
     {:ok, connection} = AMQP.Connection.open(host: "localhost", port: @rabbitmq_port)
     {:ok, channel} = AMQP.Channel.open(connection)
@@ -101,28 +100,28 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     assert_receive {:observed_message, 1, 43}, 10_000
   end
 
-  defp wait_for_subscription(subscription, attempts \\ 100)
+  test "changes the connection token when the source connector restarts", %{channel: channel} do
+    publish_odds_change(channel, "111", 100)
 
-  defp wait_for_subscription(subscription, attempts) when attempts > 0 do
-    url =
-      ~c"http://localhost:#{@pulsar_http_port}/admin/v2/persistent/public/default/uof-feed/subscriptions"
+    assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
+    assert_receive {:observed_connection, {:content, {old_queue, old_consumer_tag}}}, 10_000
 
-    case :httpc.request(:get, {url, []}, [timeout: 1_000], body_format: :binary) do
-      {:ok, {{_version, 200, _reason}, _headers, body}} ->
-        if String.contains?(body, subscription) do
-          :ok
-        else
-          Process.sleep(100)
-          wait_for_subscription(subscription, attempts - 1)
-        end
+    TestSupport.restart_source!()
+    new_queue = TestSupport.wait_for_new_source_queue!(old_queue)
 
-      _result ->
-        Process.sleep(100)
-        wait_for_subscription(subscription, attempts - 1)
-    end
+    publish_odds_change(channel, "222", 101)
+
+    assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
+    assert_receive {:observed_connection, {:content, {^new_queue, new_consumer_tag}}}, 10_000
+
+    refute new_queue == old_queue
+    refute new_consumer_tag == old_consumer_tag
   end
 
-  defp wait_for_subscription(subscription, 0) do
-    flunk("Pulsar subscription #{subscription} did not become ready")
+  defp publish_odds_change(channel, event_id, timestamp) do
+    routing_key = "hi.-.pre.odds_change.1.sr:match.#{event_id}.-"
+    xml = ~s(<odds_change product="1" event_id="sr:match:#{event_id}" timestamp="#{timestamp}"/>)
+
+    :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, xml)
   end
 end

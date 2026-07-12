@@ -3,16 +3,16 @@ defmodule UOF.SDKTest do
 
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
-  alias UOF.SDK.MonitorSnapshot
-  alias UOF.SDK.MonitorStore
+  alias UOF.SDK.ProducerMonitor.Snapshot
+  alias UOF.SDK.ProducerMonitor.Store
   alias UOF.SDK.SystemPipeline
 
   defmodule CallbackOnlyMonitorStore do
     @moduledoc false
-    @behaviour MonitorStore
+    @behaviour Store
 
     @impl true
-    def load, do: %MonitorSnapshot{}
+    def load, do: %Snapshot{}
 
     @impl true
     def save(_snapshot), do: :ok
@@ -20,7 +20,7 @@ defmodule UOF.SDKTest do
 
   defmodule StartableMonitorStore do
     @moduledoc false
-    @behaviour MonitorStore
+    @behaviour Store
 
     use GenServer
 
@@ -30,7 +30,7 @@ defmodule UOF.SDKTest do
     def init(opts), do: {:ok, opts}
 
     @impl true
-    def load, do: %MonitorSnapshot{}
+    def load, do: %Snapshot{}
 
     @impl true
     def save(_snapshot), do: :ok

@@ -2,7 +2,7 @@ defmodule UOF.SDK.ProducersTest do
   use ExUnit.Case, async: true
 
   alias UOF.Schemas.API.Descriptions.Producer, as: Desc
-  alias UOF.SDK.Producer
+  alias UOF.SDK.ProducerMonitor.Producer
   alias UOF.SDK.Producers
 
   test "builds producers from active descriptions, deriving product and window" do

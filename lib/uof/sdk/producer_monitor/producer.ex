@@ -1,4 +1,4 @@
-defmodule UOF.SDK.Producer do
+defmodule UOF.SDK.ProducerMonitor.Producer do
   @moduledoc """
   Runtime state reported for one Betradar producer.
 

@@ -31,7 +31,7 @@ defmodule UOF.SDK.Config do
   """
 
   alias UOF.SDK.MessageMetadata
-  alias UOF.SDK.MonitorStore.ETS
+  alias UOF.SDK.ProducerMonitor.Store.ETS
   alias UOF.SDK.Transport
 
   @otp_app :uof_sdk

@@ -1,17 +1,17 @@
-defmodule UOF.SDK.MonitorStore.ETS do
+defmodule UOF.SDK.ProducerMonitor.Store.ETS do
   @moduledoc """
-  In-memory `UOF.SDK.MonitorStore` implementation.
+  In-memory `UOF.SDK.ProducerMonitor.Store` implementation.
 
   Its snapshot survives monitor and pipeline crashes while this store process
   remains alive, but is lost when the VM stops.
   """
 
-  @behaviour UOF.SDK.MonitorStore
+  @behaviour UOF.SDK.ProducerMonitor.Store
 
   use GenServer
 
-  alias UOF.SDK.MonitorSnapshot
-  alias UOF.SDK.MonitorStore
+  alias UOF.SDK.ProducerMonitor.Snapshot
+  alias UOF.SDK.ProducerMonitor.Store
 
   @table __MODULE__
   @snapshot_key :snapshot
@@ -26,16 +26,16 @@ defmodule UOF.SDK.MonitorStore.ETS do
     {:ok, %{}}
   end
 
-  @impl MonitorStore
+  @impl Store
   def load do
     case :ets.lookup(@table, @snapshot_key) do
       [{@snapshot_key, snapshot}] -> snapshot
-      [] -> %MonitorSnapshot{}
+      [] -> %Snapshot{}
     end
   end
 
-  @impl MonitorStore
-  def save(%MonitorSnapshot{} = snapshot) do
+  @impl Store
+  def save(%Snapshot{} = snapshot) do
     :ets.insert(@table, {@snapshot_key, snapshot})
     :ok
   end

@@ -1,6 +1,6 @@
 defmodule UOF.SDK.Producers do
   @moduledoc """
-  Builds the initial `UOF.SDK.Producer` list the monitor tracks, from Betradar's
+  Builds the initial `UOF.SDK.ProducerMonitor.Producer` list the monitor tracks, from Betradar's
   producer descriptions (`UOF.API.Descriptions.producers/0`).
 
   The recovery `product` path segment is taken from the description's `api_url`
@@ -8,7 +8,7 @@ defmodule UOF.SDK.Producers do
   `stateful_recovery_window_in_minutes`.
   """
 
-  alias UOF.SDK.Producer
+  alias UOF.SDK.ProducerMonitor.Producer
 
   @doc """
   Fetch producer descriptions from the API and build the tracked list.
@@ -33,7 +33,7 @@ defmodule UOF.SDK.Producers do
     raise RuntimeError, "could not load UOF producers: #{inspect(other)}"
   end
 
-  @doc "Build `UOF.SDK.Producer` structs from a list of API producer descriptions."
+  @doc "Build `UOF.SDK.ProducerMonitor.Producer` structs from a list of API producer descriptions."
   @spec build([map()]) :: [Producer.t()]
   def build(descriptions) do
     descriptions

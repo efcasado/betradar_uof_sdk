@@ -1,4 +1,4 @@
-defmodule UOF.SDK.MonitorSnapshot do
+defmodule UOF.SDK.ProducerMonitor.Snapshot do
   @moduledoc """
   Atomic durable state owned by `UOF.SDK.ProducerMonitor`.
 

@@ -1,4 +1,4 @@
-defmodule UOF.SDK.MonitorStore do
+defmodule UOF.SDK.ProducerMonitor.Store do
   @moduledoc """
   Persists the producer monitor's state as one coherent snapshot.
 
@@ -10,10 +10,10 @@ defmodule UOF.SDK.MonitorStore do
   writes from another monitor, node, or administration tool are unsupported.
   """
 
-  alias UOF.SDK.MonitorSnapshot
+  alias UOF.SDK.ProducerMonitor.Snapshot
 
   @doc "Load the complete snapshot when its producer monitor starts."
-  @callback load() :: MonitorSnapshot.t()
+  @callback load() :: Snapshot.t()
 
   @doc """
   Atomically replace the complete snapshot.
@@ -21,7 +21,7 @@ defmodule UOF.SDK.MonitorStore do
   All fields must become visible as one unit; splitting this write across
   non-transactional operations can cause recovery to be skipped after a crash.
   """
-  @callback save(MonitorSnapshot.t()) :: :ok
+  @callback save(Snapshot.t()) :: :ok
 
   @doc "Optional child specification for stores that own a process."
   @callback child_spec(term()) :: Supervisor.child_spec()

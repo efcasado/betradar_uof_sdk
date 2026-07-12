@@ -26,8 +26,8 @@ defmodule UOF.SDK do
 
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
-  alias UOF.SDK.Producer
   alias UOF.SDK.ProducerMonitor
+  alias UOF.SDK.ProducerMonitor.Producer
   alias UOF.SDK.Producers
   alias UOF.SDK.SystemPipeline
 

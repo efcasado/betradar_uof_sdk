@@ -164,7 +164,7 @@ was possible. The AMQP transport uses its own consumer tag the same way.
 | `:handler` | Required | Your `UOF.SDK.MessageHandler` module |
 | `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}` |
 | `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
-| `:monitor_store` | `UOF.SDK.MonitorStore.ETS` | Atomic monitor snapshot persistence |
+| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Atomic monitor snapshot persistence |
 | `:concurrency` | `10` | Broadway processor concurrency per feed session |
 | `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |
 | `:max_processing_delay_seconds` | `20` | Consumer-lag threshold before a producer becomes `:delayed` |
@@ -239,15 +239,15 @@ reported.
 ## Producer health and recovery
 
 Producer state is available synchronously and through the
-`handle_producer_status/1` callback. Both return the same `UOF.SDK.Producer`
+`handle_producer_status/1` callback. Both return the same `UOF.SDK.ProducerMonitor.Producer`
 struct.
 
 ```elixir
 UOF.SDK.producers()
-#=> [%UOF.SDK.Producer{id: 1, product: "liveodds", status: :up, ...}, ...]
+#=> [%UOF.SDK.ProducerMonitor.Producer{id: 1, product: "liveodds", status: :up, ...}, ...]
 
 UOF.SDK.producer(1)
-#=> {:ok, %UOF.SDK.Producer{...}}
+#=> {:ok, %UOF.SDK.ProducerMonitor.Producer{...}}
 ```
 
 A producer reports one lifecycle `status`:
@@ -263,7 +263,7 @@ The UOF protocol requires every producer to be recovered before its markets are
 safe to act on. A gap in the message stream can happen on first connect,
 reconnect, or alive heartbeat timeout. When a gap is detected, the SDK:
 
-1. Reads `MonitorStore` for the last stable alive timestamp for the producer.
+1. Reads `Store` for the last stable alive timestamp for the producer.
 2. Calls `UOF.API.Recovery.recover/2` with a unique `request_id`.
 3. Requests incremental recovery if a checkpoint exists, or full recovery if it
    does not.
@@ -288,7 +288,7 @@ original timestamp so messages are not skipped on retry.
 ## Monitor state persistence
 
 > [!NOTE]
-> The default `UOF.SDK.MonitorStore.ETS` is in-memory. Checkpoints, resumability
+> The default `UOF.SDK.ProducerMonitor.Store.ETS` is in-memory. Checkpoints, resumability
 > state and connection tokens are lost on VM restart, so a full recovery is
 > issued on the next start. This is fine for development and low-volume
 > producers, but production applications should use a persistent store. The ETS
@@ -304,11 +304,11 @@ checkpoint before requesting incremental recovery. This intentionally replays a
 bounded amount of data to cover concurrent processing and distributed-consumer
 skew. Handlers should be idempotent and tolerate duplicates.
 
-To persist across VM restarts, implement the `UOF.SDK.MonitorStore`
+To persist across VM restarts, implement the `UOF.SDK.ProducerMonitor.Store`
 behaviour and configure it:
 
 ```elixir
-config :uof_sdk, monitor_store: MyApp.PostgresMonitorStore
+config :uof_sdk, monitor_store: MyApp.ProducerMonitorStore
 ```
 
 The behaviour requires only `load/0` and `save/1`. They read and atomically
@@ -370,7 +370,7 @@ start it before the producer monitor.
 
 ```text
 UOF.SDK
-|-- MonitorStore - atomic checkpoints, resumability, and connection tokens
+|-- Store - atomic checkpoints, resumability, and connection tokens
 |-- ProducerMonitor   - producer state, health monitoring, and recovery
 |-- SystemPipeline    - feed consumer for alive and snapshot_complete
 `-- ContentPipeline   - feed consumer for event content

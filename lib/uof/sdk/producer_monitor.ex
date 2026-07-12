@@ -35,7 +35,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   When a delivery gap is detected, this module:
 
-    * computes the `after:` timestamp from `UOF.SDK.MonitorStore` (clamped
+    * computes the `after:` timestamp from `UOF.SDK.ProducerMonitor.Store` (clamped
       to the producer's `recovery_window_minutes`; a full recovery when there
       is no checkpoint),
     * issues `UOF.API.Recovery.recover/2` with a fresh `request_id`, emitting
@@ -70,9 +70,9 @@ defmodule UOF.SDK.ProducerMonitor do
   use GenServer
 
   alias UOF.Schemas.Common.Response
-  alias UOF.SDK.MonitorSnapshot
-  alias UOF.SDK.Producer
   alias UOF.SDK.ProducerMonitor.Connections
+  alias UOF.SDK.ProducerMonitor.Producer
+  alias UOF.SDK.ProducerMonitor.Snapshot
 
   require Logger
 
@@ -149,7 +149,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @impl true
   def init(opts) do
-    monitor_store = Keyword.get(opts, :monitor_store, UOF.SDK.MonitorStore.ETS)
+    monitor_store = Keyword.get(opts, :monitor_store, UOF.SDK.ProducerMonitor.Store.ETS)
     snapshot = monitor_store.load()
 
     producers =
@@ -235,7 +235,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
         snapshot =
           state.snapshot
-          |> MonitorSnapshot.require_recovery(Map.keys(state.producers))
+          |> Snapshot.require_recovery(Map.keys(state.producers))
           |> Map.put(:connection_tokens, connections.persisted)
 
         state = persist_snapshot(%{state | connections: connections, snapshot: snapshot})
@@ -373,8 +373,8 @@ defmodule UOF.SDK.ProducerMonitor do
   # session. `subscribed=0` or a connection-token change observed while
   # draining still forces recovery; everything else starts `:down`.
   defp restore_producer(producer, snapshot) do
-    if MonitorSnapshot.resumable?(snapshot, producer.id) do
-      case MonitorSnapshot.checkpoint(snapshot, producer.id) do
+    if Snapshot.resumable?(snapshot, producer.id) do
+      case Snapshot.checkpoint(snapshot, producer.id) do
         checkpoint when is_integer(checkpoint) ->
           %{producer | status: :resuming, last_message_timestamp: checkpoint}
 
@@ -405,14 +405,14 @@ defmodule UOF.SDK.ProducerMonitor do
   defp persist_producer_state(state, after_) do
     resumable? = after_.status in [:up, :delayed]
 
-    if MonitorSnapshot.resumable?(state.snapshot, after_.id) == resumable? do
+    if Snapshot.resumable?(state.snapshot, after_.id) == resumable? do
       state
     else
       snapshot =
         if resumable? do
-          MonitorSnapshot.mark_resumable(state.snapshot, after_.id)
+          Snapshot.mark_resumable(state.snapshot, after_.id)
         else
-          MonitorSnapshot.require_recovery(state.snapshot, after_.id)
+          Snapshot.require_recovery(state.snapshot, after_.id)
         end
 
       persist_snapshot(%{state | snapshot: snapshot})
@@ -482,7 +482,7 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp after_from_checkpoint(state, producer) do
-    case MonitorSnapshot.checkpoint(state.snapshot, producer.id) do
+    case Snapshot.checkpoint(state.snapshot, producer.id) do
       timestamp when is_integer(timestamp) ->
         timestamp
         |> checkpoint_after_overlap(state.recovery_overlap_ms)
@@ -500,12 +500,12 @@ defmodule UOF.SDK.ProducerMonitor do
   defp checkpoint_after_overlap(timestamp, overlap_ms), do: max(timestamp - overlap_ms, 0)
 
   defp put_checkpoint(state, id, timestamp) do
-    case MonitorSnapshot.checkpoint(state.snapshot, id) do
+    case Snapshot.checkpoint(state.snapshot, id) do
       existing when is_integer(existing) and existing >= timestamp ->
         state
 
       _other ->
-        snapshot = MonitorSnapshot.put_checkpoint(state.snapshot, id, timestamp)
+        snapshot = Snapshot.put_checkpoint(state.snapshot, id, timestamp)
         persist_snapshot(%{state | snapshot: snapshot})
     end
   end

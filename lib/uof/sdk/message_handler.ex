@@ -32,9 +32,9 @@ defmodule UOF.SDK.MessageHandler do
 
   @doc """
   Called whenever a producer's health changes (up/down, delayed, recovery). The
-  same `UOF.SDK.Producer` shape returned by `UOF.SDK.producers/0`.
+  same `UOF.SDK.ProducerMonitor.Producer` shape returned by `UOF.SDK.producers/0`.
   """
-  @callback handle_producer_status(producer :: UOF.SDK.Producer.t()) :: :ok
+  @callback handle_producer_status(producer :: UOF.SDK.ProducerMonitor.Producer.t()) :: :ok
 
   defmacro __using__(_opts) do
     quote do

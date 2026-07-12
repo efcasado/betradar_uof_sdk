@@ -25,7 +25,7 @@ defmodule UOF.SDK.ConfigTest do
     assert config.transport == :amqp
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
     assert content_opts[:connection] == []
-    assert config.monitor_store == UOF.SDK.MonitorStore.ETS
+    assert config.monitor_store == UOF.SDK.ProducerMonitor.Store.ETS
   end
 
   test "scopes AMQP bindings by node_id" do

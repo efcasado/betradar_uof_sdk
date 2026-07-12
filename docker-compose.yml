@@ -51,7 +51,7 @@ services:
           --archive /pulsar/connectors/rabbitmq.nar \
           --name uof-rabbitmq \
           --destination-topic-name persistent://public/default/uof-feed \
-          --source-config '{"host":"rabbitmq","port":5672,"virtualHost":"/","username":"guest","password":"guest","queueName":"uof-integration","exchangeName":"unifiedfeed","routingKey":"#","durable":true,"connectionName":"uof-integration"}'
+          --source-config '{"host":"rabbitmq","port":5672,"virtualHost":"/","username":"guest","password":"guest","queueName":"","exchangeName":"unifiedfeed","routingKey":"#","passive":false,"exclusive":true,"durable":false,"autoDelete":true,"connectionName":"uof-integration"}'
         exec tail -f /dev/null
     healthcheck:
       test:
@@ -60,7 +60,7 @@ services:
           bin/pulsar-admin --admin-url http://pulsar:8080 sources status
           --name uof-rabbitmq | grep -q '"running"[[:space:]]*:[[:space:]]*true' &&
           curl --fail --silent --user guest:guest
-          http://rabbitmq:15672/api/queues/%2f/uof-integration |
+          http://rabbitmq:15672/api/queues/%2f |
           grep -q '"consumers":1'
       interval: 2s
       timeout: 10s

@@ -93,7 +93,8 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     assert fixture_context.routing_key == "hi.-.pre.fixture_change.1.sr:match.67890.-"
     assert fixture_context.event_urn == "sr:match:67890"
 
-    assert_receive {:observed_connection, {:content, {"uof-integration", consumer_tag}}}, 10_000
+    assert_receive {:observed_connection, {:content, {queue_name, consumer_tag}}}, 10_000
+    assert is_binary(queue_name) and queue_name != ""
     assert is_binary(consumer_tag) and consumer_tag != ""
 
     assert_receive {:observed_message, 1, 42}, 10_000

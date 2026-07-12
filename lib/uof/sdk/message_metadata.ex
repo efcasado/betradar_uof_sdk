@@ -25,7 +25,10 @@ defmodule UOF.SDK.MessageMetadata do
 
   def connection_token(%Message{metadata: metadata}, :pulsar_rabbitmq_source, _key) do
     case properties(metadata) do
-      %{"queueName" => queue_name, "consumerTag" => consumer_tag} ->
+      %{
+        "__rabbitmq_queue_name" => queue_name,
+        "__rabbitmq_consumer_tag" => consumer_tag
+      } ->
         {queue_name, consumer_tag}
 
       _properties ->

@@ -149,9 +149,9 @@ Pulsar support assumes the SDK's RabbitMQ source connector contract:
 
 - The AMQP routing key is published as the Pulsar message key.
 - The original XML body is published as the Pulsar payload.
-- `queueName` and `consumerTag` are published as message properties.
+- `__rabbitmq_queue_name` and `__rabbitmq_consumer_tag` are published as message properties.
 
-The SDK uses the `queueName` / `consumerTag` pair as a reconnect token and
+The SDK uses the queue-name / consumer-tag pair as a reconnect token and
 triggers recovery when it changes.
 
 ### Options
@@ -357,3 +357,21 @@ Producer state lives entirely in `ProducerMonitor`'s GenServer state.
 
 For Pulsar transports, the SDK reads the original AMQP routing key from the
 Pulsar partition key produced by the RabbitMQ source connector.
+
+## Integration testing
+
+The integration test builds the RabbitMQ source connector, starts the complete
+Docker Compose environment, verifies synthetic UOF events end to end, and
+cleans up afterward:
+
+```bash
+make test-integration
+```
+
+Use `make compile` and `make test-unit` for the usual development checks.
+
+The connector repository, revision, and checkout directory can be overridden
+with `RABBITMQ_SOURCE_REPO`, `RABBITMQ_SOURCE_REF`, and
+`RABBITMQ_SOURCE_DIR`. Gradle builds incrementally, and CI uses the same command
+with a persistent Gradle cache. The ordinary `mix test` suite excludes this
+Docker-backed test.

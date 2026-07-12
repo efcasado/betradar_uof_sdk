@@ -19,13 +19,15 @@ test: test-unit
 test-unit: deps
 	$(MIX) test
 
-$(RABBITMQ_SOURCE_DIR):
-	mkdir -p "$(dir $(RABBITMQ_SOURCE_DIR))"
-	git clone --branch "$(RABBITMQ_SOURCE_REF)" --depth 1 \
-		"$(RABBITMQ_SOURCE_REPO)" "$(RABBITMQ_SOURCE_DIR)"
+rabbitmq-source: $(RABBITMQ_SOURCE_NAR)
 
-rabbitmq-source: $(RABBITMQ_SOURCE_DIR)
+$(RABBITMQ_SOURCE_NAR):
 	@set -euo pipefail; \
+	if [[ ! -d "$(RABBITMQ_SOURCE_DIR)" ]]; then \
+		mkdir -p "$(dir $(RABBITMQ_SOURCE_DIR))"; \
+		git clone --branch "$(RABBITMQ_SOURCE_REF)" --depth 1 \
+			"$(RABBITMQ_SOURCE_REPO)" "$(RABBITMQ_SOURCE_DIR)"; \
+	fi; \
 	"$(RABBITMQ_SOURCE_DIR)/gradlew" -p "$(RABBITMQ_SOURCE_DIR)" :rabbitmq:assemble; \
 	connector_nar="$$(find "$(RABBITMQ_SOURCE_DIR)/rabbitmq/build/libs" -maxdepth 1 \
 		-name 'rabbitmq-*.nar' -print -quit)"; \

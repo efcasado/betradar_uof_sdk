@@ -20,6 +20,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
@@ -32,3 +33,15 @@ jobs:
       - run: mix compile --warnings-as-errors
       - run: mix format --check-formatted
       - run: mix test
+      - name: Resolve RabbitMQ connector revision
+        id: connector
+        run: |
+          repo=$(sed -n 's/^RABBITMQ_SOURCE_REPO ?= //p' Makefile)
+          ref=$(sed -n 's/^RABBITMQ_SOURCE_REF ?= //p' Makefile)
+          echo "sha=$(git ls-remote "$repo" "refs/heads/$ref" | cut -f1)" >> "$GITHUB_OUTPUT"
+      - name: Cache RabbitMQ connector NAR
+        uses: actions/cache@v6
+        with:
+          path: tmp/rabbitmq-source.nar
+          key: ${{ runner.os }}-rabbitmq-nar-${{ steps.connector.outputs.sha }}
+      - run: make test-integration

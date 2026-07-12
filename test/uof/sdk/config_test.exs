@@ -25,7 +25,7 @@ defmodule UOF.SDK.ConfigTest do
     assert config.transport == :amqp
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
     assert content_opts[:connection] == []
-    assert config.checkpoint_store == UOF.SDK.CheckpointStore.ETS
+    assert config.monitor_store == UOF.SDK.MonitorStore.ETS
   end
 
   test "scopes AMQP bindings by node_id" do
@@ -39,8 +39,8 @@ defmodule UOF.SDK.ConfigTest do
   end
 
   test "accepts a custom checkpoint store" do
-    config = Config.load(handler: MyApp.Handler, checkpoint_store: MyApp.PgStore)
-    assert config.checkpoint_store == MyApp.PgStore
+    config = Config.load(handler: MyApp.Handler, monitor_store: MyApp.PgStore)
+    assert config.monitor_store == MyApp.PgStore
   end
 
   test "builds Pulsar producer specs from one topic and subscription" do

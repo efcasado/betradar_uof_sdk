@@ -29,7 +29,7 @@ defmodule UOF.SDK.ProducersTest do
     assert lo.id == 1
     assert lo.product == "liveodds"
     assert lo.recovery_window_minutes == 4320
-    assert lo.down? == true
+    assert lo.status == :down
 
     # trailing slash trimmed
     assert pre.product == "pre"

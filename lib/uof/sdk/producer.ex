@@ -1,43 +1,25 @@
 defmodule UOF.SDK.Producer do
   @moduledoc """
-  Runtime state of a single Betradar producer.
+  Runtime state reported for one Betradar producer.
 
-  Producers start **down** (the feed must recover to get in sync before bets on
-  that producer's markets are safe). The fields mirror the producer-status
-  callback the SDK delivers, so the registry and the callback share one shape.
+  `status` is the complete lifecycle state:
 
-  `down?`/`delayed?` are the two independent "not healthy" axes:
-
-    * `down?` due to **delivery/connection** issues triggers recovery.
-    * `down?` due to **slow consumer processing** (`delayed?`) does *not* — the
-      producer keeps delivering and recovers when processing catches up.
-
-  Timestamps are milliseconds since the Unix epoch (the feed's unit).
+    * `:down` — not synchronized and no recovery is in flight
+    * `:recovering` — requesting or awaiting recovery completion
+    * `:up` — synchronized and safe
+    * `:delayed` — the remote feed is healthy but local processing is behind
+    * `:resuming` — draining retained backlog after a restart and awaiting
+      current-session confirmation
   """
 
-  @typedoc """
-  Why the producer last changed state, mirroring Betradar's `ProducerStatusReason`.
-  """
-  @type reason ::
-          :first_recovery_completed
-          | :processing_queue_delay_violation
-          | :processing_queue_delay_stabilized
-          | :alive_interval_violation
-          | :connection_down
-          | :returned_from_inactivity
-          | :other
-          | nil
+  @type status :: :down | :recovering | :up | :delayed | :resuming
 
   @type t :: %__MODULE__{
           id: integer(),
           product: String.t() | nil,
           name: String.t() | nil,
           recovery_window_minutes: integer() | nil,
-          down?: boolean(),
-          delayed?: boolean(),
-          reason: reason(),
-          recovering?: boolean(),
-          recovery_id: integer() | nil,
+          status: status(),
           last_alive_at: integer() | nil,
           last_message_timestamp: integer() | nil,
           processing_queue_delay: integer() | nil
@@ -48,17 +30,57 @@ defmodule UOF.SDK.Producer do
     :product,
     :name,
     :recovery_window_minutes,
-    :reason,
-    :recovery_id,
     :last_alive_at,
     :last_message_timestamp,
     :processing_queue_delay,
-    down?: true,
-    delayed?: false,
-    recovering?: false
+    status: :down
   ]
 
-  @doc "Whether the producer is up (in sync, safe to accept bets)."
-  @spec up?(t()) :: boolean()
-  def up?(%__MODULE__{down?: down?}), do: not down?
+  @doc false
+  @spec observe_alive(t(), integer()) :: t()
+  def observe_alive(%__MODULE__{} = producer, now) do
+    %{producer | last_alive_at: now}
+  end
+
+  @doc false
+  @spec observe_message(t(), integer() | nil) :: t()
+  def observe_message(%__MODULE__{} = producer, timestamp) do
+    %{producer | last_message_timestamp: max_timestamp(producer.last_message_timestamp, timestamp)}
+  end
+
+  @doc false
+  @spec start_recovery(t()) :: t()
+  def start_recovery(%__MODULE__{} = producer) do
+    %{producer | status: :recovering, processing_queue_delay: nil}
+  end
+
+  @doc false
+  @spec complete_recovery(t(), integer()) :: t()
+  def complete_recovery(%__MODULE__{} = producer, now) do
+    %{producer | status: :up, last_alive_at: now, processing_queue_delay: nil}
+  end
+
+  @doc false
+  @spec mark_delayed(t(), non_neg_integer()) :: t()
+  def mark_delayed(%__MODULE__{} = producer, delay) do
+    %{
+      producer
+      | status: :delayed,
+        processing_queue_delay: delay
+    }
+  end
+
+  @doc false
+  @spec mark_up(t()) :: t()
+  def mark_up(%__MODULE__{} = producer) do
+    %{
+      producer
+      | status: :up,
+        processing_queue_delay: nil
+    }
+  end
+
+  defp max_timestamp(nil, timestamp), do: timestamp
+  defp max_timestamp(timestamp, nil), do: timestamp
+  defp max_timestamp(a, b), do: max(a, b)
 end

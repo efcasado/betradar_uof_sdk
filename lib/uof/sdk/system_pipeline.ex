@@ -18,8 +18,9 @@ defmodule UOF.SDK.SystemPipeline do
     * `:routing_key_metadata_key` - the `message.metadata` field carrying the
       UOF routing key for AMQP/custom producers (default `:routing_key`).
     * `:connection_token_metadata_key` - the `message.metadata` field carrying a
-      per-connection token for reconnect detection (default `nil`, i.e. the
-      AMQP connection pid).
+      per-connection token for reconnect detection. With the default AMQP
+      producer, `nil` uses its consumer tag; custom producers without that
+      metadata fall back to the AMQP connection PID.
   """
 
   use Broadway

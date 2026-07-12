@@ -30,8 +30,8 @@ defmodule UOF.SDK.Config do
         }
   """
 
-  alias UOF.SDK.CheckpointStore.ETS
   alias UOF.SDK.MessageMetadata
+  alias UOF.SDK.MonitorStore.ETS
   alias UOF.SDK.Transport
 
   @otp_app :uof_sdk
@@ -45,7 +45,7 @@ defmodule UOF.SDK.Config do
           metadata_adapter: MessageMetadata.adapter(),
           routing_key_metadata_key: atom(),
           connection_token_metadata_key: atom() | nil,
-          checkpoint_store: module(),
+          monitor_store: module(),
           concurrency: pos_integer(),
           inactivity_seconds: pos_integer(),
           max_processing_delay_seconds: pos_integer(),
@@ -63,7 +63,7 @@ defmodule UOF.SDK.Config do
     :connection_token_metadata_key,
     metadata_adapter: :amqp,
     routing_key_metadata_key: :routing_key,
-    checkpoint_store: ETS,
+    monitor_store: ETS,
     concurrency: 10,
     inactivity_seconds: 20,
     max_processing_delay_seconds: 20,
@@ -92,7 +92,7 @@ defmodule UOF.SDK.Config do
       metadata_adapter: producers.metadata_adapter,
       routing_key_metadata_key: producers.routing_key_metadata_key,
       connection_token_metadata_key: producers.connection_token_metadata_key,
-      checkpoint_store: Keyword.get(cfg, :checkpoint_store, ETS),
+      monitor_store: Keyword.get(cfg, :monitor_store, ETS),
       concurrency: Keyword.get(cfg, :concurrency, 10),
       inactivity_seconds: Keyword.get(cfg, :inactivity_seconds, 20),
       max_processing_delay_seconds: Keyword.get(cfg, :max_processing_delay_seconds, 20),

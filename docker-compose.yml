@@ -35,7 +35,7 @@ services:
       rabbitmq:
         condition: service_healthy
     volumes:
-      - "${RABBITMQ_CONNECTOR_NAR:?set RABBITMQ_CONNECTOR_NAR}:/pulsar/connectors/rabbitmq.nar:ro"
+      - "${RABBITMQ_SOURCE_NAR:-./tmp/rabbitmq-source.nar}:/pulsar/connectors/rabbitmq.nar:ro"
     command:
       - sh
       - -c
@@ -52,13 +52,16 @@ services:
           --name uof-rabbitmq \
           --destination-topic-name persistent://public/default/uof-feed \
           --source-config '{"host":"rabbitmq","port":5672,"virtualHost":"/","username":"guest","password":"guest","queueName":"uof-integration","exchangeName":"unifiedfeed","routingKey":"#","durable":true,"connectionName":"uof-integration"}'
-        attempts=0
-        until bin/pulsar-admin --admin-url http://pulsar:8080 sources status \
-          --name uof-rabbitmq | grep --quiet '"running"[[:space:]]*:[[:space:]]*true'; do
-          attempts=$$((attempts + 1))
-          if [ "$$attempts" -ge 60 ]; then
-            echo 'RabbitMQ source did not reach the running state' >&2
-            exit 1
-          fi
-          sleep 2
-        done
+        exec tail -f /dev/null
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bin/pulsar-admin --admin-url http://pulsar:8080 sources status
+          --name uof-rabbitmq | grep -q '"running"[[:space:]]*:[[:space:]]*true' &&
+          curl --fail --silent --user guest:guest
+          http://rabbitmq:15672/api/queues/%2f/uof-integration |
+          grep -q '"consumers":1'
+      interval: 2s
+      timeout: 10s
+      retries: 60

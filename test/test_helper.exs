@@ -1,2 +1,1 @@
-ExUnit.start(capture_log: true)
-ExUnit.configure(exclude: [integration: true])
+ExUnit.start(capture_log: true, exclude: [:integration])

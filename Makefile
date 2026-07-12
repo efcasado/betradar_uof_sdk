@@ -19,22 +19,15 @@ test: test-unit
 test-unit: deps
 	$(MIX) test
 
-rabbitmq-source:
+$(RABBITMQ_SOURCE_DIR):
+	mkdir -p "$(dir $(RABBITMQ_SOURCE_DIR))"
+	git clone --branch "$(RABBITMQ_SOURCE_REF)" --depth 1 \
+		"$(RABBITMQ_SOURCE_REPO)" "$(RABBITMQ_SOURCE_DIR)"
+
+rabbitmq-source: $(RABBITMQ_SOURCE_DIR)
 	@set -euo pipefail; \
-	source_dir="$(RABBITMQ_SOURCE_DIR)"; \
-	managed_marker="$$source_dir/.uof-sdk-integration-checkout"; \
-	if [[ ! -d "$$source_dir/.git" ]]; then \
-		mkdir -p "$$(dirname "$$source_dir")"; \
-		git clone --branch "$(RABBITMQ_SOURCE_REF)" --depth 1 \
-			"$(RABBITMQ_SOURCE_REPO)" "$$source_dir"; \
-		touch "$$managed_marker"; \
-	elif [[ -f "$$managed_marker" ]]; then \
-		git -C "$$source_dir" remote set-url origin "$(RABBITMQ_SOURCE_REPO)"; \
-		git -C "$$source_dir" fetch --depth 1 origin "$(RABBITMQ_SOURCE_REF)"; \
-		git -C "$$source_dir" checkout --detach FETCH_HEAD; \
-	fi; \
-	"$$source_dir/gradlew" -p "$$source_dir" :rabbitmq:assemble; \
-	connector_nar="$$(find "$$source_dir/rabbitmq/build/libs" -maxdepth 1 \
+	"$(RABBITMQ_SOURCE_DIR)/gradlew" -p "$(RABBITMQ_SOURCE_DIR)" :rabbitmq:assemble; \
+	connector_nar="$$(find "$(RABBITMQ_SOURCE_DIR)/rabbitmq/build/libs" -maxdepth 1 \
 		-name 'rabbitmq-*.nar' -print -quit)"; \
 	if [[ -z "$$connector_nar" ]]; then \
 		echo 'RabbitMQ connector NAR was not produced' >&2; \

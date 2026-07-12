@@ -149,10 +149,13 @@ Pulsar support assumes the SDK's RabbitMQ source connector contract:
 
 - The AMQP routing key is published as the Pulsar message key.
 - The original XML body is published as the Pulsar payload.
-- `__rabbitmq_queue_name` and `__rabbitmq_consumer_tag` are published as message properties.
+- `__rabbitmq_consumer_tag` is published as a message property and is a
+  server-generated consumer tag (`amq.ctag-…`), unique per consume session. A
+  connector that pins a fixed consumer tag blinds reconnect detection.
 
-The SDK uses the queue-name / consumer-tag pair as a reconnect token and
-triggers recovery when it changes.
+The SDK uses the consumer tag as a reconnect token and triggers recovery when
+it changes: a new tag means a new upstream consume session, so a delivery gap
+was possible. The AMQP transport uses its own consumer tag the same way.
 
 ### Options
 
@@ -284,10 +287,12 @@ original timestamp so messages are not skipped on retry.
 ## Checkpoint storage
 
 > [!NOTE]
-> The default `UOF.SDK.CheckpointStore.ETS` is in-memory. Checkpoints are lost
-> on VM restart, so a full recovery is issued on the next start. This is fine
-> for development and low-volume producers, but production applications should
-> use a persistent store.
+> The default `UOF.SDK.CheckpointStore.ETS` is in-memory. Checkpoints, producer
+> state and connection tokens are lost on VM restart, so a full recovery is
+> issued on the next start. This is fine for development and low-volume
+> producers, but production applications should use a persistent store. The ETS
+> store does survive monitor/pipeline crashes within the same VM, so
+> crash-restarts still resume without recovering.
 
 Checkpoints are owned by `ProducerMonitor` and advanced from subscribed system
 `alive` heartbeats after the producer is already in sync. Content messages and
@@ -298,8 +303,8 @@ checkpoint before requesting incremental recovery. This intentionally replays a
 bounded amount of data to cover concurrent processing and distributed-consumer
 skew. Handlers should be idempotent and tolerate duplicates.
 
-To persist checkpoints across VM restarts, implement the
-`UOF.SDK.CheckpointStore` behaviour and configure it:
+To persist across VM restarts, implement the `UOF.SDK.CheckpointStore`
+behaviour and configure it:
 
 ```elixir
 config :uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore
@@ -307,9 +312,37 @@ config :uof_sdk, checkpoint_store: MyApp.PostgresCheckpointStore
 
 The behaviour requires:
 
-- `get/1`
-- `put/2`
-- `delete/1`
+- `get/1`, `put/2`, `delete/1` — recovery checkpoints per producer
+- `get_state/0`, `put_state/2` — durable producer health flags
+- `get_connection_tokens/0`, `put_connection_token/2` — per-pipeline reconnect
+  tokens
+
+### Restart resume
+
+With a persistent store, `ProducerMonitor` restores producer state and
+connection tokens at startup instead of assuming a gap:
+
+- A producer that was healthy at shutdown (up, or down only from local
+  processing lag) and has a checkpoint resumes as `delayed?` rather than
+  triggering the usual startup recovery. It returns up via
+  `:processing_queue_delay_stabilized` once processing catches up and a live
+  `alive` has been heard.
+- Restored connection tokens are compared against the tokens on incoming
+  messages. A matching token means the same upstream consume session and no
+  recovery; a changed token recovers every producer from its checkpoint.
+
+Whether a restart actually avoids recovery is decided by the transport. A
+direct AMQP session always mints a new consumer tag on restart, so recovery
+still fires (the exclusive queue lost messages while down). A Pulsar transport
+fed by a long-lived source connector keeps the same connector tag across app
+restarts, and the durable subscription retains the backlog — so deployments
+restart, drain, and resume without an odds recovery. `subscribed=0` alives and
+token changes replayed from the backlog still force recovery when a genuine
+upstream gap happened while the app was down.
+
+The Pulsar broker must not drop retained backlog: configure no message TTL (or
+one comfortably above your worst-case downtime) and a `producer_exception`
+backlog quota policy — evicted backlog is a silent gap the SDK cannot detect.
 
 Stores that are backed by infrastructure your application already supervises,
 such as an Ecto repo, do not need to be started by the SDK. Configure the store
@@ -332,7 +365,7 @@ start it before the producer monitor.
 
 ```text
 UOF.SDK
-|-- CheckpointStore   - last stable alive timestamp per producer
+|-- CheckpointStore   - checkpoints, producer state, connection tokens
 |-- ProducerMonitor   - producer state, health monitoring, and recovery
 |-- SystemPipeline    - feed consumer for alive and snapshot_complete
 `-- ContentPipeline   - feed consumer for event content

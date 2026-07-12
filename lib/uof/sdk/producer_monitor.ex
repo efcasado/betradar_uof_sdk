@@ -47,6 +47,28 @@ defmodule UOF.SDK.ProducerMonitor do
 
   The defaults for `min_interval_ms` / `max_recovery_ms` mirror the official
   SDK and are throttling-safe; change with care.
+
+  ## Restart resume
+
+  Producer status (`down?`/`delayed?`) is persisted to the checkpoint store on
+  every transition, and the per-namespace connection token whenever it changes.
+  At startup both are restored:
+
+    * Connection tokens seed `connection_tokens`, so the first token observed
+      after a restart is *compared* rather than treated as new. A matching
+      token (same upstream consume session — possible when the transport
+      retains messages across restarts, e.g. Pulsar fed by a long-lived source
+      connector) means no delivery gap and no recovery. A changed token (always
+      the case for a direct AMQP session) recovers every producer, preserving
+      the pre-persistence behavior.
+    * A producer whose persisted state shows the remote feed was healthy at
+      shutdown — up, or down only because local processing lagged — and that
+      has a checkpoint resumes as *delayed* instead of recovering on its first
+      alive: it drains the retained backlog and returns up via
+      `:processing_queue_delay_stabilized` once caught up (and a live alive has
+      been heard). `subscribed=0` or a token change observed while draining
+      still forces recovery. Producers persisted as plain down, or mid-recovery
+      (flattened to plain down on write), recover on first alive as usual.
   """
 
   use GenServer
@@ -125,10 +147,15 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @impl true
   def init(opts) do
+    checkpoint_store = Keyword.get(opts, :checkpoint_store, UOF.SDK.CheckpointStore.ETS)
+    persisted_states = checkpoint_store.get_state()
+
     producers =
       opts
       |> Keyword.get(:producers, [])
-      |> Map.new(fn p -> {p.id, p} end)
+      |> Map.new(fn p ->
+        {p.id, restore_producer(p, Map.get(persisted_states, p.id), checkpoint_store)}
+      end)
 
     state = %{
       producers: producers,
@@ -138,9 +165,9 @@ defmodule UOF.SDK.ProducerMonitor do
       max_processing_delay_ms: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       first_recovery_done: MapSet.new(),
-      connection_tokens: %{},
+      connection_tokens: checkpoint_store.get_connection_tokens(),
       recover_fun: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
-      checkpoint_store: Keyword.get(opts, :checkpoint_store, UOF.SDK.CheckpointStore.ETS),
+      checkpoint_store: checkpoint_store,
       node_id: Keyword.get(opts, :node_id),
       min_interval_ms: Keyword.get(opts, :min_interval_ms, @default_min_interval_ms),
       max_recovery_ms: Keyword.get(opts, :max_recovery_ms, @default_max_recovery_ms),
@@ -312,7 +339,12 @@ defmodule UOF.SDK.ProducerMonitor do
           processing_queue_delay: now - producer.last_message_timestamp
         })
 
-      producer.delayed? and not processing_violation?(producer, now, state.max_processing_delay_ms) ->
+      # `last_alive_at` gates the up-transition on having heard a heartbeat
+      # this session: a producer resumed as delayed after a restart must not
+      # report up before a live alive arrives (and its connection token gets
+      # checked). Producers that became delayed while running always have it.
+      producer.delayed? and producer.last_alive_at != nil and
+          not processing_violation?(producer, now, state.max_processing_delay_ms) ->
         apply_status(state, producer, %{
           down?: false,
           delayed?: false,
@@ -344,8 +376,41 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp maybe_notify(state, before, after_) do
-    if status_changed?(before, after_), do: notify(state, after_)
+    if status_changed?(before, after_) do
+      state.checkpoint_store.put_state(after_.id, durable_state(after_))
+      notify(state, after_)
+    end
   end
+
+  # In-flight recovery flattens to plain down: a restart mid-recovery loses the
+  # request_id correlation, so the restarted node must re-recover on first alive.
+  defp durable_state(%Producer{recovering?: true}), do: %{down?: true, delayed?: false}
+  defp durable_state(%Producer{down?: down?, delayed?: delayed?}), do: %{down?: down?, delayed?: delayed?}
+
+  # A producer whose persisted state shows the remote feed was healthy at
+  # shutdown (up, or down only from local processing lag) resumes as delayed —
+  # skipping the startup recovery — provided a checkpoint exists to seed the
+  # processing-lag anchor (without one the stabilized check would flip it up
+  # before anything drained, and `delete/1` must keep forcing full recovery).
+  # `subscribed=0` or a connection-token change observed while draining still
+  # forces recovery; everything else starts plain down as before.
+  defp restore_producer(producer, %{down?: down?, delayed?: delayed?}, store) when not down? or delayed? do
+    case store.get(producer.id) do
+      {:ok, checkpoint} ->
+        %{
+          producer
+          | down?: true,
+            delayed?: true,
+            last_message_timestamp: checkpoint,
+            reason: :processing_queue_delay_violation
+        }
+
+      :none ->
+        producer
+    end
+  end
+
+  defp restore_producer(producer, _persisted_state, _store), do: producer
 
   defp status_changed?(a, b), do: {a.down?, a.delayed?, a.reason} != {b.down?, b.delayed?, b.reason}
 
@@ -354,6 +419,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp track_connection(state, namespace, token) do
     changed? = Map.get(state.connection_tokens, namespace) != token
+    if changed?, do: state.checkpoint_store.put_connection_token(namespace, token)
     state = put_connection_token(state, namespace, token)
 
     if changed? and startup_connections_ready?(state) do

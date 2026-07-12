@@ -2,6 +2,11 @@ defmodule UOF.SDK.CheckpointStore.ETS do
   @moduledoc """
   Default `UOF.SDK.CheckpointStore` — in-memory, lost on VM restart (falls
   back to full recovery on next start).
+
+  The table outlives `ProducerMonitor`/pipeline crashes within the same VM
+  (the store is supervised before them with `:rest_for_one`), so producer
+  state and connection tokens still enable crash-restart resume without a
+  recovery.
   """
 
   @behaviour UOF.SDK.CheckpointStore
@@ -31,21 +36,47 @@ defmodule UOF.SDK.CheckpointStore.ETS do
 
   @impl CheckpointStore
   def get(producer_id) do
-    case :ets.lookup(@table, producer_id) do
-      [{^producer_id, timestamp}] -> {:ok, timestamp}
+    case :ets.lookup(@table, {:checkpoint, producer_id}) do
+      [{_key, timestamp}] -> {:ok, timestamp}
       [] -> :none
     end
   end
 
   @impl CheckpointStore
   def put(producer_id, timestamp) do
-    :ets.insert(@table, {producer_id, timestamp})
+    true = :ets.insert(@table, {{:checkpoint, producer_id}, timestamp})
     :ok
   end
 
   @impl CheckpointStore
   def delete(producer_id) do
-    :ets.delete(@table, producer_id)
+    true = :ets.delete(@table, {:checkpoint, producer_id})
+    :ok
+  end
+
+  @impl CheckpointStore
+  def get_state do
+    @table
+    |> :ets.match({{:state, :"$1"}, :"$2"})
+    |> Map.new(fn [id, state] -> {id, state} end)
+  end
+
+  @impl CheckpointStore
+  def put_state(producer_id, state) do
+    true = :ets.insert(@table, {{:state, producer_id}, state})
+    :ok
+  end
+
+  @impl CheckpointStore
+  def get_connection_tokens do
+    @table
+    |> :ets.match({{:connection_token, :"$1"}, :"$2"})
+    |> Map.new(fn [namespace, token] -> {namespace, token} end)
+  end
+
+  @impl CheckpointStore
+  def put_connection_token(namespace, token) do
+    true = :ets.insert(@table, {{:connection_token, namespace}, token})
     :ok
   end
 end

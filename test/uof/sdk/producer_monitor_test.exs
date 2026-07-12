@@ -540,4 +540,161 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert second[:after] == first[:after]
     assert second[:request_id] != first[:request_id]
   end
+
+  ## Restart resume -------------------------------------------------------------
+
+  # Persist the state of a producer that was up, with a checkpoint and both
+  # namespace tokens — the shape a healthy shutdown leaves behind.
+  defp persist_healthy_shutdown(checkpoint) do
+    CheckpointStore.ETS.put_state(1, %{down?: false, delayed?: false})
+    CheckpointStore.ETS.put(1, checkpoint)
+    CheckpointStore.ETS.put_connection_token(:system, "ctag-sys")
+    CheckpointStore.ETS.put_connection_token(:content, "ctag-con")
+  end
+
+  test "resumed producer skips startup recovery and returns up once caught up", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 50_000)
+    m = start_monitor(clock)
+
+    # same tokens after restart -> same upstream consume session -> no recovery
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    # subscribed alive on the resumed (delayed) producer -> no recovery either
+    ProducerMonitor.alive(m, 1, 50_000, true)
+    sync(m)
+    refute_received {:recover_called, _, _}
+    assert {:ok, %Producer{down?: true, delayed?: true, recovering?: false}} = ProducerMonitor.producer(m, 1)
+
+    # still draining: last_message_timestamp is seeded from the checkpoint
+    tick(m)
+    refute_received {:status, %Producer{down?: false}}
+
+    # backlog catches up -> stabilized -> up, without ever recovering
+    ProducerMonitor.message(m, 1, 50_000)
+    tick(m)
+    assert_receive {:status, %Producer{down?: false, delayed?: false, reason: :processing_queue_delay_stabilized}}
+    refute_received {:recover_called, _, _}
+  end
+
+  test "resumed producer stays down until a live alive is heard", %{clock: clock} do
+    # checkpoint is recent, so the processing-lag check alone would not hold the
+    # producer down — the heartbeat gate is what must keep it down here
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 1_500)
+    m = start_monitor(clock)
+
+    tick(m)
+    refute_received {:status, %Producer{down?: false}}
+    assert {:ok, %Producer{down?: true, delayed?: true}} = ProducerMonitor.producer(m, 1)
+
+    ProducerMonitor.alive(m, 1, 1_600, true)
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    tick(m)
+    assert_receive {:status, %Producer{down?: false, reason: :processing_queue_delay_stabilized}}
+  end
+
+  test "resumed producer recovers incrementally when a namespace token changed across restart", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 50_000)
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys-new"})
+
+    assert_receive {:status, %Producer{down?: true, reason: :connection_down}}
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 1_000
+  end
+
+  test "resumed producer recovers on an unsubscribed alive", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 50_000)
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 50_000, false)
+    assert_recovery_triggered()
+  end
+
+  test "does not resume a producer persisted as plain down", %{clock: clock} do
+    CheckpointStore.ETS.put_state(1, %{down?: true, delayed?: false})
+    CheckpointStore.ETS.put(1, 1_000)
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    assert_recovery_triggered()
+  end
+
+  test "does not resume without a checkpoint", %{clock: clock} do
+    CheckpointStore.ETS.put_state(1, %{down?: false, delayed?: false})
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    assert_recovery_triggered()
+  end
+
+  test "resumes a producer persisted as delayed (remote feed was healthy)", %{clock: clock} do
+    CheckpointStore.ETS.put_state(1, %{down?: true, delayed?: true})
+    CheckpointStore.ETS.put(1, 1_000)
+    set_clock(clock, 50_000)
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 50_000, true)
+    sync(m)
+    refute_received {:recover_called, _, _}
+    assert {:ok, %Producer{down?: true, delayed?: true, recovering?: false}} = ProducerMonitor.producer(m, 1)
+  end
+
+  ## State persistence ----------------------------------------------------------
+
+  test "persists producer status transitions, flattening in-flight recovery to plain down", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{down?: false}}
+    assert CheckpointStore.ETS.get_state() == %{1 => %{down?: false, delayed?: false}}
+
+    # silence -> down + recovering; persisted flattened so a restart re-recovers
+    set_clock(clock, 1_000 + @inactivity + 1)
+    tick(m)
+    assert_receive {:status, %Producer{down?: true, reason: :alive_interval_violation}}
+    assert CheckpointStore.ETS.get_state() == %{1 => %{down?: true, delayed?: false}}
+  end
+
+  test "persists delayed transitions", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{down?: false}}
+
+    set_clock(clock, 20_000)
+    ProducerMonitor.alive(m, 1, 20_000, true)
+    ProducerMonitor.message(m, 1, 1_000)
+    tick(m)
+    assert_receive {:status, %Producer{down?: true, delayed?: true}}
+
+    assert CheckpointStore.ETS.get_state() == %{1 => %{down?: true, delayed?: true}}
+  end
+
+  test "persists connection tokens as they change", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-a"})
+    sync(m)
+    assert CheckpointStore.ETS.get_connection_tokens() == %{system: "ctag-a"}
+
+    ProducerMonitor.observe_connection(m, {:content, "ctag-b"})
+    sync(m)
+    assert CheckpointStore.ETS.get_connection_tokens() == %{system: "ctag-a", content: "ctag-b"}
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-c"})
+    sync(m)
+    assert CheckpointStore.ETS.get_connection_tokens() == %{system: "ctag-c", content: "ctag-b"}
+  end
 end

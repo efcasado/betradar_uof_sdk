@@ -52,6 +52,9 @@ defmodule UOF.SDK.Transport do
     }
   end
 
+  # :consumer_tag metadata is the per-consume connection token used for
+  # reconnect detection; the amqp library includes it in every basic_deliver
+  # even though broadway_rabbitmq doesn't document it.
   defp rabbitmq_producer(connection, bindings) do
     {BroadwayRabbitMQ.Producer,
      queue: "",
@@ -59,7 +62,7 @@ defmodule UOF.SDK.Transport do
      declare: [exclusive: true, auto_delete: true],
      bindings: bindings,
      on_failure: :reject,
-     metadata: [:routing_key, :redelivered, :delivery_tag]}
+     metadata: [:routing_key, :redelivered, :delivery_tag, :consumer_tag]}
   end
 
   defp pulsar_producers(opts) do

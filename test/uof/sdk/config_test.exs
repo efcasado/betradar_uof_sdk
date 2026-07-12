@@ -12,6 +12,8 @@ defmodule UOF.SDK.ConfigTest do
     assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
     assert content_opts[:connection] == conn
     assert system_opts[:connection] == conn
+    assert :consumer_tag in content_opts[:metadata]
+    assert :consumer_tag in system_opts[:metadata]
     assert config.metadata_adapter == :amqp
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil

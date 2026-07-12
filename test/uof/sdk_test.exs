@@ -18,6 +18,18 @@ defmodule UOF.SDKTest do
 
     @impl true
     def delete(_producer_id), do: :ok
+
+    @impl true
+    def get_state, do: %{}
+
+    @impl true
+    def put_state(_producer_id, _state), do: :ok
+
+    @impl true
+    def get_connection_tokens, do: %{}
+
+    @impl true
+    def put_connection_token(_namespace, _token), do: :ok
   end
 
   defmodule StartableCheckpointStore do
@@ -39,6 +51,18 @@ defmodule UOF.SDKTest do
 
     @impl true
     def delete(_producer_id), do: :ok
+
+    @impl true
+    def get_state, do: %{}
+
+    @impl true
+    def put_state(_producer_id, _state), do: :ok
+
+    @impl true
+    def get_connection_tokens, do: %{}
+
+    @impl true
+    def put_connection_token(_namespace, _token), do: :ok
   end
 
   test "checkpoint_store_child_specs omits callback-only stores" do

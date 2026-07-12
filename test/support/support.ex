@@ -64,7 +64,7 @@ defmodule UOF.SDK.TestSupport do
     raise "Pulsar subscription #{subscription} did not become ready"
   end
 
-  defp source_queue do
+  def source_queue do
     url = ~c"http://localhost:#{@rabbitmq_http_port}/api/queues/%2f"
     authorization = ~c"Basic #{Base.encode64("guest:guest")}"
 

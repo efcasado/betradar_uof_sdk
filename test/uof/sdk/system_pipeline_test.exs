@@ -60,7 +60,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     assert_receive {:snapshot_sink, 3, 77}
   end
 
-  test "observes the AMQP connection pid for reconnect detection" do
+  test "observes the AMQP consumer tag for reconnect detection" do
     name = Module.concat(__MODULE__, ConnObserve)
 
     start_link_supervised!(%{
@@ -76,13 +76,11 @@ defmodule UOF.SDK.SystemPipelineTest do
          ]}
     })
 
-    conn = spawn(fn -> :ok end)
-
     Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", amqp_channel: %{conn: %{pid: conn}}}
+      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", consumer_tag: "amq.ctag-system-1"}
     )
 
-    assert_receive {:connection_sink, {:system, ^conn}}
+    assert_receive {:connection_sink, {:system, "amq.ctag-system-1"}}
   end
 
   test "reads the routing key from a custom AMQP metadata field" do
@@ -139,7 +137,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     )
 
     assert_receive {:alive_sink, 1, 42, true}
-    assert_receive {:connection_sink, {:system, {"uof-system", "ctag-1"}}}
+    assert_receive {:connection_sink, {:system, "ctag-1"}}
   end
 
   test "acks non-system messages without decoding them" do

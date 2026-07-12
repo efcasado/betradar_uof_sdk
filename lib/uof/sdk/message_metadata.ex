@@ -19,20 +19,19 @@ defmodule UOF.SDK.MessageMetadata do
       ""
   end
 
+  # Both adapters resolve the token to the AMQP consumer tag of the consume
+  # session actually attached to Betradar: the app's own session for AMQP, the
+  # RabbitMQ source connector's session for Pulsar. Server-generated tags
+  # (`amq.ctag-…`) are unique per consume, so a changed tag is exactly "a
+  # delivery gap was possible" — and the token persists as a plain string.
   @spec connection_token(Message.t(), adapter(), atom() | nil) :: term() | nil
-  def connection_token(message, :amqp, nil), do: connection_pid(message)
+  def connection_token(%Message{metadata: metadata}, :amqp, nil), do: Map.get(metadata, :consumer_tag)
   def connection_token(%Message{metadata: metadata}, :amqp, key), do: Map.get(metadata, key)
 
   def connection_token(%Message{metadata: metadata}, :pulsar_rabbitmq_source, _key) do
     case properties(metadata) do
-      %{
-        "__rabbitmq_queue_name" => queue_name,
-        "__rabbitmq_consumer_tag" => consumer_tag
-      } ->
-        {queue_name, consumer_tag}
-
-      _properties ->
-        nil
+      %{"__rabbitmq_consumer_tag" => consumer_tag} -> consumer_tag
+      _properties -> nil
     end
   end
 
@@ -71,7 +70,4 @@ defmodule UOF.SDK.MessageMetadata do
     do: Map.new(values, fn {key, value} -> {to_string(key), value} end)
 
   defp properties_from_key_values(_values), do: %{}
-
-  defp connection_pid(%Message{metadata: %{amqp_channel: %{conn: %{pid: pid}}}}), do: pid
-  defp connection_pid(_message), do: nil
 end

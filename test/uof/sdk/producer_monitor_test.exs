@@ -365,6 +365,26 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
+  test "a token change replaces an in-flight recovery", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    first_request_id = assert_recovery_triggered()
+
+    ProducerMonitor.observe_connection(m, {:system, :system_a})
+    ProducerMonitor.observe_connection(m, {:content, :content_a})
+    second_request_id = assert_recovery_triggered()
+    assert second_request_id != first_request_id
+
+    # Completion of the recovery that straddled the reconnect is stale.
+    ProducerMonitor.snapshot_complete(m, 1, first_request_id)
+    sync(m)
+    assert {:ok, %Producer{status: :recovering}} = ProducerMonitor.producer(m, 1)
+
+    ProducerMonitor.snapshot_complete(m, 1, second_request_id)
+    assert_receive {:status, %Producer{status: :up}}
+  end
+
   test "producers/1 returns all producers ordered by id", %{clock: clock} do
     m =
       start_monitor(
@@ -512,6 +532,21 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}, 1_000
     sync(m)
     assert Agent.get(calls, & &1) == 2
+  end
+
+  test "recovery cooldown is unaffected by a backward wall-clock adjustment", %{clock: clock} do
+    m = start_monitor([min_interval_ms: 50], clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    first_request_id = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, first_request_id)
+    assert_receive {:status, %Producer{status: :up}}
+
+    set_clock(clock, -1_000_000)
+    assert :ok = ProducerMonitor.recover(m, 1, full: true)
+
+    # The wall-clock jump must not be added to the 50ms cooldown.
+    assert_receive {:recover_called, "pre", _}, 500
   end
 
   test "non-matching snapshot_complete is ignored", %{clock: clock} do

@@ -253,7 +253,8 @@ UOF.SDK.producer(1)
 A producer reports one lifecycle `status`:
 
 - `:down` — not synchronized and no recovery is in flight
-- `:recovering` — requesting or awaiting recovery completion
+- `:recovering` — waiting to request, requesting, or awaiting recovery
+  completion
 - `:up` — synchronized and safe
 - `:delayed` — the remote feed is healthy but local processing is behind
 - `:resuming` — draining retained backlog after restart while awaiting
@@ -263,7 +264,8 @@ The UOF protocol requires every producer to be recovered before its markets are
 safe to act on. A gap in the message stream can happen on first connect,
 reconnect, or alive heartbeat timeout. When a gap is detected, the SDK:
 
-1. Reads `Store` for the last stable alive timestamp for the producer.
+1. Uses the checkpoint in the monitor's in-memory snapshot, loaded from its
+   store at startup.
 2. Calls `UOF.API.Recovery.recover/2` with a unique `request_id`.
 3. Requests incremental recovery if a checkpoint exists, or full recovery if it
    does not.

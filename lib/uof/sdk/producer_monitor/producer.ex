@@ -5,7 +5,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   `status` is the complete lifecycle state:
 
     * `:down` — not synchronized and no recovery is in flight
-    * `:recovering` — requesting or awaiting recovery completion
+    * `:recovering` — waiting to request, requesting, or awaiting recovery
+      completion
     * `:up` — synchronized and safe
     * `:delayed` — the remote feed is healthy but local processing is behind
     * `:resuming` — draining retained backlog after a restart and awaiting

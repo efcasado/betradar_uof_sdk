@@ -42,7 +42,10 @@ defmodule UOF.SDK.ProducerMonitorTest do
       inactivity_ms: @inactivity,
       max_processing_delay_ms: @inactivity,
       tick_ms: 60_000,
-      recovery_overlap_ms: 0
+      recovery_overlap_ms: 0,
+      # Disable the recovery cooldown by default so lifecycle tests can drive
+      # back-to-back recoveries on a frozen clock; the throttle has its own test.
+      min_interval_ms: 0
     ]
 
     start_supervised!({ProducerMonitor, Keyword.merge(defaults, overrides)})
@@ -438,6 +441,77 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
     refute_received {:recover_called, _, _}
+  end
+
+  test "a new trigger within the min interval is deferred, not dropped", %{clock: clock} do
+    # A small interval keeps the deferred-reissue timer fast; the recover_fun
+    # counts issued requests so we can prove the second one is throttled.
+    test_pid = self()
+    calls = start_supervised!(%{id: :calls, start: {Agent, :start_link, [fn -> 0 end]}})
+
+    recover_fun = fn product, opts ->
+      Agent.update(calls, &(&1 + 1))
+      send(test_pid, {:recover_called, product, opts})
+      {:ok, :accepted}
+    end
+
+    m = start_monitor([recover_fun: recover_fun, min_interval_ms: 50], clock)
+
+    # first recovery for this producer is never throttled
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid1 = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid1)
+    assert_receive {:status, %Producer{status: :up}}
+
+    # a fresh trigger inside the cooldown is deferred: the producer transitions
+    # to :recovering, but no request is issued yet
+    assert :ok = ProducerMonitor.recover(m, 1, full: true)
+    assert_receive {:status, %Producer{status: :recovering}}
+    refute_received {:recover_called, _, _}
+    assert Agent.get(calls, & &1) == 1
+
+    # it is not dropped: once the cooldown elapses the reissue fires
+    assert_receive {:recover_called, "pre", _}, 500
+    assert Agent.get(calls, & &1) == 2
+  end
+
+  test "triggers arriving during the cooldown do not stack deferred recoveries", %{clock: clock} do
+    test_pid = self()
+    calls = start_supervised!(%{id: :calls, start: {Agent, :start_link, [fn -> 0 end]}})
+
+    recover_fun = fn product, opts ->
+      Agent.update(calls, &(&1 + 1))
+      send(test_pid, {:recover_called, product, opts})
+      {:ok, :accepted}
+    end
+
+    # a generous interval so the synchronous re-triggers below cannot race the
+    # deferred-reissue timer
+    m = start_monitor([recover_fun: recover_fun, min_interval_ms: 300], clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid1 = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid1)
+    assert_receive {:status, %Producer{status: :up}}
+
+    # trigger inside the cooldown -> deferred (producer :recovering, no request)
+    assert :ok = ProducerMonitor.recover(m, 1, full: true)
+    assert_receive {:status, %Producer{status: :recovering}}
+    refute_received {:recover_called, _, _}
+
+    # a flurry of further triggers while deferred are all dropped by the
+    # :recovering guard, so no second defer is scheduled
+    assert {:error, :already_recovering} = ProducerMonitor.recover(m, 1, [])
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    ProducerMonitor.observe_connection(m, {:system, :conn_a})
+    ProducerMonitor.observe_connection(m, {:content, :conn_a})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    # exactly one reissue fires when the cooldown elapses
+    assert_receive {:recover_called, "pre", _}, 1_000
+    sync(m)
+    assert Agent.get(calls, & &1) == 2
   end
 
   test "non-matching snapshot_complete is ignored", %{clock: clock} do

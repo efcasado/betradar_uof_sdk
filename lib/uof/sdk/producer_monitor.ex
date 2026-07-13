@@ -80,7 +80,7 @@ defmodule UOF.SDK.ProducerMonitor do
   @default_max_processing_delay_ms 20_000
   @default_tick_ms 1_000
   @default_min_interval_ms 30_000
-  @default_max_recovery_ms 5 * 60_000
+  @default_max_recovery_ms 60 * 60_000
   @default_recovery_overlap_ms 5 * 60_000
 
   ## Client API ---------------------------------------------------------------
@@ -178,7 +178,8 @@ defmodule UOF.SDK.ProducerMonitor do
         Keyword.get(opts, :gen_request_id, fn ->
           System.unique_integer([:positive, :monotonic])
         end),
-      recoveries: %{}
+      recoveries: %{},
+      last_recovery_at: %{}
     }
 
     schedule_tick(state)
@@ -280,7 +281,7 @@ defmodule UOF.SDK.ProducerMonitor do
         Logger.warning("UOF.SDK.ProducerMonitor: producer #{id} recovery #{request_id} stalled; reissuing")
 
         state = %{state | recoveries: Map.delete(state.recoveries, id)}
-        {:noreply, initiate(state, producer, after_ts)}
+        {:noreply, issue(state, producer, after_ts)}
 
       _other ->
         {:noreply, state}
@@ -291,7 +292,7 @@ defmodule UOF.SDK.ProducerMonitor do
     if Map.has_key?(state.recoveries, producer.id) do
       {:noreply, state}
     else
-      {:noreply, initiate(state, producer, after_ts)}
+      {:noreply, issue(state, producer, after_ts)}
     end
   end
 
@@ -426,7 +427,38 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Recovery -----------------------------------------------------------------
 
+  # Entry point for a *new* recovery trigger (alive gap, subscribed=0, token
+  # change, manual). Stall reissues and failure retries call `issue/3` directly,
+  # bypassing the cooldown: they are continuations of one recovery effort,
+  # already spaced by their own timers.
   defp initiate(state, producer, after_ts) do
+    case recovery_cooldown(state, producer) do
+      0 -> issue(state, producer, after_ts)
+      remaining -> defer(state, producer, after_ts, remaining)
+    end
+  end
+
+  # Per-producer throttle mirroring the official `minIntervalBetweenRecoveries`.
+  # A flapping connection re-triggering the same producer is spaced out instead
+  # of hammering the API. State is intentionally in-memory only: after a restart
+  # recovery should fire promptly, not wait out a stale cooldown.
+  defp recovery_cooldown(state, producer) do
+    case Map.get(state.last_recovery_at, producer.id) do
+      nil -> 0
+      last -> max(state.min_interval_ms - (state.now_fun.() - last), 0)
+    end
+  end
+
+  # Defer without dropping: the producer stays `:recovering` and out of
+  # `recoveries`, so the existing `{:retry}` guard re-issues once the wait
+  # elapses (and no-ops if a recovery has become in-flight meanwhile).
+  defp defer(state, producer, after_ts, remaining) do
+    Process.send_after(self(), {:retry, producer, after_ts}, remaining)
+    state
+  end
+
+  defp issue(state, producer, after_ts) do
+    state = %{state | last_recovery_at: Map.put(state.last_recovery_at, producer.id, state.now_fun.())}
     request_id = state.gen_request_id.()
     opts = build_opts(after_ts, request_id, state.node_id)
 

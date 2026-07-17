@@ -50,9 +50,12 @@ defmodule UOF.SDK do
   API directly, this goes through the producer monitor: the producer shows as
   recovering and the request is correlated with its `snapshot_complete` and
   stall-guarded, healing exactly like an automatic recovery. Pass `full: true`
-  to ignore the checkpoint and request a full snapshot.
+  to ignore the checkpoint and request a full snapshot. Refused with
+  `{:error, :passive}` on an instance that does not currently own the system
+  subscription (multi-instance Pulsar) — issue it on the active instance.
   """
-  @spec recover(integer(), keyword()) :: :ok | {:error, :already_recovering | :unknown_producer}
+  @spec recover(integer(), keyword()) ::
+          :ok | {:error, :already_recovering | :passive | :unknown_producer}
   def recover(producer_id, opts \\ []), do: ProducerMonitor.recover(producer_id, opts)
 
   @impl true

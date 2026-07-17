@@ -48,6 +48,26 @@ defmodule UOF.SDK.ProducerMonitor do
       recovery.
     * `subscribed=0` also starts recovery. Producers absent from the resumable
       set start `:down` and recover on their first subscribed `alive`.
+
+  ## Control-plane ownership (multi-instance Pulsar)
+
+  With the Pulsar transport, the system subscription is Failover: the broker
+  delivers `alive`/`snapshot_complete` to exactly one instance. The transport
+  wires that broker signal to `active_state_change/2`, and the monitor holds
+  control-plane authority only while active. While passive it neither issues
+  recovery requests nor transitions producer status — a demoted instance can
+  never observe the `snapshot_complete` for a request it issued, so issuing
+  from standby burns recovery quota in a stall-reissue loop. Content-side
+  observations (`message/2`, checkpoints) continue while passive.
+
+  Demotion drops in-flight recovery correlation (the completion will go to the
+  new owner); affected producers stay `:recovering` and are reissued on
+  promotion. Producers that were `:up` heal through the normal alive-gap check
+  after promotion, replaying from their checkpoint. Reports are best-effort and
+  may repeat; they are not a fencing mechanism, so briefly-overlapping actives
+  can duplicate a recovery request — duplicates are correlated by `request_id`
+  and harmless beyond quota. Instances start active so the AMQP transport
+  (shared queue, no ownership signal) is unaffected.
   """
 
   use GenServer
@@ -108,12 +128,26 @@ defmodule UOF.SDK.ProducerMonitor do
   completion is correlated via `snapshot_complete`, and the
   stall guard reissues if it goes missing. Pass `full: true` to ignore the
   checkpoint and request a full snapshot. Refused while the producer is already
-  recovering, including during a cooldown or retry delay.
+  recovering, including during a cooldown or retry delay, and with
+  `{:error, :passive}` while this instance does not own the system
+  subscription (see "Control-plane ownership").
   """
   @spec recover(GenServer.server(), integer(), keyword()) ::
-          :ok | {:error, :already_recovering | :unknown_producer}
+          :ok | {:error, :already_recovering | :passive | :unknown_producer}
   def recover(server \\ __MODULE__, producer_id, opts) do
     GenServer.call(server, {:recover, producer_id, opts})
+  end
+
+  @doc """
+  Observe a broker-reported ownership change for the system-subscription
+  consumer. The Pulsar transport wires this as the system producer's
+  `:active_state_callback`; `metadata` is the callback's map
+  (`:active_state`, `:topic`, `:subscription`, `:consumer_pid`).
+
+  Reports are idempotent: repeats of the current state are ignored.
+  """
+  def active_state_change(server \\ __MODULE__, metadata) do
+    GenServer.cast(server, {:active_state, metadata})
   end
 
   @doc """
@@ -163,7 +197,8 @@ defmodule UOF.SDK.ProducerMonitor do
           System.unique_integer([:positive, :monotonic])
         end),
       recoveries: %{},
-      last_recovery_at: %{}
+      last_recovery_at: %{},
+      control_active: true
     }
 
     schedule_tick(state)
@@ -178,6 +213,10 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def handle_call({:get_producer, id}, _from, state) do
     {:reply, Map.fetch(state.producers, id), state}
+  end
+
+  def handle_call({:recover, _id, _opts}, _from, %{control_active: false} = state) do
+    {:reply, {:error, :passive}, state}
   end
 
   def handle_call({:recover, id, opts}, _from, state) do
@@ -232,6 +271,23 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
+  def handle_cast({:active_state, %{active_state: active_state} = metadata}, state) do
+    active? = active_state == :active
+
+    if active? == state.control_active do
+      {:noreply, state}
+    else
+      Logger.info(
+        "UOF.SDK.ProducerMonitor: control plane #{if active?, do: "active", else: "passive"} " <>
+          "(topic=#{inspect(metadata[:topic])} subscription=#{inspect(metadata[:subscription])})"
+      )
+
+      state = %{state | control_active: active?}
+      state = if active?, do: reissue_parked_recoveries(state), else: park_recoveries(state)
+      {:noreply, state}
+    end
+  end
+
   def handle_cast({:snapshot_complete, id, request_id}, state) do
     case Map.get(state.recoveries, id) do
       %{request_id: ^request_id} ->
@@ -253,8 +309,17 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @impl true
   def handle_info(:tick, state) do
-    now = state.now_fun.()
-    state = Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now))
+    state =
+      if state.control_active do
+        now = state.now_fun.()
+        Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now))
+      else
+        # A passive instance sees no system alives and only a partial content
+        # view, so status transitions here would be noise; healing happens on
+        # promotion when the checks resume against the then-stale timestamps.
+        state
+      end
+
     schedule_tick(state)
     {:noreply, state}
   end
@@ -286,7 +351,9 @@ defmodule UOF.SDK.ProducerMonitor do
     producer = Producer.observe_alive(producer, state.now_fun.())
 
     if producer.status != :recovering and (not subscribed? or producer.status == :down) do
-      if startup_connection_recovery_pending?(state) do
+      # An alive can race a just-received :passive report; a passive instance
+      # must not trigger, same as before the startup connection gate opens.
+      if startup_connection_recovery_pending?(state) or not state.control_active do
         put_producer(state, producer)
       else
         trigger_recovery(state, producer)
@@ -357,6 +424,35 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp notify(%{handler: nil}, _producer), do: :ok
   defp notify(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
+
+  ## Control-plane ownership ---------------------------------------------------
+
+  # An in-flight request can never complete here once demoted — its
+  # snapshot_complete goes to the new owner — so drop the correlation state
+  # now. Pending stall/retry timers become no-ops (stall finds no matching
+  # entry; retry hits the passive issue/3 clause).
+  defp park_recoveries(%{recoveries: recoveries} = state) when map_size(recoveries) == 0, do: state
+
+  defp park_recoveries(state) do
+    Logger.info(
+      "UOF.SDK.ProducerMonitor: parking in-flight recoveries for producers #{inspect(Map.keys(state.recoveries))}"
+    )
+
+    %{state | recoveries: %{}}
+  end
+
+  # after_ts is re-derived from the checkpoint rather than preserved from the
+  # parked request; checkpoints don't advance while :recovering, so the replay
+  # window is the same or wider. Producers left :up heal via the normal
+  # alive-gap check on the next tick.
+  defp reissue_parked_recoveries(state) do
+    state.producers
+    |> Map.values()
+    |> Enum.filter(&(&1.status == :recovering and not Map.has_key?(state.recoveries, &1.id)))
+    |> Enum.reduce(state, fn producer, state ->
+      initiate(state, producer, after_from_checkpoint(state, producer))
+    end)
+  end
 
   defp startup_connection_recovery_pending?(state) do
     Connections.active?(state.connections) and not Connections.ready?(state.connections)
@@ -433,6 +529,13 @@ defmodule UOF.SDK.ProducerMonitor do
     Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery deferred for #{remaining}ms")
 
     Process.send_after(self(), {:retry, producer, after_ts}, remaining)
+    state
+  end
+
+  # Backstop for retry/stall timers that fire after demotion: the producer
+  # stays :recovering and is reissued from its checkpoint on promotion.
+  defp issue(%{control_active: false} = state, producer, _after_ts) do
+    Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery parked: control plane passive")
     state
   end
 

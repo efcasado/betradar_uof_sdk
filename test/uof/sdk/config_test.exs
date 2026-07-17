@@ -69,6 +69,13 @@ defmodule UOF.SDK.ConfigTest do
     assert system_opts[:consumer_opts][:initial_position] == :earliest
     assert system_opts[:consumer_opts][:subscription_type] == :Failover
 
+    # Failover ownership reports gate the control plane; the Key_Shared
+    # content subscription never emits them.
+    assert system_opts[:active_state_callback] ==
+             {UOF.SDK.ProducerMonitor, :active_state_change, []}
+
+    refute Keyword.has_key?(content_opts, :active_state_callback)
+
     assert config.metadata_adapter == :pulsar_rabbitmq_source
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil

@@ -859,4 +859,107 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(m)
     assert Store.ETS.load().connection_tokens == %{system: "ctag-c", content: "ctag-b"}
   end
+
+  ## Control-plane ownership ---------------------------------------------------
+
+  defp report_active_state(monitor, active_state) do
+    ProducerMonitor.active_state_change(monitor, %{
+      active_state: active_state,
+      topic: "uof-feed",
+      subscription: "uof-sdk-system",
+      consumer_pid: self()
+    })
+
+    sync(monitor)
+  end
+
+  test "passive suppresses alive-gap recovery; promotion recovers from checkpoint", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{status: :up}}
+
+    ProducerMonitor.alive(m, 1, 2_000, true)
+    sync(m)
+    assert checkpoint(1) == {:ok, 2_000}
+
+    report_active_state(m, :passive)
+    set_clock(clock, 1_000 + @inactivity + 1)
+    tick(m)
+
+    refute_receive {:recover_called, _product, _opts}
+    assert {:ok, %Producer{status: :up}} = ProducerMonitor.producer(m, 1)
+
+    report_active_state(m, :active)
+    tick(m)
+
+    assert_receive {:status, %Producer{status: :recovering}}
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 2_000
+  end
+
+  test "demotion parks an in-flight recovery; promotion reissues it", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid1 = assert_recovery_triggered()
+
+    report_active_state(m, :passive)
+
+    # The completion for the parked request now belongs to the new owner and
+    # must not bring this instance's producer up.
+    ProducerMonitor.snapshot_complete(m, 1, rid1)
+    sync(m)
+    assert {:ok, %Producer{status: :recovering}} = ProducerMonitor.producer(m, 1)
+
+    report_active_state(m, :active)
+    rid2 = assert_recovery_triggered()
+    assert rid2 != rid1
+
+    ProducerMonitor.snapshot_complete(m, 1, rid2)
+    assert_receive {:status, %Producer{status: :up}}
+  end
+
+  test "manual recovery is refused while passive", %{clock: clock} do
+    m = start_monitor(clock)
+
+    report_active_state(m, :passive)
+    assert ProducerMonitor.recover(m, 1, []) == {:error, :passive}
+
+    report_active_state(m, :active)
+    assert ProducerMonitor.recover(m, 1, []) == :ok
+    assert_recovery_triggered()
+  end
+
+  test "an alive racing a passive report does not trigger recovery", %{clock: clock} do
+    m = start_monitor(clock)
+
+    report_active_state(m, :passive)
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    sync(m)
+
+    refute_receive {:recover_called, _product, _opts}
+    assert {:ok, %Producer{status: :down}} = ProducerMonitor.producer(m, 1)
+  end
+
+  test "repeated active-state reports are idempotent", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    assert_recovery_triggered()
+
+    report_active_state(m, :passive)
+    report_active_state(m, :passive)
+    report_active_state(m, :active)
+    rid = assert_recovery_triggered()
+
+    # A repeat of the current state must not reissue the in-flight recovery.
+    report_active_state(m, :active)
+    refute_receive {:recover_called, _product, _opts}
+
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{status: :up}}
+  end
 end

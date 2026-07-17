@@ -147,6 +147,13 @@ config :uof_sdk,
 
 Pulsar support assumes the SDK's RabbitMQ source connector contract:
 
+- The RabbitMQ source connector produces to a Pulsar topic with a single
+  partition (a non-partitioned topic, or a partitioned topic with exactly one
+  partition). Failover subscription ownership is assigned per partition, so
+  with multiple partitions different SDK instances can each own a slice of the
+  system subscription — `alive` and `snapshot_complete` messages then split
+  across instances and no single instance holds the control plane (producer
+  health tracking and recovery triggering).
 - The AMQP routing key is published as the Pulsar message key.
 - The original XML body is published as the Pulsar payload.
 - `__rabbitmq_consumer_tag` is published as a message property and is a
@@ -156,6 +163,23 @@ Pulsar support assumes the SDK's RabbitMQ source connector contract:
 The SDK uses the consumer tag as a reconnect token and triggers recovery when
 it changes: a new tag means a new upstream consume session, so a delivery gap
 was possible. The AMQP transport uses its own consumer tag the same way.
+
+#### Multi-instance control plane
+
+With multiple SDK instances on the same subscription, the broker elects one
+instance as the Failover system-subscription owner and notifies each instance
+of its role. The SDK wires that signal to `UOF.SDK.ProducerMonitor`: only the
+active instance runs the control plane (producer health transitions and
+recovery requests), while passive instances keep consuming their Key-Shared
+content share and tracking checkpoints. On promotion, the new owner recovers
+each producer from its own last-known checkpoint. The signal is best-effort,
+not a fencing mechanism: briefly-overlapping actives can issue a duplicate
+recovery request, which wastes recovery quota but is otherwise harmless.
+`UOF.SDK.recover/2` returns `{:error, :passive}` on a standby instance.
+Requires `off_broadway_pulsar` with Failover active-state callbacks
+([PR #70](https://github.com/efcasado/off_broadway_pulsar/pull/70)); without
+them every instance stays active, which is safe for a single instance and for
+AMQP deployments.
 
 ### Options
 

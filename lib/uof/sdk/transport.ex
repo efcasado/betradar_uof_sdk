@@ -72,9 +72,20 @@ defmodule UOF.SDK.Transport do
     subscription = Keyword.fetch!(opts, :subscription)
     base_opts = Keyword.drop(opts, [:routing_key_metadata_key, :connection_token_metadata_key])
 
+    # The system subscription is Failover, so the broker elects one instance
+    # as its sole receiver. Ownership reports feed ProducerMonitor, which holds
+    # control-plane authority (recovery issuance) only while active. The
+    # Key_Shared content subscription never emits these reports.
+    system_opts =
+      Keyword.put_new(
+        base_opts,
+        :active_state_callback,
+        {UOF.SDK.ProducerMonitor, :active_state_change, []}
+      )
+
     %{
       content: pulsar_producer(base_opts, subscription, :content, :Key_Shared),
-      system: pulsar_producer(base_opts, subscription, :system, :Failover),
+      system: pulsar_producer(system_opts, subscription, :system, :Failover),
       metadata_adapter: :pulsar_rabbitmq_source,
       routing_key_metadata_key: :routing_key,
       connection_token_metadata_key: nil

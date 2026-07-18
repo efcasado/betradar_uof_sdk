@@ -30,7 +30,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     producer =
       %Producer{id: 1, status: :up}
       |> Producer.configure_recovery([])
-      |> Producer.require_recovery(500)
+      |> Producer.prepare_recovery(500)
 
     assert {:ok, observed} = Producer.observe_alive(producer, 900, false, 1_000)
     assert observed.last_alive_at == 1_000
@@ -73,7 +73,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     producer =
       %Producer{id: 1}
       |> Producer.configure_recovery(recovery_opts)
-      |> Producer.require_recovery(500)
+      |> Producer.prepare_recovery(500)
 
     assert %Producer{recovery: %{job: %{after_ts: 500}}} = producer
     assert Producer.recovering?(producer)

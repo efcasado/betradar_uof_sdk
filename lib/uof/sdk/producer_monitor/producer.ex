@@ -14,6 +14,20 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   canonical recovery job by `public/1`; it is not duplicated in the underlying
   health state.
 
+  ## Recovery sequencing
+
+  Preparing a recovery and issuing its HTTP request are deliberately separate.
+  `UOF.SDK.ProducerMonitor` first calls `prepare_recovery/2`, durably removes the
+  producer from the resumable set, and publishes the `:recovering` transition.
+  Only then does it call `initiate_recovery/1`. This ordering guarantees that a
+  crash after issuing the request cannot restart from stale resumable state.
+
+  A reconnect is different: its snapshot invalidation is persisted before the
+  producers are visited, so `restart_recovery/2` can replace an in-flight job
+  and initiate it immediately. Failed requests, stalls, and ownership demotion
+  all return a job to pending state, but their callers intentionally choose
+  different reissue times.
+
     * `:down` — not synchronized and no recovery is pending
     * `:recovering` — waiting to request, requesting, or awaiting recovery
       completion
@@ -172,21 +186,27 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec require_recovery(t(), integer() | nil) :: t()
-  def require_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
+  @spec prepare_recovery(t(), integer() | nil) :: t()
+  def prepare_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
     job = %{after_ts: after_ts, request_id: nil, generation: make_ref()}
     %{producer | recovery: %{recovery | job: job}}
   end
 
+  # Connection invalidation is already durable when this is called, so the
+  # replacement may proceed directly through cooldown and HTTP issuance.
   @doc false
-  @spec replace_recovery(t(), integer() | nil) :: t()
-  def replace_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
+  @spec restart_recovery(t(), integer() | nil) :: t()
+  def restart_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
     job = %{recovery.job | after_ts: after_ts, request_id: nil, generation: make_ref()}
-    %{producer | recovery: %{recovery | job: job}}
+    producer = %{producer | recovery: %{recovery | job: job}}
+    initiate_recovery(producer)
   end
 
-  @spec retry_recovery(t()) :: t()
-  defp retry_recovery(%__MODULE__{recovery: recovery} = producer) do
+  # This transition intentionally performs no I/O: stalls reissue immediately,
+  # request failures wait for the retry interval, and demotion waits for
+  # promotion.
+  @spec mark_recovery_pending(t()) :: t()
+  defp mark_recovery_pending(%__MODULE__{recovery: recovery} = producer) do
     job = %{recovery.job | request_id: nil, generation: make_ref()}
     %{producer | recovery: %{recovery | job: job}}
   end
@@ -210,7 +230,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @doc false
   @spec park_recovery(t()) :: t()
   def park_recovery(%__MODULE__{} = producer) do
-    if recovering?(producer) and not recovery_pending?(producer), do: retry_recovery(producer), else: producer
+    if recovering?(producer) and not recovery_pending?(producer), do: mark_recovery_pending(producer), else: producer
   end
 
   @doc false
@@ -250,7 +270,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def handle_stall(%__MODULE__{recovery: %{job: %{request_id: request_id}}} = producer, request_id)
       when not is_nil(request_id) do
     Logger.warning("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} stalled; reissuing")
-    producer |> retry_recovery() |> issue_recovery()
+    producer |> mark_recovery_pending() |> issue_recovery()
   end
 
   def handle_stall(%__MODULE__{} = producer, _request_id), do: producer
@@ -284,7 +304,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
             "retrying in #{recovery.min_interval_ms}ms"
         )
 
-        producer = retry_recovery(producer)
+        producer = mark_recovery_pending(producer)
         schedule({:retry, producer.id, producer.recovery.job.generation}, recovery.min_interval_ms)
         producer
     end

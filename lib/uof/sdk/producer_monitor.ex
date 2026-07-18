@@ -42,6 +42,9 @@ defmodule UOF.SDK.ProducerMonitor do
   `request_id` is pending (cooling down, retrying, or parked while passive); a
   job with a `request_id` is in flight. The producer's `:recovering` status is
   the public projection of that job, not a separate orchestration decision.
+  Before any new job can issue HTTP, the monitor durably removes that producer
+  from the resumable set so a crash cannot restart from stale synchronized
+  state.
 
   The recovery defaults follow the official SDK's recovery guidance and should
   be changed with care.
@@ -450,8 +453,11 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp trigger_recovery(state, before, after_ts) do
-    producer = Producer.require_recovery(before, after_ts)
+    producer = Producer.prepare_recovery(before, after_ts)
 
+    # The durable safety transition must precede HTTP issuance. If the monitor
+    # crashes after the request, restart will require another recovery instead
+    # of resuming from stale synchronized state.
     state
     |> put_producer(producer)
     |> update_snapshot(&Snapshot.require_recovery(&1, before.id))
@@ -602,8 +608,8 @@ defmodule UOF.SDK.ProducerMonitor do
           state
 
         Producer.recovering?(producer) ->
-          producer = Producer.replace_recovery(producer, after_from_checkpoint(state, producer))
-          state |> put_producer(producer) |> initiate(producer)
+          producer = Producer.restart_recovery(producer, after_from_checkpoint(state, producer))
+          put_producer(state, producer)
 
         true ->
           trigger_recovery(state, producer)

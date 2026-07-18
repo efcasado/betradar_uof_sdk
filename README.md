@@ -290,11 +290,13 @@ reconnect, or alive heartbeat timeout. When a gap is detected, the SDK:
 
 1. Uses the checkpoint in the monitor's in-memory snapshot, loaded from its
    store at startup.
-2. Calls `UOF.API.Recovery.recover/2` with a unique `request_id`.
-3. Requests incremental recovery if a checkpoint exists, or full recovery if it
+2. Atomically removes the producer from the snapshot's resumable set before
+   performing external I/O.
+3. Calls `UOF.API.Recovery.recover/2` with a unique `request_id`.
+4. Requests incremental recovery if a checkpoint exists, or full recovery if it
    does not.
-4. Receives replayed messages over the same feed.
-5. Marks the producer up when `snapshot_complete` arrives with the matching
+5. Receives replayed messages over the same feed.
+6. Marks the producer up when `snapshot_complete` arrives with the matching
    `request_id`. That system message also establishes the alive-timeout anchor.
 
 `snapshot_complete` is handled on the system pipeline by design. It means the
@@ -346,6 +348,11 @@ replace one monitor snapshot containing:
 
 Keeping these values in one snapshot prevents a crash from exposing a new
 connection token alongside stale producer safety state.
+
+Recovery preparation is persisted before the HTTP request is issued. This
+ordering is deliberate: if the monitor crashes after requesting recovery, the
+next monitor must recover again rather than incorrectly resume from state that
+still claimed the producer was synchronized.
 
 `save/1` must atomically replace the complete snapshot. A snapshot must also
 have exactly one writer: its `ProducerMonitor`. Concurrent writes from another

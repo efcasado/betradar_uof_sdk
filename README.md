@@ -420,18 +420,23 @@ lag detection. It also consumes session-scoped `alive` messages only as lag
 freshness markers for quiet producers.
 
 `UOF.SDK.ProducerMonitor` defines and owns its runtime state struct. It contains
-the producer map, recovery jobs, connection-session state, ownership, durable
-`UOF.SDK.ProducerMonitor.Snapshot`, and runtime dependencies. The focused
-modules own their respective transitions:
+the producer aggregates, connection-session state, ownership, durable
+`UOF.SDK.ProducerMonitor.Snapshot`, and runtime dependencies. The focused modules
+own their respective transitions:
 
-- `UOF.SDK.ProducerMonitor.Health` interprets alive and processing progress.
-- `UOF.SDK.ProducerMonitor.Recovery` represents pending and in-flight recovery jobs.
+- `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
+  health observations, lifecycle transitions, its canonical recovery job, and
+  recovery HTTP attempts and timers.
+- `UOF.SDK.ProducerMonitor.Recovery` is the producer's small pending/in-flight
+  recovery value.
 - `UOF.SDK.ProducerMonitor.Connections` detects consume-session changes.
 - `UOF.SDK.ProducerMonitor.Snapshot` owns durable-state mutations.
 - `UOF.SDK.ProducerMonitor.Store` atomically loads and saves snapshots.
 
-The `ProducerMonitor` GenServer owns sequencing and side effects.
-`UOF.SDK.producers/0` reads its runtime state through a `GenServer.call`.
+The `ProducerMonitor` GenServer is the public coordination boundary: it routes
+events, applies global ownership and connection gates, persists transitions,
+and publishes status callbacks. `UOF.SDK.producers/0` reads its runtime state
+through a `GenServer.call`.
 
 For Pulsar transports, the SDK reads the original AMQP routing key from the
 Pulsar partition key produced by the RabbitMQ source connector.

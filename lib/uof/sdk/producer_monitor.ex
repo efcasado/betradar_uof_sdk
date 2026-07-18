@@ -11,12 +11,14 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Health monitoring
 
-  `UOF.SDK.ProducerMonitor.Producer` defines the lifecycle statuses. Delivery
-  gaps move a producer from `:down` or `:up` to `:recovering`, and a matching
-  recovery completion moves it to `:up`. Local processing lag moves `:up` to
-  `:delayed` without recovery. A restart that can safely drain retained backlog
-  starts at `:resuming` and becomes `:up` after current-session continuity is
-  confirmed and processing catches up.
+  `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
+  health observations, lifecycle transitions, its canonical recovery job, and
+  the recovery cooldown. Delivery gaps move a producer from `:down` or `:up`
+  to `:recovering`, and a matching recovery completion moves it to `:up`.
+  Local processing lag moves `:up` to `:delayed` without recovery. A restart
+  that can safely drain retained backlog starts at `:resuming` and becomes
+  `:up` after current-session continuity is confirmed and processing catches
+  up.
 
   The processing threshold is independent of `inactivity_ms` so consumer-lag
   tolerance can be tuned separately from the alive-gap/recovery trigger.
@@ -90,11 +92,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   use GenServer
 
-  alias UOF.Schemas.Common.Response
   alias UOF.SDK.ProducerMonitor.Connections
-  alias UOF.SDK.ProducerMonitor.Health
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.ProducerMonitor.Recovery
   alias UOF.SDK.ProducerMonitor.Snapshot
 
   require Logger
@@ -102,53 +101,35 @@ defmodule UOF.SDK.ProducerMonitor do
   @default_inactivity_ms 20_000
   @default_max_processing_delay_ms 20_000
   @default_tick_ms 1_000
-  @default_min_interval_ms 30_000
-  @default_max_recovery_ms 60 * 60_000
   @default_recovery_overlap_ms 5 * 60_000
 
   @type ownership :: :always_active | {:failover, :active | :passive}
 
   @type state :: %__MODULE__{
           producers: %{optional(integer()) => Producer.t()},
-          recoveries: %{optional(integer()) => Recovery.t()},
-          last_recovery_at: %{optional(integer()) => integer()},
           snapshot: Snapshot.t(),
           connections: Connections.t(),
           ownership: ownership(),
           handler: module() | nil,
           now_fun: (-> integer()),
-          monotonic_fun: (-> integer()),
-          recover_fun: (term(), keyword() -> term()),
           monitor_store: module(),
-          node_id: integer() | nil,
-          gen_request_id: (-> integer()),
           inactivity_ms: non_neg_integer(),
           max_processing_delay_ms: non_neg_integer(),
           tick_ms: pos_integer(),
-          min_interval_ms: non_neg_integer(),
-          max_recovery_ms: pos_integer(),
           recovery_overlap_ms: non_neg_integer()
         }
 
   @enforce_keys [
     :producers,
-    :recoveries,
-    :last_recovery_at,
     :snapshot,
     :connections,
     :ownership,
     :handler,
     :now_fun,
-    :monotonic_fun,
-    :recover_fun,
     :monitor_store,
-    :node_id,
-    :gen_request_id,
     :inactivity_ms,
     :max_processing_delay_ms,
     :tick_ms,
-    :min_interval_ms,
-    :max_recovery_ms,
     :recovery_overlap_ms
   ]
 
@@ -237,30 +218,23 @@ defmodule UOF.SDK.ProducerMonitor do
     monitor_store = Keyword.get(opts, :monitor_store, UOF.SDK.ProducerMonitor.Store.ETS)
     snapshot = monitor_store.load()
 
-    producers = Map.new(load_producers(opts), &{&1.id, restore_producer(&1, snapshot)})
+    producers =
+      Map.new(load_producers(opts), fn producer ->
+        producer = producer |> restore_producer(snapshot) |> Producer.configure_recovery(opts)
+        {producer.id, producer}
+      end)
 
     state = %__MODULE__{
       producers: producers,
-      recoveries: %{},
-      last_recovery_at: %{},
       snapshot: snapshot,
       connections: Connections.new(snapshot.connection_tokens),
       ownership: Keyword.get(opts, :ownership, {:failover, :passive}),
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
-      monotonic_fun: Keyword.get(opts, :monotonic_fun, &monotonic_ms/0),
-      recover_fun: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
       monitor_store: monitor_store,
-      node_id: Keyword.get(opts, :node_id),
-      gen_request_id:
-        Keyword.get(opts, :gen_request_id, fn ->
-          System.unique_integer([:positive, :monotonic])
-        end),
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
       max_processing_delay_ms: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
-      min_interval_ms: Keyword.get(opts, :min_interval_ms, @default_min_interval_ms),
-      max_recovery_ms: Keyword.get(opts, :max_recovery_ms, @default_max_recovery_ms),
       recovery_overlap_ms: Keyword.get(opts, :recovery_overlap_ms, @default_recovery_overlap_ms)
     }
 
@@ -273,7 +247,7 @@ defmodule UOF.SDK.ProducerMonitor do
     result =
       state.producers
       |> Map.values()
-      |> Enum.map(&public_producer(state, &1))
+      |> Enum.map(&Producer.public/1)
       |> Enum.sort_by(& &1.id)
 
     {:reply, result, state}
@@ -282,7 +256,7 @@ defmodule UOF.SDK.ProducerMonitor do
   def handle_call({:get_producer, id}, _from, state) do
     result =
       case Map.fetch(state.producers, id) do
-        {:ok, producer} -> {:ok, public_producer(state, producer)}
+        {:ok, producer} -> {:ok, Producer.public(producer)}
         :error -> :error
       end
 
@@ -296,7 +270,7 @@ defmodule UOF.SDK.ProducerMonitor do
       not owns_control?(state) ->
         {:reply, {:error, :passive}, state}
 
-      Map.has_key?(state.recoveries, id) ->
+      producer_recovering?(state, id) ->
         {:reply, {:error, :already_recovering}, state}
 
       true ->
@@ -324,7 +298,7 @@ defmodule UOF.SDK.ProducerMonitor do
   def handle_cast({:message, id, gen_ts}, state) do
     state =
       with_producer(state, id, fn p ->
-        put_producer(state, Health.observe_message(p, gen_ts))
+        put_producer(state, Producer.observe_message(p, gen_ts))
       end)
 
     {:noreply, state}
@@ -365,29 +339,20 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   def handle_cast({:snapshot_complete, id, request_id}, state) do
-    case Map.get(state.recoveries, id) do
-      %Recovery{} = recovery ->
-        if Recovery.matches_request?(recovery, request_id) do
-          {:noreply, complete_recovery(state, id, request_id)}
-        else
-          {:noreply, state}
-        end
-
-      nil ->
-        {:noreply, state}
-    end
+    {:noreply, complete_recovery(state, id, request_id)}
   end
 
   defp complete_recovery(state, id, request_id) do
-    Logger.info("UOF.SDK.ProducerMonitor: producer #{id} recovery #{request_id} complete")
-    state = %{state | recoveries: Map.delete(state.recoveries, id)}
+    with_producer(state, id, fn producer ->
+      case Producer.complete_recovery(producer, request_id, state.now_fun.()) do
+        {:ok, producer} ->
+          Logger.info("UOF.SDK.ProducerMonitor: producer #{id} recovery #{request_id} complete")
+          commit_producer_transition(state, producer)
 
-    state =
-      with_producer(state, id, fn producer ->
-        commit_producer_transition(state, Producer.complete_recovery(producer, state.now_fun.()))
-      end)
-
-    state
+        :stale ->
+          state
+      end
+    end)
   end
 
   @impl true
@@ -408,36 +373,21 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   def handle_info({:stall, id, request_id}, state) do
-    case Map.get(state.recoveries, id) do
-      %Recovery{} = recovery ->
-        if Recovery.matches_request?(recovery, request_id) do
-          Logger.warning("UOF.SDK.ProducerMonitor: producer #{id} recovery #{request_id} stalled; reissuing")
-          state = put_recovery(state, id, Recovery.pending(recovery))
-          {:noreply, with_producer(state, id, &issue(state, &1))}
-        else
-          {:noreply, state}
-        end
+    state =
+      with_producer(state, id, fn producer ->
+        put_producer(state, Producer.handle_stall(producer, request_id, owns_control?(state)))
+      end)
 
-      nil ->
-        {:noreply, state}
-    end
+    {:noreply, state}
   end
 
   # A timer that outlives a completed or superseded recovery no longer matches
   # the canonical job generation and must not issue.
   def handle_info({:retry, id, generation}, state) do
     state =
-      case Map.get(state.recoveries, id) do
-        %Recovery{} = recovery ->
-          if Recovery.matches_generation?(recovery, generation) do
-            with_producer(state, id, &issue(state, &1))
-          else
-            state
-          end
-
-        nil ->
-          state
-      end
+      with_producer(state, id, fn producer ->
+        put_producer(state, Producer.handle_retry(producer, generation, owns_control?(state)))
+      end)
 
     {:noreply, state}
   end
@@ -445,14 +395,7 @@ defmodule UOF.SDK.ProducerMonitor do
   ## Health transitions -------------------------------------------------------
 
   defp on_alive(state, producer, gen_ts, subscribed?) do
-    result =
-      Health.observe_alive(
-        producer,
-        gen_ts,
-        subscribed?,
-        state.now_fun.(),
-        Map.has_key?(state.recoveries, producer.id)
-      )
+    result = Producer.observe_alive(producer, gen_ts, subscribed?, state.now_fun.())
 
     case result do
       {:recovery_needed, producer, _cause} ->
@@ -476,25 +419,21 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp check(state, producer, now) do
-    if Map.has_key?(state.recoveries, producer.id) do
-      state
-    else
-      case Health.check(
-             producer,
-             now,
-             state.inactivity_ms,
-             state.max_processing_delay_ms,
-             Connections.ready?(state.connections)
-           ) do
-        {:recovery_needed, producer, _cause} ->
-          if startup_connection_recovery_pending?(state), do: state, else: trigger_recovery(state, producer)
+    case Producer.check(
+           producer,
+           now,
+           state.inactivity_ms,
+           state.max_processing_delay_ms,
+           Connections.ready?(state.connections)
+         ) do
+      {:recovery_needed, producer, _cause} ->
+        if startup_connection_recovery_pending?(state), do: state, else: trigger_recovery(state, producer)
 
-        {:transition, producer} ->
-          commit_producer_transition(state, producer)
+      {:transition, producer} ->
+        commit_producer_transition(state, producer)
 
-        :unchanged ->
-          state
-      end
+      :unchanged ->
+        state
     end
   end
 
@@ -503,20 +442,19 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp trigger_recovery(state, before, after_ts) do
-    recovery = Recovery.new(after_ts)
+    producer = Producer.require_recovery(before, after_ts)
 
     state
-    |> put_producer(before)
-    |> put_recovery(before.id, recovery)
+    |> put_producer(producer)
     |> update_snapshot(&Snapshot.require_recovery(&1, before.id))
-    |> notify_recovery(before)
-    |> initiate(before)
+    |> notify_recovery(producer)
+    |> initiate(producer)
   end
 
   defp commit_producer_transition(state, after_) do
     state = put_producer(state, after_)
     state = persist_producer_state(state, after_)
-    notify(state, after_)
+    notify(state, Producer.public(after_))
     state
   end
 
@@ -589,14 +527,14 @@ defmodule UOF.SDK.ProducerMonitor do
   defp notify(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
 
   defp notify_recovery(state, producer) do
-    notify(state, public_producer(state, producer))
+    notify(state, Producer.public(producer))
     state
   end
 
   ## Control-plane ownership ---------------------------------------------------
 
   defp park_recoveries(state) do
-    in_flight = Enum.filter(state.recoveries, fn {_id, recovery} -> not Recovery.pending?(recovery) end)
+    in_flight = Enum.filter(state.producers, fn {_id, producer} -> recovery_in_flight?(producer) end)
 
     if in_flight == [] do
       state
@@ -604,23 +542,18 @@ defmodule UOF.SDK.ProducerMonitor do
       ids = Enum.map(in_flight, &elem(&1, 0))
       Logger.info("UOF.SDK.ProducerMonitor: parking in-flight recoveries for producers #{inspect(ids)}")
 
-      recoveries =
-        Map.new(state.recoveries, fn {id, recovery} ->
-          {id, if(Recovery.pending?(recovery), do: recovery, else: Recovery.pending(recovery))}
+      producers =
+        Map.new(state.producers, fn {id, producer} ->
+          {id, Producer.park_recovery(producer)}
         end)
 
-      %{state | recoveries: recoveries}
+      %{state | producers: producers}
     end
   end
 
   defp resume_pending_recoveries(state) do
-    Enum.reduce(state.recoveries, state, fn
-      {id, %Recovery{} = recovery}, state ->
-        if Recovery.pending?(recovery) do
-          with_producer(state, id, &initiate(state, &1))
-        else
-          state
-        end
+    Enum.reduce(state.producers, state, fn {_id, producer}, state ->
+      if Producer.recovery_pending?(producer), do: initiate(state, producer), else: state
     end)
   end
 
@@ -656,16 +589,15 @@ defmodule UOF.SDK.ProducerMonitor do
     state.producers
     |> Map.values()
     |> Enum.reduce(state, fn producer, state ->
-      case Map.get(state.recoveries, producer.id) do
-        %Recovery{} = recovery ->
-          if Recovery.pending?(recovery) do
-            state
-          else
-            recovery = Recovery.pending(recovery, after_from_checkpoint(state, producer))
-            state |> put_recovery(producer.id, recovery) |> initiate(producer)
-          end
+      cond do
+        Producer.recovery_pending?(producer) ->
+          state
 
-        nil ->
+        Producer.recovering?(producer) ->
+          producer = Producer.replace_recovery(producer, after_from_checkpoint(state, producer))
+          state |> put_producer(producer) |> initiate(producer)
+
+        true ->
           trigger_recovery(state, producer)
       end
     end)
@@ -696,98 +628,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Recovery -----------------------------------------------------------------
 
-  # Stall reissues and failure retries bypass this new-trigger cooldown because
-  # their own timers already space them out.
   defp initiate(state, producer) do
-    case recovery_cooldown(state, producer) do
-      0 -> issue(state, producer)
-      remaining -> defer(state, producer, remaining)
-    end
-  end
-
-  # Cooldowns are intentionally in-memory so a restart is never delayed by a
-  # stale deadline.
-  defp recovery_cooldown(state, producer) do
-    case Map.get(state.last_recovery_at, producer.id) do
-      nil -> 0
-      last -> max(state.min_interval_ms - (state.monotonic_fun.() - last), 0)
-    end
-  end
-
-  # The producer remains `:recovering`, but is not in-flight until this fires.
-  defp defer(state, producer, remaining) do
-    Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery deferred for #{remaining}ms")
-
-    recovery = Map.fetch!(state.recoveries, producer.id)
-    Process.send_after(self(), {:retry, producer.id, recovery.generation}, remaining)
-    state
-  end
-
-  # Backstop for retry/stall timers that fire after demotion: the producer
-  # stays :recovering and is reissued from its checkpoint on promotion.
-  defp issue(state, producer) do
-    if owns_control?(state) do
-      do_issue(state, producer)
-    else
-      Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery parked: control plane passive")
-      state
-    end
-  end
-
-  defp do_issue(state, producer) do
-    recovery = Map.fetch!(state.recoveries, producer.id)
-    after_ts = recovery.after_ts
-
-    state = %{
-      state
-      | last_recovery_at: Map.put(state.last_recovery_at, producer.id, state.monotonic_fun.())
-    }
-
-    request_id = state.gen_request_id.()
-    opts = build_opts(after_ts, request_id, state.node_id)
-
-    case safe_recover(state, producer.product, opts) do
-      :ok ->
-        emit_initiated(producer, request_id, after_ts)
-        Process.send_after(self(), {:stall, producer.id, request_id}, state.max_recovery_ms)
-
-        put_recovery(state, producer.id, Recovery.in_flight(recovery, request_id))
-
-      :error ->
-        Logger.warning(
-          "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery request failed; " <>
-            "retrying in #{state.min_interval_ms}ms"
-        )
-
-        recovery = Recovery.pending(recovery)
-        Process.send_after(self(), {:retry, producer.id, recovery.generation}, state.min_interval_ms)
-        put_recovery(state, producer.id, recovery)
-    end
-  end
-
-  # The HTTP layer decodes any parseable body — including rejection envelopes
-  # (throttling, 403) — into `{:ok, %Response{}}` without surfacing the status
-  # code, so acceptance must be checked here: mistaking a rejection for an
-  # in-flight recovery leaves the producer waiting on a `snapshot_complete`
-  # that was never scheduled.
-  defp safe_recover(state, product, opts) do
-    case state.recover_fun.(product, opts) do
-      {:ok, %Response{response_code: code} = response} when code != "ACCEPTED" ->
-        log_failure("#{code}: #{response.message || response.errors || "(no message)"}")
-
-      {:ok, _response} ->
-        :ok
-
-      {:error, reason} ->
-        log_failure(inspect(reason))
-    end
-  rescue
-    exception -> log_failure(Exception.message(exception))
-  end
-
-  defp log_failure(detail) do
-    Logger.warning("UOF.SDK.ProducerMonitor: recover request failed: #{detail}")
-    :error
+    put_producer(state, Producer.initiate_recovery(producer, owns_control?(state)))
   end
 
   defp after_from_checkpoint(state, producer) do
@@ -806,18 +648,6 @@ defmodule UOF.SDK.ProducerMonitor do
     %{state | producers: Map.put(state.producers, producer.id, producer)}
   end
 
-  defp put_recovery(state, producer_id, %Recovery{} = recovery) do
-    %{state | recoveries: Map.put(state.recoveries, producer_id, recovery)}
-  end
-
-  defp public_producer(state, producer) do
-    if Map.has_key?(state.recoveries, producer.id) do
-      %{producer | status: :recovering, processing_queue_delay: nil}
-    else
-      producer
-    end
-  end
-
   defp checkpoint_after_overlap(timestamp, overlap_ms), do: max(timestamp - overlap_ms, 0)
 
   defp put_checkpoint(state, id, timestamp) do
@@ -831,34 +661,18 @@ defmodule UOF.SDK.ProducerMonitor do
     max(timestamp, earliest)
   end
 
-  defp build_opts(after_ts, request_id, node_id) do
-    [request_id: request_id]
-    |> maybe_put(:node_id, node_id)
-    |> maybe_put(:after, after_ts)
-  end
-
-  defp maybe_put(opts, _key, nil), do: opts
-  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
-
-  defp emit_initiated(producer, request_id, after_ts) do
-    :telemetry.execute(
-      [:uof_sdk, :recovery, :initiated],
-      %{system_time: System.system_time()},
-      %{
-        producer_id: producer.id,
-        product: producer.product,
-        request_id: request_id,
-        recovery_from: after_ts
-      }
-    )
-
-    Logger.info(
-      "UOF.SDK.ProducerMonitor: producer #{producer.id} (#{producer.product}) recovery initiated " <>
-        "request_id=#{request_id} after=#{inspect(after_ts)}"
-    )
-  end
-
   ## Helpers ------------------------------------------------------------------
+  defp producer_recovering?(state, id) do
+    case Map.fetch(state.producers, id) do
+      {:ok, producer} -> Producer.recovering?(producer)
+      :error -> false
+    end
+  end
+
+  defp recovery_in_flight?(producer) do
+    Producer.recovering?(producer) and not Producer.recovery_pending?(producer)
+  end
+
   defp with_producer(state, id, fun) do
     case Map.fetch(state.producers, id) do
       {:ok, producer} -> fun.(producer)
@@ -873,5 +687,4 @@ defmodule UOF.SDK.ProducerMonitor do
   defp schedule_tick(state), do: Process.send_after(self(), :tick, state.tick_ms)
 
   defp now_ms, do: System.system_time(:millisecond)
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

@@ -139,7 +139,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert %ProducerMonitor{
              ownership: {:failover, :active},
              producers: %{1 => %Producer{}},
-             recoveries: %{},
              snapshot: %Snapshot{}
            } = :sys.get_state(monitor)
   end
@@ -152,9 +151,9 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(m)
     assert {:ok, %Producer{status: :recovering}} = ProducerMonitor.producer(m, 1)
 
-    # :recovering is projected from the canonical job, not duplicated in the
-    # stored producer lifecycle.
-    assert %ProducerMonitor{producers: %{1 => %Producer{status: :down}}, recoveries: %{1 => %Recovery{}}} =
+    # :recovering is projected from the producer's canonical job, not
+    # duplicated in its stored health lifecycle.
+    assert %ProducerMonitor{producers: %{1 => %Producer{status: :down, recovery: %Recovery{}}}} =
              :sys.get_state(m)
 
     ProducerMonitor.snapshot_complete(m, 1, rid)

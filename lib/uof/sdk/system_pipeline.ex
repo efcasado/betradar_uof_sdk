@@ -117,7 +117,9 @@ defmodule UOF.SDK.SystemPipeline do
   ## lifecycle side-effects --------------------------------------------------
 
   defp observe(ctx, %RoutingKey{message_type: "alive"}, msg) do
-    notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
+    if msg.product && msg.timestamp do
+      notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
+    end
   end
 
   defp observe(ctx, %RoutingKey{message_type: "snapshot_complete"}, msg) do

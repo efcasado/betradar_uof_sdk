@@ -17,9 +17,10 @@ defmodule UOF.SDK.ConfigTest do
     assert config.metadata_adapter == :amqp
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil
+    assert config.ownership == :always_active
   end
 
-  test "defaults to AMQP transport with empty connection and ETS checkpoint store" do
+  test "defaults to AMQP transport with empty connection and ETS snapshot store" do
     config = Config.load(handler: MyApp.Handler)
 
     assert config.transport == :amqp
@@ -38,7 +39,7 @@ defmodule UOF.SDK.ConfigTest do
     assert {"unifiedfeed", routing_key: "-.-.-.snapshot_complete.*.*.*.42.#"} in system_opts[:bindings]
   end
 
-  test "accepts a custom checkpoint store" do
+  test "accepts a custom snapshot store" do
     config = Config.load(handler: MyApp.Handler, monitor_store: MyApp.PgStore)
     assert config.monitor_store == MyApp.PgStore
   end
@@ -79,6 +80,7 @@ defmodule UOF.SDK.ConfigTest do
     assert config.metadata_adapter == :pulsar_rabbitmq_source
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil
+    assert config.ownership == {:failover, :passive}
   end
 
   test "requires a Pulsar subscription" do

@@ -16,10 +16,12 @@ defmodule UOF.SDK.Transport do
   ]
 
   @type producer_spec :: {module(), keyword()}
+  @type ownership :: :always_active | {:failover, :passive}
 
   @spec producers(term(), integer() | nil) :: %{
           content: producer_spec(),
           system: producer_spec(),
+          ownership: ownership(),
           metadata_adapter: :amqp | :pulsar_rabbitmq_source,
           routing_key_metadata_key: atom(),
           connection_token_metadata_key: atom() | nil
@@ -46,6 +48,7 @@ defmodule UOF.SDK.Transport do
     %{
       content: rabbitmq_producer(connection, content_bindings(node_id)),
       system: rabbitmq_producer(connection, system_bindings(node_id)),
+      ownership: :always_active,
       metadata_adapter: :amqp,
       routing_key_metadata_key: :routing_key,
       connection_token_metadata_key: nil
@@ -76,8 +79,12 @@ defmodule UOF.SDK.Transport do
     # as its sole receiver. Ownership reports feed ProducerMonitor, which holds
     # control-plane authority (recovery issuance) only while active. The
     # Key_Shared content subscription never emits these reports.
+    #
+    # The callback is SDK-owned wiring, not a user extension point: a
+    # user-supplied value would silently replace the monitor's ownership
+    # signal and leave a demoted instance issuing recoveries forever.
     system_opts =
-      Keyword.put_new(
+      Keyword.put(
         base_opts,
         :active_state_callback,
         {UOF.SDK.ProducerMonitor, :active_state_change, []}
@@ -86,6 +93,7 @@ defmodule UOF.SDK.Transport do
     %{
       content: pulsar_producer(base_opts, subscription, :content, :Key_Shared),
       system: pulsar_producer(system_opts, subscription, :system, :Failover),
+      ownership: {:failover, :passive},
       metadata_adapter: :pulsar_rabbitmq_source,
       routing_key_metadata_key: :routing_key,
       connection_token_metadata_key: nil

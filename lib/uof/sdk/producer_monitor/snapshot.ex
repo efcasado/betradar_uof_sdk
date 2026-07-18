@@ -20,15 +20,26 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
 
   def checkpoint(%__MODULE__{checkpoints: checkpoints}, id), do: Map.get(checkpoints, id)
 
-  def put_checkpoint(%__MODULE__{} = snapshot, id, timestamp) do
-    %{snapshot | checkpoints: Map.put(snapshot.checkpoints, id, timestamp)}
+  def advance_checkpoint(%__MODULE__{} = snapshot, id, timestamp) when is_integer(timestamp) do
+    case checkpoint(snapshot, id) do
+      existing when is_integer(existing) and existing >= timestamp ->
+        snapshot
+
+      _other ->
+        %{snapshot | checkpoints: Map.put(snapshot.checkpoints, id, timestamp)}
+    end
+  end
+
+  def commit_connection_change(%__MODULE__{} = snapshot, tokens, producer_ids) do
+    snapshot = require_recovery(snapshot, producer_ids)
+    %{snapshot | connection_tokens: tokens}
   end
 
   def resumable?(%__MODULE__{resumable_producers: producers}, id) do
     MapSet.member?(producers, id)
   end
 
-  def mark_resumable(%__MODULE__{} = snapshot, id) do
+  def mark_synchronized(%__MODULE__{} = snapshot, id) do
     %{snapshot | resumable_producers: MapSet.put(snapshot.resumable_producers, id)}
   end
 

@@ -171,15 +171,15 @@ instance as the Failover system-subscription owner and notifies each instance
 of its role. The SDK wires that signal to `UOF.SDK.ProducerMonitor`: only the
 active instance runs the control plane (producer health transitions and
 recovery requests), while passive instances keep consuming their Key-Shared
-content share and tracking checkpoints. On promotion, the new owner recovers
-each producer from its own last-known checkpoint. The signal is best-effort,
-not a fencing mechanism: briefly-overlapping actives can issue a duplicate
-recovery request, which wastes recovery quota but is otherwise harmless.
+content share. On promotion, the new owner recovers each producer from its own
+last-known checkpoint. The signal is best-effort, not a fencing mechanism:
+briefly-overlapping actives can issue a duplicate recovery request, which
+wastes recovery quota but is otherwise harmless.
 `UOF.SDK.recover/2` returns `{:error, :passive}` on a standby instance.
 Requires `off_broadway_pulsar` with Failover active-state callbacks
-([PR #70](https://github.com/efcasado/off_broadway_pulsar/pull/70)); without
-them every instance stays active, which is safe for a single instance and for
-AMQP deployments.
+([PR #70](https://github.com/efcasado/off_broadway_pulsar/pull/70)). Pulsar
+monitors start passive, so without the initial callback no instance issues
+recoveries. AMQP monitors start active and do not use ownership callbacks.
 
 ### Options
 
@@ -314,12 +314,12 @@ original timestamp so messages are not skipped on retry.
 ## Monitor state persistence
 
 > [!NOTE]
-> The default `UOF.SDK.ProducerMonitor.Store.ETS` is in-memory. Checkpoints, resumability
-> state and connection tokens are lost on VM restart, so a full recovery is
-> issued on the next start. This is fine for development and low-volume
-> producers, but production applications should use a persistent store. The ETS
-> store does survive monitor/pipeline crashes within the same VM, so
-> crash-restarts still resume without recovering.
+> The default `UOF.SDK.ProducerMonitor.Store.ETS` is in-memory. Checkpoints,
+> resumability state, and connection tokens are lost on VM restart, so a full
+> recovery is issued on the next start. This is fine for development and
+> low-volume producers, but production applications should use a persistent
+> store. The ETS store does survive monitor/pipeline crashes within the same VM,
+> so crash-restarts still resume without recovering.
 
 Checkpoints are owned by `ProducerMonitor` and advanced from subscribed system
 `alive` heartbeats after the producer is already in sync. Content messages and
@@ -392,15 +392,18 @@ start it before the producer monitor.
 
 ## Architecture
 
-`UOF.SDK` is a library supervisor that starts three components in order:
+`UOF.SDK` is a library supervisor that starts the following components in order:
 
 ```text
 UOF.SDK
-|-- Store - atomic checkpoints, resumability, and connection tokens
-|-- ProducerMonitor   - producer state, health monitoring, and recovery
-|-- SystemPipeline    - feed consumer for alive and snapshot_complete
-`-- ContentPipeline   - feed consumer for event content
+|-- ProducerMonitor.Store*     - optional configured snapshot-store child
+|-- ProducerMonitor            - producer health and recovery orchestration
+|-- SystemPipeline             - feed consumer for alive and snapshot_complete
+`-- ContentPipeline            - feed consumer for event content
 ```
+
+`*` The store appears in the supervision tree only when the configured
+`UOF.SDK.ProducerMonitor.Store` implementation provides `child_spec/1`.
 
 Messages flow in one direction:
 
@@ -416,8 +419,19 @@ checkpoint advancement.
 lag detection. It also consumes session-scoped `alive` messages only as lag
 freshness markers for quiet producers.
 
-Producer state lives entirely in `ProducerMonitor`'s GenServer state.
-`UOF.SDK.producers/0` reads that state through a `GenServer.call`.
+`UOF.SDK.ProducerMonitor.State` is the monitor's runtime aggregate. It contains
+the producer map, recovery jobs, connection-session state, ownership, durable
+`UOF.SDK.ProducerMonitor.Snapshot`, and runtime dependencies. The focused
+modules own their respective transitions:
+
+- `UOF.SDK.ProducerMonitor.Health` interprets alive and processing progress.
+- `UOF.SDK.ProducerMonitor.Recovery` represents pending and in-flight recovery jobs.
+- `UOF.SDK.ProducerMonitor.Connections` detects consume-session changes.
+- `UOF.SDK.ProducerMonitor.Snapshot` owns durable-state mutations.
+- `UOF.SDK.ProducerMonitor.Store` atomically loads and saves snapshots.
+
+The `ProducerMonitor` GenServer owns sequencing and side effects.
+`UOF.SDK.producers/0` reads its runtime state through a `GenServer.call`.
 
 For Pulsar transports, the SDK reads the original AMQP routing key from the
 Pulsar partition key produced by the RabbitMQ source connector.

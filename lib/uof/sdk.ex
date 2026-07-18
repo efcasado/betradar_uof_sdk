@@ -16,10 +16,10 @@ defmodule UOF.SDK do
   keyword list as the child argument (`{UOF.SDK, sessions: [:live]}`) to
   override per start.
 
-  It supervises (in order, with `:rest_for_one`) an optional checkpoint store,
+  It supervises (in order, with `:rest_for_one`) an optional snapshot store,
   producer monitor, a system-message pipeline, and a content-message pipeline.
-  Producer state is managed entirely within `UOF.SDK.ProducerMonitor`'s
-  GenServer state — no separate registry process is needed.
+  Runtime state is held in `UOF.SDK.ProducerMonitor.State` within the monitor's
+  GenServer — no separate registry process is needed.
   """
 
   use Supervisor
@@ -70,6 +70,7 @@ defmodule UOF.SDK do
            handler: config.handler,
            inactivity_ms: config.inactivity_seconds * 1_000,
            max_processing_delay_ms: config.max_processing_delay_seconds * 1_000,
+           ownership: config.ownership,
            node_id: config.node_id,
            monitor_store: config.monitor_store,
            min_interval_ms: config.min_interval_between_recoveries * 1_000,
@@ -77,6 +78,12 @@ defmodule UOF.SDK do
            recovery_overlap_ms: config.recovery_overlap_seconds * 1_000}
         ]
 
+    # Strategy and ordering are load-bearing: the monitor must start before
+    # the pipelines so its registered name exists when consumers report
+    # failover ownership, and :rest_for_one must take the pipelines down with
+    # a crashed monitor so re-subscribing Pulsar consumers deliver a fresh
+    # ownership report to its restarted passive state. AMQP has no ownership
+    # callback and is configured permanently active by the transport.
     Supervisor.init(lifecycle ++ child_specs(config), strategy: :rest_for_one)
   end
 

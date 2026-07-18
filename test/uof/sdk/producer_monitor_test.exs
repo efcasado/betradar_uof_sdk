@@ -4,6 +4,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerMonitor.Producer
   alias UOF.SDK.ProducerMonitor.Snapshot
+  alias UOF.SDK.ProducerMonitor.State
   alias UOF.SDK.ProducerMonitor.Store
 
   @inactivity 10_000
@@ -43,6 +44,9 @@ defmodule UOF.SDK.ProducerMonitorTest do
       max_processing_delay_ms: @inactivity,
       tick_ms: 60_000,
       recovery_overlap_ms: 0,
+      # Most unit tests start with control authority. Ownership-specific tests
+      # override this; configured Pulsar monitors start passive.
+      ownership: {:failover, :active},
       # Disable the recovery cooldown by default so lifecycle tests can drive
       # back-to-back recoveries on a frozen clock; the throttle has its own test.
       min_interval_ms: 0
@@ -55,7 +59,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   defp put_checkpoint(id, timestamp) do
     snapshot = Store.ETS.load()
-    Store.ETS.save(Snapshot.put_checkpoint(snapshot, id, timestamp))
+    Store.ETS.save(Snapshot.advance_checkpoint(snapshot, id, timestamp))
   end
 
   defp checkpoint(id) do
@@ -86,6 +90,17 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   ## Health monitoring ---------------------------------------------------------
+
+  test "uses an explicit runtime state struct", %{clock: clock} do
+    monitor = start_monitor(clock)
+
+    assert %State{
+             ownership: {:failover, :active},
+             producers: %{1 => %Producer{}},
+             recoveries: %{},
+             snapshot: %Snapshot{}
+           } = :sys.get_state(monitor)
+  end
 
   test "first alive triggers recovery; snapshot_complete brings producer up", %{clock: clock} do
     m = start_monitor(clock)
@@ -873,6 +888,28 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(monitor)
   end
 
+  test "a failover monitor starts passive until ownership is reported", %{clock: clock} do
+    m = start_monitor([ownership: {:failover, :passive}], clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    sync(m)
+    refute_receive {:recover_called, _product, _opts}
+    assert ProducerMonitor.recover(m, 1, []) == {:error, :passive}
+
+    report_active_state(m, :active)
+    ProducerMonitor.alive(m, 1, 2_000, true)
+    assert_recovery_triggered()
+  end
+
+  test "an always-active monitor ignores failover ownership reports", %{clock: clock} do
+    m = start_monitor([ownership: :always_active], clock)
+
+    report_active_state(m, :passive)
+
+    assert ProducerMonitor.recover(m, 1, full: true) == :ok
+    assert_recovery_triggered()
+  end
+
   test "passive suppresses alive-gap recovery; promotion recovers from checkpoint", %{clock: clock} do
     m = start_monitor(clock)
 
@@ -961,5 +998,99 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %Producer{status: :up}}
+  end
+
+  ## Connection sessions -------------------------------------------------------
+
+  defp establish_session(m) do
+    ProducerMonitor.observe_connection(m, {:system, "s1"})
+    ProducerMonitor.observe_connection(m, {:content, "c1"})
+    rid = assert_recovery_triggered()
+    assert_receive {:status, %Producer{status: :recovering}}
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{status: :up}}
+  end
+
+  test "stale token observations after a reconnect do not re-trigger recovery", %{clock: clock} do
+    m = start_monitor(clock)
+    establish_session(m)
+
+    # genuine reconnect: never-seen token
+    ProducerMonitor.observe_connection(m, {:content, "c2"})
+    assert_recovery_triggered()
+
+    # straggler from the superseded session, delivered out of order
+    ProducerMonitor.observe_connection(m, {:content, "c1"})
+    sync(m)
+
+    refute_receive {:recover_called, _product, _opts}
+    assert Store.ETS.load().connection_tokens == %{system: "s1", content: "c2"}
+  end
+
+  test "persisted tokens alone do not arm the startup connection gate", %{clock: clock} do
+    save_snapshot(%{}, [], %{system: "old-s", content: "old-c"})
+    m = start_monitor(clock)
+
+    # No current-session observation yet: the persisted baselines must not
+    # hold the first alive-triggered recovery hostage.
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    assert_recovery_triggered()
+  end
+
+  test "session observations are ignored while passive and re-detected on promotion", %{clock: clock} do
+    m = start_monitor(clock)
+    establish_session(m)
+    report_active_state(m, :passive)
+
+    ProducerMonitor.observe_connection(m, {:content, "c2"})
+    sync(m)
+
+    # nothing recorded, nothing acted on: the owner heals the shared feed
+    refute_receive {:recover_called, _product, _opts}
+    refute_receive {:status, _producer}
+    assert {:ok, %Producer{status: :up}} = ProducerMonitor.producer(m, 1)
+    assert Store.ETS.load().connection_tokens == %{system: "s1", content: "c1"}
+    assert Snapshot.resumable?(Store.ETS.load(), 1)
+
+    # the stale baseline re-detects the session change once promoted
+    report_active_state(m, :active)
+    ProducerMonitor.observe_connection(m, {:content, "c2"})
+    assert_recovery_triggered()
+    sync(m)
+    assert Store.ETS.load().connection_tokens == %{system: "s1", content: "c2"}
+  end
+
+  ## Timer and checkpoint hygiene ---------------------------------------------
+
+  test "a stale retry timer does not issue recovery for a healthy producer", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{status: :up}}
+
+    send(m, {:retry, 1, nil})
+    sync(m)
+
+    refute_receive {:recover_called, _product, _opts}
+    assert {:ok, %Producer{status: :up}} = ProducerMonitor.producer(m, 1)
+  end
+
+  test "a nil alive timestamp does not clobber the checkpoint", %{clock: clock} do
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %Producer{status: :up}}
+
+    ProducerMonitor.alive(m, 1, 2_000, true)
+    sync(m)
+    assert checkpoint(1) == {:ok, 2_000}
+
+    ProducerMonitor.alive(m, 1, nil, true)
+    sync(m)
+    assert checkpoint(1) == {:ok, 2_000}
   end
 end

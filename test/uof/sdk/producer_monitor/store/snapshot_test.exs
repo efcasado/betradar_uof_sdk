@@ -1,7 +1,7 @@
-defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
+defmodule UOF.SDK.ProducerMonitor.Store.SnapshotTest do
   use ExUnit.Case, async: true
 
-  alias UOF.SDK.ProducerMonitor.Snapshot
+  alias UOF.SDK.ProducerMonitor.Store.Snapshot
 
   test "checkpoint advancement is monotonic" do
     snapshot = Snapshot.advance_checkpoint(%Snapshot{}, 1, 2_000)

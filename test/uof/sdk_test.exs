@@ -3,8 +3,8 @@ defmodule UOF.SDKTest do
 
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
-  alias UOF.SDK.ProducerMonitor.Snapshot
   alias UOF.SDK.ProducerMonitor.Store
+  alias UOF.SDK.ProducerMonitor.Store.Snapshot
   alias UOF.SDK.SystemPipeline
 
   defmodule CallbackOnlyMonitorStore do

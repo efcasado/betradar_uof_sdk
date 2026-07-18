@@ -10,7 +10,7 @@ defmodule UOF.SDK.ProducerMonitor.Store do
   writes from another monitor, node, or administration tool are unsupported.
   """
 
-  alias UOF.SDK.ProducerMonitor.Snapshot
+  alias UOF.SDK.ProducerMonitor.Store.Snapshot
 
   @doc "Load the complete snapshot when its producer monitor starts."
   @callback load() :: Snapshot.t()

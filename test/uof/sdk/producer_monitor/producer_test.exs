@@ -27,7 +27,10 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   end
 
   test "an existing recovery suppresses new alive decisions" do
-    producer = Producer.require_recovery(%Producer{id: 1, status: :up}, 500)
+    producer =
+      %Producer{id: 1, status: :up}
+      |> Producer.configure_recovery([])
+      |> Producer.require_recovery(500)
 
     assert {:ok, observed} = Producer.observe_alive(producer, 900, false, 1_000)
     assert observed.last_alive_at == 1_000

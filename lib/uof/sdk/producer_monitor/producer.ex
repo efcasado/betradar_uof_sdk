@@ -173,46 +173,36 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   @doc false
   @spec require_recovery(t(), integer() | nil) :: t()
-  def require_recovery(%__MODULE__{recovery: nil} = producer, after_ts) do
-    producer |> configure_recovery([]) |> require_recovery(after_ts)
-  end
-
-  def require_recovery(%__MODULE__{} = producer, after_ts) do
-    put_job(producer, new_job(after_ts))
+  def require_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
+    job = %{after_ts: after_ts, request_id: nil, generation: make_ref()}
+    %{producer | recovery: %{recovery | job: job}}
   end
 
   @doc false
   @spec replace_recovery(t(), integer() | nil) :: t()
-  def replace_recovery(%__MODULE__{} = producer, after_ts) do
-    update_job(producer, &pending_job(&1, after_ts))
+  def replace_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
+    job = %{recovery.job | after_ts: after_ts, request_id: nil, generation: make_ref()}
+    %{producer | recovery: %{recovery | job: job}}
   end
 
   @spec retry_recovery(t()) :: t()
-  defp retry_recovery(%__MODULE__{} = producer) do
-    update_job(producer, &pending_job/1)
-  end
-
-  @spec mark_recovery_issued(t(), integer(), integer()) :: t()
-  defp mark_recovery_issued(%__MODULE__{recovery: recovery} = producer, request_id, monotonic_now) do
-    job = %{recovery.job | request_id: request_id}
-    %{producer | recovery: %{recovery | job: job, last_issued_at: monotonic_now}}
+  defp retry_recovery(%__MODULE__{recovery: recovery} = producer) do
+    job = %{recovery.job | request_id: nil, generation: make_ref()}
+    %{producer | recovery: %{recovery | job: job}}
   end
 
   @doc false
   @spec complete_recovery(t(), integer(), integer()) :: {:ok, t()} | :stale
-  def complete_recovery(%__MODULE__{recovery: recovery} = producer, request_id, now) when is_map(recovery) do
-    if request_matches?(recovery.job, request_id) do
-      {:ok,
-       %{
-         producer
-         | recovery: %{recovery | job: nil},
-           status: :up,
-           last_alive_at: now,
-           processing_queue_delay: nil
-       }}
-    else
-      :stale
-    end
+  def complete_recovery(%__MODULE__{recovery: %{job: %{request_id: request_id}} = recovery} = producer, request_id, now)
+      when not is_nil(request_id) do
+    {:ok,
+     %{
+       producer
+       | recovery: %{recovery | job: nil},
+         status: :up,
+         last_alive_at: now,
+         processing_queue_delay: nil
+     }}
   end
 
   def complete_recovery(%__MODULE__{}, _request_id, _now), do: :stale
@@ -233,74 +223,54 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def recovery_pending?(%__MODULE__{recovery: %{job: %{request_id: nil}}}), do: true
   def recovery_pending?(%__MODULE__{}), do: false
 
-  @spec recovery_generation_matches?(t(), reference()) :: boolean()
-  defp recovery_generation_matches?(
-         %__MODULE__{recovery: %{job: %{request_id: nil, generation: generation}}},
-         generation
-       ), do: true
-
-  defp recovery_generation_matches?(%__MODULE__{}, _generation), do: false
-
-  @spec recovery_request_matches?(t(), integer()) :: boolean()
-  defp recovery_request_matches?(%__MODULE__{recovery: %{job: job}}, request_id), do: request_matches?(job, request_id)
-
-  defp recovery_request_matches?(%__MODULE__{}, _request_id), do: false
-
-  @spec recovery_generation(t()) :: reference()
-  defp recovery_generation(%__MODULE__{recovery: %{job: %{generation: generation}}}), do: generation
-
-  @spec recovery_after(t()) :: integer() | nil
-  defp recovery_after(%__MODULE__{recovery: %{job: %{after_ts: after_ts}}}), do: after_ts
-
-  @spec recovery_cooldown(t(), integer(), non_neg_integer()) :: non_neg_integer()
-  defp recovery_cooldown(%__MODULE__{recovery: %{last_issued_at: nil}}, _monotonic_now, _min_interval_ms), do: 0
-
-  defp recovery_cooldown(%__MODULE__{recovery: %{last_issued_at: last}}, monotonic_now, min_interval_ms) do
-    max(min_interval_ms - (monotonic_now - last), 0)
-  end
-
   @doc false
   @spec initiate_recovery(t()) :: t()
   def initiate_recovery(%__MODULE__{recovery: recovery} = producer) do
-    case recovery_cooldown(producer, recovery.monotonic_fun.(), recovery.min_interval_ms) do
+    remaining =
+      case recovery.last_issued_at do
+        nil -> 0
+        last -> max(recovery.min_interval_ms - (recovery.monotonic_fun.() - last), 0)
+      end
+
+    case remaining do
       0 -> issue_recovery(producer)
-      remaining -> defer_recovery(producer, remaining)
+      milliseconds -> defer_recovery(producer, milliseconds)
     end
   end
 
   @doc false
   @spec handle_retry(t(), reference()) :: t()
-  def handle_retry(%__MODULE__{} = producer, generation) do
-    if recovery_generation_matches?(producer, generation) do
-      issue_recovery(producer)
-    else
-      producer
-    end
-  end
+  def handle_retry(%__MODULE__{recovery: %{job: %{request_id: nil, generation: generation}}} = producer, generation),
+    do: issue_recovery(producer)
+
+  def handle_retry(%__MODULE__{} = producer, _generation), do: producer
 
   @doc false
   @spec handle_stall(t(), integer()) :: t()
-  def handle_stall(%__MODULE__{} = producer, request_id) do
-    if recovery_request_matches?(producer, request_id) do
-      Logger.warning("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} stalled; reissuing")
-
-      producer |> retry_recovery() |> issue_recovery()
-    else
-      producer
-    end
+  def handle_stall(%__MODULE__{recovery: %{job: %{request_id: request_id}}} = producer, request_id)
+      when not is_nil(request_id) do
+    Logger.warning("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} stalled; reissuing")
+    producer |> retry_recovery() |> issue_recovery()
   end
+
+  def handle_stall(%__MODULE__{} = producer, _request_id), do: producer
 
   defp defer_recovery(producer, remaining) do
     Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery deferred for #{remaining}ms")
-    schedule({:retry, producer.id, recovery_generation(producer)}, remaining)
+    schedule({:retry, producer.id, producer.recovery.job.generation}, remaining)
     producer
   end
 
-  defp issue_recovery(%__MODULE__{recovery: recovery} = producer) do
-    after_ts = recovery_after(producer)
+  defp issue_recovery(%__MODULE__{recovery: %{job: job} = recovery} = producer) do
+    after_ts = job.after_ts
     request_id = recovery.gen_request_id.()
     opts = build_opts(after_ts, request_id, recovery.node_id)
-    producer = mark_recovery_issued(producer, request_id, recovery.monotonic_fun.())
+    job = %{job | request_id: request_id}
+
+    producer = %{
+      producer
+      | recovery: %{recovery | job: job, last_issued_at: recovery.monotonic_fun.()}
+    }
 
     case safe_recover(recovery.request, producer.product, opts) do
       :ok ->
@@ -315,7 +285,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
         )
 
         producer = retry_recovery(producer)
-        schedule({:retry, producer.id, recovery_generation(producer)}, recovery.min_interval_ms)
+        schedule({:retry, producer.id, producer.recovery.job.generation}, recovery.min_interval_ms)
         producer
     end
   end
@@ -375,22 +345,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   # messages return to that GenServer without introducing a process per
   # producer.
   defp schedule(message, timeout), do: Process.send_after(self(), message, timeout)
-
-  defp new_job(after_ts), do: %{after_ts: after_ts, request_id: nil, generation: make_ref()}
-
-  defp pending_job(job), do: %{job | request_id: nil, generation: make_ref()}
-  defp pending_job(job, after_ts), do: %{job | after_ts: after_ts, request_id: nil, generation: make_ref()}
-
-  defp put_job(%__MODULE__{recovery: recovery} = producer, job) do
-    %{producer | recovery: %{recovery | job: job}}
-  end
-
-  defp update_job(%__MODULE__{recovery: %{job: job}} = producer, update) when not is_nil(job) do
-    put_job(producer, update.(job))
-  end
-
-  defp request_matches?(%{request_id: request_id}, request_id) when not is_nil(request_id), do: true
-  defp request_matches?(_job, _request_id), do: false
 
   defp mark_delayed(%__MODULE__{} = producer, delay) do
     %{producer | status: :delayed, processing_queue_delay: delay}

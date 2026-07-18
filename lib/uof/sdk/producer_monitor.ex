@@ -94,7 +94,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   alias UOF.SDK.ProducerMonitor.Connections
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.ProducerMonitor.Snapshot
+  alias UOF.SDK.ProducerMonitor.Store.Snapshot
 
   require Logger
 

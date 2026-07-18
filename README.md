@@ -421,15 +421,15 @@ freshness markers for quiet producers.
 
 `UOF.SDK.ProducerMonitor` defines and owns its runtime state struct. It contains
 the producer aggregates, connection-session state, ownership, durable
-`UOF.SDK.ProducerMonitor.Snapshot`, and runtime dependencies. The focused modules
-own their respective transitions:
+`UOF.SDK.ProducerMonitor.Store.Snapshot`, and runtime dependencies. The focused
+modules own their respective transitions:
 
 - `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
   health observations, lifecycle transitions, and the complete recovery state:
   static request configuration, cooldown history, the optional pending/in-flight
   job, HTTP attempts, and timers.
 - `UOF.SDK.ProducerMonitor.Connections` detects consume-session changes.
-- `UOF.SDK.ProducerMonitor.Snapshot` owns durable-state mutations.
+- `UOF.SDK.ProducerMonitor.Store.Snapshot` owns durable-state mutations.
 - `UOF.SDK.ProducerMonitor.Store` atomically loads and saves snapshots.
 
 The `ProducerMonitor` GenServer is the public coordination boundary: it routes

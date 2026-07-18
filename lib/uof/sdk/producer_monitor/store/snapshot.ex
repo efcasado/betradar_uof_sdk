@@ -1,6 +1,6 @@
-defmodule UOF.SDK.ProducerMonitor.Snapshot do
+defmodule UOF.SDK.ProducerMonitor.Store.Snapshot do
   @moduledoc """
-  Atomic durable state owned by `UOF.SDK.ProducerMonitor`.
+  Atomic durable value persisted by `UOF.SDK.ProducerMonitor.Store`.
 
   `checkpoints` are incremental-recovery anchors, `resumable_producers` are the
   producer IDs allowed to drain retained backlog without immediate recovery,

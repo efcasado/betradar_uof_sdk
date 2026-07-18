@@ -1,8 +1,8 @@
 defmodule UOF.SDK.ProducerMonitor.Store.ETSTest do
   use ExUnit.Case, async: false
 
-  alias UOF.SDK.ProducerMonitor.Snapshot
   alias UOF.SDK.ProducerMonitor.Store.ETS
+  alias UOF.SDK.ProducerMonitor.Store.Snapshot
 
   setup do
     start_supervised!(ETS)

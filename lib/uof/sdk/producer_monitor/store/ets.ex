@@ -10,8 +10,8 @@ defmodule UOF.SDK.ProducerMonitor.Store.ETS do
 
   use GenServer
 
-  alias UOF.SDK.ProducerMonitor.Snapshot
   alias UOF.SDK.ProducerMonitor.Store
+  alias UOF.SDK.ProducerMonitor.Store.Snapshot
 
   @table __MODULE__
   @snapshot_key :snapshot

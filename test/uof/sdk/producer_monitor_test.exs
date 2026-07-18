@@ -3,8 +3,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.ProducerMonitor.Snapshot
   alias UOF.SDK.ProducerMonitor.Store
+  alias UOF.SDK.ProducerMonitor.Store.Snapshot
 
   @inactivity 10_000
   @now 1_000_000_000_000

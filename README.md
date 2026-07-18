@@ -419,7 +419,7 @@ checkpoint advancement.
 lag detection. It also consumes session-scoped `alive` messages only as lag
 freshness markers for quiet producers.
 
-`UOF.SDK.ProducerMonitor.State` is the monitor's runtime aggregate. It contains
+`UOF.SDK.ProducerMonitor` defines and owns its runtime state struct. It contains
 the producer map, recovery jobs, connection-session state, ownership, durable
 `UOF.SDK.ProducerMonitor.Snapshot`, and runtime dependencies. The focused
 modules own their respective transitions:

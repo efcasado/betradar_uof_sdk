@@ -18,8 +18,8 @@ defmodule UOF.SDK do
 
   It supervises (in order, with `:rest_for_one`) an optional snapshot store,
   producer monitor, a system-message pipeline, and a content-message pipeline.
-  Runtime state is held in `UOF.SDK.ProducerMonitor.State` within the monitor's
-  GenServer — no separate registry process is needed.
+  Runtime state is held directly by the `UOF.SDK.ProducerMonitor` GenServer —
+  no separate registry process is needed.
   """
 
   use Supervisor
@@ -28,7 +28,6 @@ defmodule UOF.SDK do
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.Producers
   alias UOF.SDK.SystemPipeline
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -66,7 +65,6 @@ defmodule UOF.SDK do
       monitor_store_child_specs(config.monitor_store) ++
         [
           {ProducerMonitor,
-           producers: Producers.fetch(),
            handler: config.handler,
            inactivity_ms: config.inactivity_seconds * 1_000,
            max_processing_delay_ms: config.max_processing_delay_seconds * 1_000,

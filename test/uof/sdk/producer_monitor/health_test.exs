@@ -30,7 +30,7 @@ defmodule UOF.SDK.ProducerMonitor.HealthTest do
   end
 
   test "an existing recovery suppresses new alive decisions" do
-    producer = %Producer{id: 1, status: :recovering}
+    producer = %Producer{id: 1, status: :up}
 
     assert {:ok, observed} = Health.observe_alive(producer, 900, false, 1_000, true)
     assert observed.last_alive_at == 1_000

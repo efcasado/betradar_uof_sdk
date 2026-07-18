@@ -2,7 +2,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @moduledoc """
   Runtime state reported for one Betradar producer.
 
-  `status` is the complete lifecycle state:
+  `status` is the public lifecycle state. `:recovering` is projected by
+  `UOF.SDK.ProducerMonitor` from its canonical recovery job; it is not stored
+  as the producer's underlying health state.
 
     * `:down` — not synchronized and no recovery is in flight
     * `:recovering` — waiting to request, requesting, or awaiting recovery
@@ -47,12 +49,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @spec observe_message(t(), integer() | nil) :: t()
   def observe_message(%__MODULE__{} = producer, timestamp) do
     %{producer | last_message_timestamp: max_timestamp(producer.last_message_timestamp, timestamp)}
-  end
-
-  @doc false
-  @spec start_recovery(t()) :: t()
-  def start_recovery(%__MODULE__{} = producer) do
-    %{producer | status: :recovering, processing_queue_delay: nil}
   end
 
   @doc false

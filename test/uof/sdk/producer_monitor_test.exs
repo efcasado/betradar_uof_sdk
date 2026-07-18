@@ -3,8 +3,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerMonitor.Producer
+  alias UOF.SDK.ProducerMonitor.Recovery
   alias UOF.SDK.ProducerMonitor.Snapshot
-  alias UOF.SDK.ProducerMonitor.State
   alias UOF.SDK.ProducerMonitor.Store
 
   @inactivity 10_000
@@ -91,10 +91,52 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   ## Health monitoring ---------------------------------------------------------
 
+  test "loads active producer descriptions when no producer list is injected" do
+    descriptions = [
+      %{
+        id: 1,
+        name: "Live Odds",
+        active: true,
+        api_url: "https://api.example.com/v1/liveodds/",
+        stateful_recovery_window_in_minutes: 4320
+      },
+      %{
+        id: 3,
+        name: "Premium Cricket",
+        active: false,
+        api_url: "https://api.example.com/v1/premium_cricket",
+        stateful_recovery_window_in_minutes: 4320
+      }
+    ]
+
+    assert {:ok, %ProducerMonitor{producers: producers}} =
+             ProducerMonitor.init(
+               producer_fetcher: fn -> {:ok, %{producer: descriptions}} end,
+               tick_ms: 60_000
+             )
+
+    assert %{
+             1 => %Producer{
+               name: "Live Odds",
+               product: "liveodds",
+               recovery_window_minutes: 4320
+             }
+           } = producers
+  end
+
+  test "fails startup when producer descriptions cannot be loaded" do
+    assert_raise RuntimeError, "could not load UOF producers: {:error, :timeout}", fn ->
+      ProducerMonitor.init(
+        producer_fetcher: fn -> {:error, :timeout} end,
+        tick_ms: 60_000
+      )
+    end
+  end
+
   test "uses an explicit runtime state struct", %{clock: clock} do
     monitor = start_monitor(clock)
 
-    assert %State{
+    assert %ProducerMonitor{
              ownership: {:failover, :active},
              producers: %{1 => %Producer{}},
              recoveries: %{},
@@ -109,6 +151,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
     rid = assert_recovery_triggered()
     sync(m)
     assert {:ok, %Producer{status: :recovering}} = ProducerMonitor.producer(m, 1)
+
+    # :recovering is projected from the canonical job, not duplicated in the
+    # stored producer lifecycle.
+    assert %ProducerMonitor{producers: %{1 => %Producer{status: :down}}, recoveries: %{1 => %Recovery{}}} =
+             :sys.get_state(m)
 
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %Producer{id: 1, status: :up}}

@@ -425,10 +425,9 @@ the producer aggregates, connection-session state, ownership, durable
 own their respective transitions:
 
 - `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
-  health observations, lifecycle transitions, its canonical recovery job, and
-  recovery HTTP attempts and timers.
-- `UOF.SDK.ProducerMonitor.Recovery` is the producer's small pending/in-flight
-  recovery value.
+  health observations, lifecycle transitions, and the complete recovery state:
+  static request configuration, cooldown history, the optional pending/in-flight
+  job, HTTP attempts, and timers.
 - `UOF.SDK.ProducerMonitor.Connections` detects consume-session changes.
 - `UOF.SDK.ProducerMonitor.Snapshot` owns durable-state mutations.
 - `UOF.SDK.ProducerMonitor.Store` atomically loads and saves snapshots.

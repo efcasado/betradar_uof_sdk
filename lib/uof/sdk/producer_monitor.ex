@@ -374,9 +374,13 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def handle_info({:stall, id, request_id}, state) do
     state =
-      with_producer(state, id, fn producer ->
-        put_producer(state, Producer.handle_stall(producer, request_id, owns_control?(state)))
-      end)
+      if owns_control?(state) do
+        with_producer(state, id, fn producer ->
+          put_producer(state, Producer.handle_stall(producer, request_id))
+        end)
+      else
+        state
+      end
 
     {:noreply, state}
   end
@@ -385,9 +389,13 @@ defmodule UOF.SDK.ProducerMonitor do
   # the canonical job generation and must not issue.
   def handle_info({:retry, id, generation}, state) do
     state =
-      with_producer(state, id, fn producer ->
-        put_producer(state, Producer.handle_retry(producer, generation, owns_control?(state)))
-      end)
+      if owns_control?(state) do
+        with_producer(state, id, fn producer ->
+          put_producer(state, Producer.handle_retry(producer, generation))
+        end)
+      else
+        state
+      end
 
     {:noreply, state}
   end
@@ -629,7 +637,7 @@ defmodule UOF.SDK.ProducerMonitor do
   ## Recovery -----------------------------------------------------------------
 
   defp initiate(state, producer) do
-    put_producer(state, Producer.initiate_recovery(producer, owns_control?(state)))
+    put_producer(state, Producer.initiate_recovery(producer))
   end
 
   defp after_from_checkpoint(state, producer) do

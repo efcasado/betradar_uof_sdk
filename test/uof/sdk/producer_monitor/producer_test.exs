@@ -2,7 +2,6 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   use ExUnit.Case, async: true
 
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.ProducerMonitor.Recovery
 
   test "a first subscribed alive requests initial synchronization" do
     producer = %Producer{id: 1, status: :down}
@@ -73,16 +72,16 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
       |> Producer.configure_recovery(recovery_opts)
       |> Producer.require_recovery(500)
 
-    assert %Producer{recovery: %Recovery{after_ts: 500}} = producer
+    assert %Producer{recovery: %{job: %{after_ts: 500}}} = producer
     assert Producer.recovering?(producer)
     assert Producer.recovery_pending?(producer)
     assert %Producer{status: :recovering, recovery: nil} = Producer.public(producer)
 
-    producer = Producer.initiate_recovery(producer, true)
+    producer = Producer.initiate_recovery(producer)
     assert_receive {:recover_called, nil, request}
     assert request == [after: 500, node_id: 7, request_id: 42]
     refute Producer.recovery_pending?(producer)
-    assert %Producer{recovery: %Recovery{request_id: 42}, last_recovery_at: 1_000} = producer
+    assert %Producer{recovery: %{job: %{request_id: 42}, last_issued_at: 1_000}} = producer
 
     assert {:ok, producer} = Producer.complete_recovery(producer, 42, 2_000)
     refute Producer.recovering?(producer)

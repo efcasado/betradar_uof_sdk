@@ -3,7 +3,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.ProducerMonitor.Recovery
   alias UOF.SDK.ProducerMonitor.Snapshot
   alias UOF.SDK.ProducerMonitor.Store
 
@@ -153,7 +152,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     # :recovering is projected from the producer's canonical job, not
     # duplicated in its stored health lifecycle.
-    assert %ProducerMonitor{producers: %{1 => %Producer{status: :down, recovery: %Recovery{}}}} =
+    assert %ProducerMonitor{producers: %{1 => %Producer{status: :down, recovery: %{job: %{}}}}} =
              :sys.get_state(m)
 
     ProducerMonitor.snapshot_complete(m, 1, rid)
@@ -1003,6 +1002,30 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.snapshot_complete(m, 1, rid2)
     assert_receive {:status, %Producer{status: :up}}
+  end
+
+  test "a retry timer firing while passive waits for promotion", %{clock: clock} do
+    test_pid = self()
+    attempts = start_supervised!(%{id: :ownership_retry_attempts, start: {Agent, :start_link, [fn -> 0 end]}})
+
+    recover_fun = fn product, opts ->
+      attempt = Agent.get_and_update(attempts, fn attempt -> {attempt, attempt + 1} end)
+      send(test_pid, {:recover_called, product, opts})
+      if attempt == 0, do: {:error, :boom}, else: {:ok, :accepted}
+    end
+
+    m = start_monitor([recover_fun: recover_fun, min_interval_ms: 50], clock)
+
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    assert_receive {:recover_called, "pre", _opts}
+    report_active_state(m, :passive)
+
+    # The API retry becomes due while passive, but only the active owner may
+    # issue it.
+    refute_receive {:recover_called, "pre", _opts}, 100
+
+    report_active_state(m, :active)
+    assert_receive {:recover_called, "pre", _opts}, 500
   end
 
   test "manual recovery is refused while passive", %{clock: clock} do

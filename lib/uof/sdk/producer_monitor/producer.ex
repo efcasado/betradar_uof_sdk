@@ -11,8 +11,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   persistence, and callbacks.
 
   `status` is the public lifecycle state. `:recovering` is projected from the
-  canonical recovery job by `public/1`; it is not duplicated in the underlying
-  health state.
+  canonical recovery job by `UOF.SDK.ProducerMonitor` when reporting the
+  producer; it is not duplicated in the underlying health state.
 
   ## Recovery sequencing
 
@@ -115,19 +115,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     }
 
     %{producer | recovery: recovery}
-  end
-
-  @doc false
-  @spec public(t()) :: t()
-  def public(%__MODULE__{} = producer) do
-    producer =
-      if recovering?(producer) do
-        %{producer | status: :recovering, processing_queue_delay: nil}
-      else
-        producer
-      end
-
-    %{producer | recovery: nil}
   end
 
   @doc false

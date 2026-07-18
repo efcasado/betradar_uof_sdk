@@ -250,7 +250,7 @@ defmodule UOF.SDK.ProducerMonitor do
     result =
       state.producers
       |> Map.values()
-      |> Enum.map(&Producer.public/1)
+      |> Enum.map(&reported_producer/1)
       |> Enum.sort_by(& &1.id)
 
     {:reply, result, state}
@@ -259,7 +259,7 @@ defmodule UOF.SDK.ProducerMonitor do
   def handle_call({:get_producer, id}, _from, state) do
     result =
       case Map.fetch(state.producers, id) do
-        {:ok, producer} -> {:ok, Producer.public(producer)}
+        {:ok, producer} -> {:ok, reported_producer(producer)}
         :error -> :error
       end
 
@@ -468,7 +468,7 @@ defmodule UOF.SDK.ProducerMonitor do
   defp commit_producer_transition(state, after_) do
     state = put_producer(state, after_)
     state = persist_producer_state(state, after_)
-    notify(state, Producer.public(after_))
+    notify(state, reported_producer(after_))
     state
   end
 
@@ -541,7 +541,7 @@ defmodule UOF.SDK.ProducerMonitor do
   defp notify(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
 
   defp notify_recovery(state, producer) do
-    notify(state, Producer.public(producer))
+    notify(state, reported_producer(producer))
     state
   end
 
@@ -676,6 +676,20 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   ## Helpers ------------------------------------------------------------------
+  # Producer recovery state contains internal functions, cooldown history, and
+  # request correlation. Only the derived lifecycle status crosses the public
+  # API and callback boundary.
+  defp reported_producer(producer) do
+    producer =
+      if Producer.recovering?(producer) do
+        %{producer | status: :recovering, processing_queue_delay: nil}
+      else
+        producer
+      end
+
+    %{producer | recovery: nil}
+  end
+
   defp producer_recovering?(state, id) do
     case Map.fetch(state.producers, id) do
       {:ok, producer} -> Producer.recovering?(producer)

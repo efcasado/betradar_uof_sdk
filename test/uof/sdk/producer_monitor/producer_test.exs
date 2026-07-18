@@ -78,7 +78,6 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert %Producer{recovery: %{job: %{after_ts: 500}}} = producer
     assert Producer.recovering?(producer)
     assert Producer.recovery_pending?(producer)
-    assert %Producer{status: :recovering, recovery: nil} = Producer.public(producer)
 
     producer = Producer.initiate_recovery(producer)
     assert_receive {:recover_called, nil, request}

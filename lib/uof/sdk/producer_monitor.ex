@@ -50,26 +50,26 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Restart resume
 
-  The state store holds a connection generation with committed tokens and one
-  durable record per producer. A producer may resume only when its synchronized
-  generation matches the current connection generation and it has a checkpoint.
-  At startup that state is restored:
+  The state store holds a session generation with committed tokens and one
+  durable progress record per producer. A producer may resume only when its
+  synchronized generation matches the current session generation and it has a
+  checkpoint. At startup that state is restored:
 
     * A resumable producer with a checkpoint starts as `:resuming`. It becomes
       `:up` after processing catches up, an `alive` is heard, and both pipeline
       connections are observed in the current process.
-    * Persisted connection tokens are comparison baselines, not evidence that
+    * Persisted session tokens are comparison baselines, not evidence that
       the current pipelines are ready. Recovery HTTP waits until both pipelines
       are observed. If that does not happen within one alive-inactivity
       interval, the monitor crashes so supervision restarts both pipelines.
-      Once ready, a changed token advances the connection generation, which
+      Once ready, a changed token advances the session generation, which
       invalidates every previously synchronized producer, and starts recovery.
     * A resumable producer gets one alive-inactivity interval to provide a
       current heartbeat; silence then follows the normal recovery path instead
       of leaving it in `:resuming` forever.
     * `subscribed=0` records recovery immediately, even if it races demotion or
       connection startup; only the HTTP request waits. Producers not
-      synchronized in the current connection generation start `:down` and
+      synchronized in the current session generation start `:down` and
       recover on their first subscribed `alive`.
 
   ## Control-plane ownership (multi-instance Pulsar)
@@ -106,8 +106,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   alias UOF.SDK.ProducerMonitor.Connections
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.ProducerMonitor.Store.ConnectionState
-  alias UOF.SDK.ProducerMonitor.Store.ProducerState
+  alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
+  alias UOF.SDK.ProducerMonitor.Store.Session
 
   require Logger
 
@@ -120,8 +120,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @type state :: %__MODULE__{
           producers: %{optional(integer()) => Producer.t()},
-          connection_state: ConnectionState.t(),
-          producer_states: %{optional(integer()) => ProducerState.t()},
+          session: Session.t(),
+          producer_progress: %{optional(integer()) => ProducerProgress.t()},
           connections: Connections.t(),
           ownership: ownership(),
           handler: module() | nil,
@@ -136,8 +136,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @enforce_keys [
     :producers,
-    :connection_state,
-    :producer_states,
+    :session,
+    :producer_progress,
     :connections,
     :ownership,
     :handler,
@@ -235,16 +235,16 @@ defmodule UOF.SDK.ProducerMonitor do
   @impl true
   def init(opts) do
     monitor_store = Keyword.get(opts, :monitor_store, UOF.SDK.ProducerMonitor.Store.ETS)
-    connection_state = monitor_store.load_connection_state()
-    producer_states = monitor_store.load_producer_states()
+    session = monitor_store.load_session()
+    producer_progress = monitor_store.load_producer_progress()
 
     producers =
       Map.new(load_producers(opts), fn producer ->
-        producer_state = Map.get(producer_states, producer.id, %ProducerState{})
+        progress = Map.get(producer_progress, producer.id, %ProducerProgress{})
 
         producer =
           producer
-          |> restore_producer(producer_state, connection_state.generation)
+          |> restore_producer(progress, session.generation)
           |> Producer.configure_recovery(opts)
 
         {producer.id, producer}
@@ -252,9 +252,9 @@ defmodule UOF.SDK.ProducerMonitor do
 
     state = %__MODULE__{
       producers: producers,
-      connection_state: connection_state,
-      producer_states: producer_states,
-      connections: Connections.new(connection_state.tokens),
+      session: session,
+      producer_progress: producer_progress,
+      connections: Connections.new(session.tokens),
       ownership: Keyword.get(opts, :ownership, {:failover, :passive}),
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
@@ -501,16 +501,16 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp commit_producer_transition(state, after_) do
     state = put_producer(state, after_)
-    state = persist_producer_state(state, after_)
+    state = persist_producer_progress(state, after_)
     notify(state, reported_producer(after_))
     state
   end
 
   # Resuming safely requires both durable eligibility and a checkpoint. The
   # current-session heartbeat, connection, and catch-up gates live in check/3.
-  defp restore_producer(producer, producer_state, connection_generation) do
-    if ProducerState.resumable?(producer_state, connection_generation) do
-      %{producer | status: :resuming, last_message_timestamp: producer_state.checkpoint}
+  defp restore_producer(producer, progress, session_generation) do
+    if ProducerProgress.resumable?(progress, session_generation) do
+      %{producer | status: :resuming, last_message_timestamp: progress.checkpoint}
     else
       producer
     end
@@ -652,7 +652,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state =
       case Connections.observe(state.connections, namespace, token) do
         {:recovery_needed, connections} ->
-          commit_connection_change(state, Connections.commit(connections))
+          commit_session_change(state, Connections.commit(connections))
 
         {:not_ready, connections} ->
           %{state | connections: connections}
@@ -673,12 +673,12 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  defp commit_connection_change(state, connections) do
-    connection_state = state.monitor_store.commit_connection_change(connections.persisted)
+  defp commit_session_change(state, connections) do
+    session = state.monitor_store.commit_session_change(connections.persisted)
 
     state
     |> Map.put(:connections, connections)
-    |> Map.put(:connection_state, connection_state)
+    |> Map.put(:session, session)
     |> recover_after_connection_change()
   end
 
@@ -705,8 +705,8 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   # Runtime status is not stored. `:resuming` is reconstructed at startup from
-  # the producer checkpoint and its synchronized connection generation.
-  defp persist_producer_state(state, after_) do
+  # the producer checkpoint and its synchronized session generation.
+  defp persist_producer_progress(state, after_) do
     resumable? = after_.status in [:up, :delayed]
 
     if resumable? do
@@ -717,25 +717,25 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp require_recovery(state, id) do
-    producer_state = Map.get(state.producer_states, id, %ProducerState{})
+    progress = Map.get(state.producer_progress, id, %ProducerProgress{})
 
-    if is_nil(producer_state.synchronized_generation) do
+    if is_nil(progress.synchronized_generation) do
       state
     else
-      producer_state = state.monitor_store.require_recovery(id)
-      put_producer_state(state, id, producer_state)
+      progress = state.monitor_store.require_recovery(id)
+      put_producer_progress(state, id, progress)
     end
   end
 
   defp mark_synchronized(state, id) do
-    generation = state.connection_state.generation
-    producer_state = Map.get(state.producer_states, id, %ProducerState{})
+    generation = state.session.generation
+    progress = Map.get(state.producer_progress, id, %ProducerProgress{})
 
-    if producer_state.synchronized_generation == generation do
+    if progress.synchronized_generation == generation do
       state
     else
-      producer_state = state.monitor_store.mark_synchronized(id, generation)
-      put_producer_state(state, id, producer_state)
+      progress = state.monitor_store.mark_synchronized(id, generation)
+      put_producer_progress(state, id, progress)
     end
   end
 
@@ -754,7 +754,7 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp after_from_checkpoint(state, producer) do
-    case Map.get(state.producer_states, producer.id, %ProducerState{}).checkpoint do
+    case Map.get(state.producer_progress, producer.id, %ProducerProgress{}).checkpoint do
       timestamp when is_integer(timestamp) ->
         timestamp
         |> checkpoint_after_overlap(state.recovery_overlap_ms)
@@ -772,18 +772,18 @@ defmodule UOF.SDK.ProducerMonitor do
   defp checkpoint_after_overlap(timestamp, overlap_ms), do: max(timestamp - overlap_ms, 0)
 
   defp put_checkpoint(state, id, timestamp) do
-    producer_state = Map.get(state.producer_states, id, %ProducerState{})
+    progress = Map.get(state.producer_progress, id, %ProducerProgress{})
 
-    if is_integer(producer_state.checkpoint) and producer_state.checkpoint >= timestamp do
+    if is_integer(progress.checkpoint) and progress.checkpoint >= timestamp do
       state
     else
-      producer_state = state.monitor_store.advance_checkpoint(id, timestamp)
-      put_producer_state(state, id, producer_state)
+      progress = state.monitor_store.advance_checkpoint(id, timestamp)
+      put_producer_progress(state, id, progress)
     end
   end
 
-  defp put_producer_state(state, id, producer_state) do
-    %{state | producer_states: Map.put(state.producer_states, id, producer_state)}
+  defp put_producer_progress(state, id, progress) do
+    %{state | producer_progress: Map.put(state.producer_progress, id, progress)}
   end
 
   defp clamp_to_window(timestamp, %Producer{recovery_window_minutes: nil}, _now), do: timestamp

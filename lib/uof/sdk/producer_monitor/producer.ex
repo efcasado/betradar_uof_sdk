@@ -22,7 +22,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   Only then does it call `initiate_recovery/1`. This ordering guarantees that a
   crash after issuing the request cannot restart from stale synchronized state.
 
-  A reconnect is different: the new connection generation is persisted before
+  A reconnect is different: the new session generation is persisted before
   the producers are visited, so `restart_recovery/2` can replace an in-flight
   job and initiate it immediately. Failed requests, stalls, and ownership
   demotion all return a job to pending state, but their callers intentionally

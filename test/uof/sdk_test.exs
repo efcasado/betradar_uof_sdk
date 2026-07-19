@@ -4,8 +4,8 @@ defmodule UOF.SDKTest do
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.ProducerMonitor.Store
-  alias UOF.SDK.ProducerMonitor.Store.ConnectionState
-  alias UOF.SDK.ProducerMonitor.Store.ProducerState
+  alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
+  alias UOF.SDK.ProducerMonitor.Store.Session
   alias UOF.SDK.SystemPipeline
 
   defmodule CallbackOnlyMonitorStore do
@@ -13,22 +13,22 @@ defmodule UOF.SDKTest do
     @behaviour Store
 
     @impl true
-    def load_connection_state, do: %ConnectionState{}
+    def load_session, do: %Session{}
 
     @impl true
-    def load_producer_states, do: %{}
+    def load_producer_progress, do: %{}
 
     @impl true
-    def commit_connection_change(tokens), do: %ConnectionState{tokens: tokens, generation: 1}
+    def commit_session_change(tokens), do: %Session{tokens: tokens, generation: 1}
 
     @impl true
-    def advance_checkpoint(_id, timestamp), do: %ProducerState{checkpoint: timestamp}
+    def advance_checkpoint(_id, timestamp), do: %ProducerProgress{checkpoint: timestamp}
 
     @impl true
-    def require_recovery(_id), do: %ProducerState{}
+    def require_recovery(_id), do: %ProducerProgress{}
 
     @impl true
-    def mark_synchronized(_id, generation), do: %ProducerState{synchronized_generation: generation}
+    def mark_synchronized(_id, generation), do: %ProducerProgress{synchronized_generation: generation}
   end
 
   defmodule StartableMonitorStore do
@@ -43,22 +43,22 @@ defmodule UOF.SDKTest do
     def init(opts), do: {:ok, opts}
 
     @impl true
-    def load_connection_state, do: %ConnectionState{}
+    def load_session, do: %Session{}
 
     @impl true
-    def load_producer_states, do: %{}
+    def load_producer_progress, do: %{}
 
     @impl true
-    def commit_connection_change(tokens), do: %ConnectionState{tokens: tokens, generation: 1}
+    def commit_session_change(tokens), do: %Session{tokens: tokens, generation: 1}
 
     @impl true
-    def advance_checkpoint(_id, timestamp), do: %ProducerState{checkpoint: timestamp}
+    def advance_checkpoint(_id, timestamp), do: %ProducerProgress{checkpoint: timestamp}
 
     @impl true
-    def require_recovery(_id), do: %ProducerState{}
+    def require_recovery(_id), do: %ProducerProgress{}
 
     @impl true
-    def mark_synchronized(_id, generation), do: %ProducerState{synchronized_generation: generation}
+    def mark_synchronized(_id, generation), do: %ProducerProgress{synchronized_generation: generation}
   end
 
   test "monitor_store_child_specs omits callback-only stores" do

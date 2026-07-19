@@ -11,11 +11,11 @@ defmodule UOF.SDK.ProducerMonitor.Store.ETS do
   use GenServer
 
   alias UOF.SDK.ProducerMonitor.Store
-  alias UOF.SDK.ProducerMonitor.Store.ConnectionState
-  alias UOF.SDK.ProducerMonitor.Store.ProducerState
+  alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
+  alias UOF.SDK.ProducerMonitor.Store.Session
 
   @table __MODULE__
-  @connection_key :connection
+  @session_key :session
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -28,36 +28,37 @@ defmodule UOF.SDK.ProducerMonitor.Store.ETS do
   end
 
   @impl Store
-  def load_connection_state do
-    case :ets.lookup(@table, @connection_key) do
-      [{@connection_key, connection}] -> connection
-      [] -> %ConnectionState{}
+  def load_session do
+    case :ets.lookup(@table, @session_key) do
+      [{@session_key, session}] -> session
+      [] -> %Session{}
     end
   end
 
   @impl Store
-  def load_producer_states do
+  def load_producer_progress do
     @table
     |> :ets.match_object({{:producer, :_}, :_})
-    |> Map.new(fn {{:producer, id}, producer_state} -> {id, producer_state} end)
+    |> Map.new(fn {{:producer, id}, progress} -> {id, progress} end)
   end
 
   @impl Store
-  def commit_connection_change(tokens) when is_map(tokens) do
-    connection = load_connection_state()
-    changed = %ConnectionState{tokens: tokens, generation: connection.generation + 1}
-    true = :ets.insert(@table, {@connection_key, changed})
+  def commit_session_change(tokens) when is_map(tokens) do
+    session = load_session()
+    changed = %Session{tokens: tokens, generation: session.generation + 1}
+    true = :ets.insert(@table, {@session_key, changed})
     changed
   end
 
   @impl Store
   def advance_checkpoint(id, timestamp) when is_integer(timestamp) do
     update_producer(id, fn
-      %ProducerState{checkpoint: checkpoint} = state when is_integer(checkpoint) and checkpoint >= timestamp ->
-        state
+      %ProducerProgress{checkpoint: checkpoint} = progress
+      when is_integer(checkpoint) and checkpoint >= timestamp ->
+        progress
 
-      state ->
-        %{state | checkpoint: timestamp}
+      progress ->
+        %{progress | checkpoint: timestamp}
     end)
   end
 
@@ -72,15 +73,15 @@ defmodule UOF.SDK.ProducerMonitor.Store.ETS do
   end
 
   defp update_producer(id, update) do
-    state =
+    progress =
       case :ets.lookup(@table, {:producer, id}) do
-        [{{:producer, ^id}, state}] -> state
-        [] -> %ProducerState{}
+        [{{:producer, ^id}, progress}] -> progress
+        [] -> %ProducerProgress{}
       end
 
-    updated = update.(state)
+    updated = update.(progress)
 
-    if updated != state do
+    if updated != progress do
       true = :ets.insert(@table, {{:producer, id}, updated})
     end
 

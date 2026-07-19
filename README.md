@@ -197,7 +197,7 @@ callbacks.
 | `:handler` | Required | Your `UOF.SDK.MessageHandler` module |
 | `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}` |
 | `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
-| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Connection and per-producer recovery persistence |
+| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Session and producer-progress persistence |
 | `:concurrency` | `10` | Broadway processor concurrency per feed session |
 | `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |
 | `:max_processing_delay_seconds` | `20` | Consumer-lag threshold before a producer becomes `:delayed` |
@@ -326,7 +326,7 @@ original timestamp so messages are not skipped on retry.
 
 > [!NOTE]
 > The default `UOF.SDK.ProducerMonitor.Store.ETS` is in-memory. Checkpoints,
-> producer synchronization generations, and connection state are lost on VM
+> producer synchronization generations, and session state are lost on VM
 > restart, so a full recovery is issued on the next start. This is fine for
 > development and low-volume producers, but production applications should use
 > a persistent store. The ETS store does survive monitor/pipeline crashes within
@@ -348,36 +348,36 @@ behaviour and configure it:
 config :uof_sdk, monitor_store: MyApp.ProducerMonitorStore
 ```
 
-The behaviour separates the committed connection state from each producer's
-durable recovery state. Connection state contains the system and content tokens
-plus a monotonically increasing generation. Producer state contains its
-checkpoint and the connection generation in which it was last synchronized.
+The behaviour separates the committed consume session from each producer's
+durable recovery progress. The session contains the system and content tokens
+plus a monotonically increasing generation. Producer progress contains its
+checkpoint and the session generation in which it was last synchronized.
 A producer may resume retained backlog only when it has a checkpoint and its
-synchronization generation matches the current connection generation.
+synchronization generation matches the current session generation.
 
 Implement these callbacks:
 
-- `load_connection_state/0` and `load_producer_states/0`
-- `commit_connection_change/1`, which must atomically store both tokens and
-  advance the connection generation
+- `load_session/0` and `load_producer_progress/0`
+- `commit_session_change/1`, which must atomically store both tokens and
+  advance the session generation
 - `advance_checkpoint/2`, which must advance one producer's checkpoint
   monotonically
 - `require_recovery/1`, which clears one producer's synchronized generation
-- `mark_synchronized/2`, which records the current connection generation for
+- `mark_synchronized/2`, which records the current session generation for
   one producer
 
-Advancing the connection generation invalidates every producer synchronized in
+Advancing the session generation invalidates every producer synchronized in
 an older generation without a multi-producer transaction. If the monitor
 crashes after committing the new tokens but before issuing recovery, the
 generation mismatch still prevents an unsafe resume. If it crashes before the
-connection commit, the old tokens cause the change to be detected again.
+session commit, the old tokens cause the change to be detected again.
 
 Recovery preparation is persisted before the HTTP request is issued. This
 ordering is deliberate: if the monitor crashes after requesting recovery, the
 next monitor must recover again rather than incorrectly resume from state that
 still claimed the producer was synchronized.
 
-Each mutation callback must atomically update the connection record or one
+Each mutation callback must atomically update the session record or one
 producer record as described above. A store must also have exactly one writer:
 its `ProducerMonitor`. Concurrent writes from another monitor, node, or
 administration tool are unsupported and may overwrite newer state.
@@ -459,17 +459,17 @@ freshness markers for quiet producers.
 
 `UOF.SDK.ProducerMonitor` defines and owns its runtime state struct. It contains
 the producer aggregates, connection-session state, ownership, loaded durable
-connection and producer records, and runtime dependencies. The focused modules
-own their respective transitions:
+session and producer-progress records, and runtime dependencies. The focused
+modules own their respective transitions:
 
 - `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
   health observations, lifecycle transitions, and the complete recovery state:
   static request configuration, cooldown history, the optional pending/in-flight
   job, HTTP attempts, and timers.
 - `UOF.SDK.ProducerMonitor.Connections` detects consume-session changes.
-- `UOF.SDK.ProducerMonitor.Store.ConnectionState` identifies the committed
-  consume sessions and their generation.
-- `UOF.SDK.ProducerMonitor.Store.ProducerState` records checkpoints and the
+- `UOF.SDK.ProducerMonitor.Store.Session` identifies the committed consume
+  sessions and their generation.
+- `UOF.SDK.ProducerMonitor.Store.ProducerProgress` records checkpoints and the
   generation in which each producer was synchronized.
 - `UOF.SDK.ProducerMonitor.Store` defines granular atomic persistence
   operations for those records.

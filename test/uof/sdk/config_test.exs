@@ -18,6 +18,7 @@ defmodule UOF.SDK.ConfigTest do
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil
     assert config.ownership == :always_active
+    assert config.transport_children == []
   end
 
   test "defaults to AMQP transport with empty connection and ETS monitor store" do
@@ -58,13 +59,19 @@ defmodule UOF.SDK.ConfigTest do
 
     assert {Producer, content_opts} = config.content_producer
     assert {Producer, system_opts} = config.system_producer
+    assert [{Pulsar.Client, client_opts}] = config.transport_children
 
-    assert content_opts[:host] == "pulsar://localhost:6650"
+    assert client_opts == [name: :uof_sdk_pulsar, host: "pulsar://localhost:6650"]
+
+    assert content_opts[:client] == :uof_sdk_pulsar
+    refute Keyword.has_key?(content_opts, :host)
     assert content_opts[:topic] == "uof-feed"
     assert content_opts[:subscription] == "uof-sdk-content"
     assert content_opts[:consumer_opts][:initial_position] == :earliest
     assert content_opts[:consumer_opts][:subscription_type] == :Key_Shared
 
+    assert system_opts[:client] == :uof_sdk_pulsar
+    refute Keyword.has_key?(system_opts, :host)
     assert system_opts[:topic] == "uof-feed"
     assert system_opts[:subscription] == "uof-sdk-system"
     assert system_opts[:consumer_opts][:initial_position] == :earliest
@@ -86,6 +93,15 @@ defmodule UOF.SDK.ConfigTest do
   test "requires a Pulsar subscription" do
     assert_raise KeyError, fn ->
       Config.load(handler: MyApp.Handler, transport: {:pulsar, topic: "uof-feed"})
+    end
+  end
+
+  test "requires a Pulsar host for its supervised client" do
+    assert_raise KeyError, fn ->
+      Config.load(
+        handler: MyApp.Handler,
+        transport: {:pulsar, topic: "uof-feed", subscription: "uof-sdk"}
+      )
     end
   end
 

@@ -142,6 +142,8 @@ Known Betradar AMQP hosts:
 
 For Pulsar, configure one topic and base subscription. The SDK derives the
 content subscription as Key-Shared and the system subscription as Failover.
+It starts one supervised Pulsar client named `:uof_sdk_pulsar`; both subscriptions
+share that client, and it is not started when using the AMQP transport.
 
 ```elixir
 config :uof_sdk,

@@ -2,8 +2,11 @@ defmodule UOF.SDK.Transport do
   @moduledoc false
 
   alias OffBroadway.Pulsar.Producer
+  alias Pulsar.Client
 
   @exchange "unifiedfeed"
+  @pulsar_client :uof_sdk_pulsar
+  @pulsar_conn_opts [:socket_opts, :auth, :conn_timeout]
 
   @content_message_types ~w[
     odds_change
@@ -16,10 +19,12 @@ defmodule UOF.SDK.Transport do
   ]
 
   @type producer_spec :: {module(), keyword()}
+  @type child_spec :: Supervisor.child_spec() | {module(), term()}
   @type ownership :: :always_active | {:failover, :passive}
 
   @spec producers(term(), integer() | nil) :: %{
           content: producer_spec(),
+          children: [child_spec()],
           system: producer_spec(),
           ownership: ownership(),
           metadata_adapter: :amqp | :pulsar_rabbitmq_source,
@@ -46,6 +51,7 @@ defmodule UOF.SDK.Transport do
     connection = Keyword.get(opts, :connection, [])
 
     %{
+      children: [],
       content: rabbitmq_producer(connection, content_bindings(node_id)),
       system: rabbitmq_producer(connection, system_bindings(node_id)),
       ownership: :always_active,
@@ -71,9 +77,26 @@ defmodule UOF.SDK.Transport do
   defp pulsar_producers(opts) do
     ensure_adapter!(Producer, :off_broadway_pulsar, :pulsar)
 
+    host = Keyword.fetch!(opts, :host)
     Keyword.fetch!(opts, :topic)
     subscription = Keyword.fetch!(opts, :subscription)
-    base_opts = Keyword.drop(opts, [:routing_key_metadata_key, :connection_token_metadata_key])
+
+    client_opts =
+      opts
+      |> Keyword.get(:conn_opts, [])
+      |> Keyword.take(@pulsar_conn_opts)
+      |> Keyword.merge(name: @pulsar_client, host: host)
+
+    base_opts =
+      opts
+      |> Keyword.drop([
+        :host,
+        :conn_opts,
+        :client,
+        :routing_key_metadata_key,
+        :connection_token_metadata_key
+      ])
+      |> Keyword.put(:client, @pulsar_client)
 
     # The system subscription is Failover, so the broker elects one instance
     # as its sole receiver. Ownership reports feed ProducerMonitor, which holds
@@ -91,6 +114,10 @@ defmodule UOF.SDK.Transport do
       )
 
     %{
+      # The client is supervised independently from both Broadway producers.
+      # Neither producer carries :host, so both reuse this one connection
+      # context instead of each calling Pulsar.start/1.
+      children: [{Client, client_opts}],
       content: pulsar_producer(base_opts, subscription, :content, :Key_Shared),
       system: pulsar_producer(system_opts, subscription, :system, :Failover),
       ownership: {:failover, :passive},

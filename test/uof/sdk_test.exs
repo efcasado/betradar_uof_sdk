@@ -94,4 +94,21 @@ defmodule UOF.SDKTest do
     [{SystemPipeline, _system}, {ContentPipeline, opts}] = UOF.SDK.child_specs(config)
     assert opts[:concurrency] == 50
   end
+
+  test "supervises a Pulsar client only for the Pulsar transport" do
+    assert {:ok, {_flags, amqp_children}} = UOF.SDK.init(handler: MyApp.Handler)
+    refute Enum.any?(amqp_children, &(&1.id == Pulsar.Client))
+
+    assert {:ok, {_flags, pulsar_children}} =
+             UOF.SDK.init(
+               handler: MyApp.Handler,
+               transport: {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
+             )
+
+    assert Enum.any?(pulsar_children, fn child ->
+             child.id == Pulsar.Client and
+               child.start ==
+                 {Pulsar.Client, :start_link, [[name: :uof_sdk_pulsar, host: "pulsar://localhost:6650"]]}
+           end)
+  end
 end

@@ -4,6 +4,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
   alias UOF.Schemas.Feed
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.MessageHandler
+  alias UOF.SDK.SystemPipeline
   alias UOF.SDK.TestSupport
   alias UOF.SDK.Transport
 
@@ -41,7 +42,12 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     subscription = "uof-sdk-integration-#{System.unique_integer([:positive])}"
 
-    %{content: producer, metadata_adapter: metadata_adapter} =
+    %{
+      children: [client],
+      content: content_producer,
+      system: system_producer,
+      metadata_adapter: metadata_adapter
+    } =
       Transport.producers(
         {:pulsar,
          host: "pulsar://localhost:#{@pulsar_port}",
@@ -50,16 +56,24 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
         nil
       )
 
+    start_supervised!(client)
+
+    start_supervised!(
+      {SystemPipeline,
+       name: __MODULE__.SystemPipeline, producer: system_producer, metadata_adapter: metadata_adapter, monitor: Monitor}
+    )
+
     start_supervised!(
       {ContentPipeline,
        name: __MODULE__.Pipeline,
        handler: Handler,
        concurrency: 1,
-       producer: producer,
+       producer: content_producer,
        metadata_adapter: metadata_adapter,
        monitor: Monitor}
     )
 
+    TestSupport.wait_for_subscription!("#{subscription}-system")
     TestSupport.wait_for_subscription!("#{subscription}-content")
 
     {:ok, connection} = AMQP.Connection.open(host: "localhost", port: @rabbitmq_port)

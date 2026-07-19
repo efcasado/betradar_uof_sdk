@@ -16,19 +16,18 @@ defmodule UOF.SDK do
   keyword list as the child argument (`{UOF.SDK, sessions: [:live]}`) to
   override per start.
 
-  It supervises (in order, with `:rest_for_one`) an optional checkpoint store,
+  It supervises (in order, with `:rest_for_one`) an optional monitor-state store,
   producer monitor, a system-message pipeline, and a content-message pipeline.
-  Producer state is managed entirely within `UOF.SDK.ProducerMonitor`'s
-  GenServer state — no separate registry process is needed.
+  Runtime state is held directly by the `UOF.SDK.ProducerMonitor` GenServer —
+  no separate registry process is needed.
   """
 
   use Supervisor
 
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
-  alias UOF.SDK.Producer
   alias UOF.SDK.ProducerMonitor
-  alias UOF.SDK.Producers
+  alias UOF.SDK.ProducerMonitor.Producer
   alias UOF.SDK.SystemPipeline
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -49,31 +48,42 @@ defmodule UOF.SDK do
   Manually trigger an odds recovery for a producer. Unlike calling the recovery
   API directly, this goes through the producer monitor: the producer shows as
   recovering and the request is correlated with its `snapshot_complete` and
-  stall-guarded, healing exactly like an automatic recovery. Pass `full: true`
-  to ignore the checkpoint and request a full snapshot.
+  stall-guarded, healing exactly like an automatic recovery. During restart,
+  the recovery intent is persisted immediately but HTTP waits until the system
+  and content pipelines are both ready. Pass `full: true` to ignore the
+  checkpoint and request a full snapshot. Refused with
+  `{:error, :passive}` on an instance that does not currently own the system
+  subscription (multi-instance Pulsar) — issue it on the active instance.
   """
-  @spec recover(integer(), keyword()) :: :ok | {:error, :already_recovering | :unknown_producer}
-  def recover(producer_id, opts \\ []), do: ProducerMonitor.recover(producer_id, opts)
+  @spec recover(integer(), keyword()) ::
+          :ok | {:error, :already_recovering | :passive | :unknown_producer}
+  defdelegate recover(producer_id, opts \\ []), to: ProducerMonitor
 
   @impl true
   def init(opts) do
     config = Config.load(opts)
 
     lifecycle =
-      checkpoint_store_child_specs(config.checkpoint_store) ++
+      monitor_store_child_specs(config.monitor_store) ++
         [
           {ProducerMonitor,
-           producers: Producers.fetch(),
            handler: config.handler,
            inactivity_ms: config.inactivity_seconds * 1_000,
            max_processing_delay_ms: config.max_processing_delay_seconds * 1_000,
+           ownership: config.ownership,
            node_id: config.node_id,
-           checkpoint_store: config.checkpoint_store,
+           monitor_store: config.monitor_store,
            min_interval_ms: config.min_interval_between_recoveries * 1_000,
            max_recovery_ms: config.max_recovery_time * 1_000,
            recovery_overlap_ms: config.recovery_overlap_seconds * 1_000}
         ]
 
+    # Strategy and ordering are load-bearing: the monitor must start before
+    # the pipelines so its registered name exists when consumers report
+    # failover ownership, and :rest_for_one must take the pipelines down with
+    # a crashed monitor so re-subscribing Pulsar consumers deliver a fresh
+    # ownership report to its restarted passive state. AMQP has no ownership
+    # callback and is configured permanently active by the transport.
     Supervisor.init(lifecycle ++ child_specs(config), strategy: :rest_for_one)
   end
 
@@ -104,8 +114,8 @@ defmodule UOF.SDK do
   end
 
   @doc false
-  @spec checkpoint_store_child_specs(module()) :: [module()]
-  def checkpoint_store_child_specs(store) do
+  @spec monitor_store_child_specs(module()) :: [module()]
+  def monitor_store_child_specs(store) do
     if Code.ensure_loaded?(store) and function_exported?(store, :child_spec, 1), do: [store], else: []
   end
 end

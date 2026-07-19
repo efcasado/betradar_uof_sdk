@@ -12,18 +12,21 @@ defmodule UOF.SDK.ConfigTest do
     assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
     assert content_opts[:connection] == conn
     assert system_opts[:connection] == conn
+    assert :consumer_tag in content_opts[:metadata]
+    assert :consumer_tag in system_opts[:metadata]
     assert config.metadata_adapter == :amqp
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil
+    assert config.ownership == :always_active
   end
 
-  test "defaults to AMQP transport with empty connection and ETS checkpoint store" do
+  test "defaults to AMQP transport with empty connection and ETS monitor store" do
     config = Config.load(handler: MyApp.Handler)
 
     assert config.transport == :amqp
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
     assert content_opts[:connection] == []
-    assert config.checkpoint_store == UOF.SDK.CheckpointStore.ETS
+    assert config.monitor_store == UOF.SDK.ProducerMonitor.Store.ETS
   end
 
   test "scopes AMQP bindings by node_id" do
@@ -36,9 +39,9 @@ defmodule UOF.SDK.ConfigTest do
     assert {"unifiedfeed", routing_key: "-.-.-.snapshot_complete.*.*.*.42.#"} in system_opts[:bindings]
   end
 
-  test "accepts a custom checkpoint store" do
-    config = Config.load(handler: MyApp.Handler, checkpoint_store: MyApp.PgStore)
-    assert config.checkpoint_store == MyApp.PgStore
+  test "accepts a custom monitor store" do
+    config = Config.load(handler: MyApp.Handler, monitor_store: MyApp.PgStore)
+    assert config.monitor_store == MyApp.PgStore
   end
 
   test "builds Pulsar producer specs from one topic and subscription" do
@@ -67,9 +70,17 @@ defmodule UOF.SDK.ConfigTest do
     assert system_opts[:consumer_opts][:initial_position] == :earliest
     assert system_opts[:consumer_opts][:subscription_type] == :Failover
 
+    # Failover ownership reports gate the control plane; the Key_Shared
+    # content subscription never emits them.
+    assert system_opts[:active_state_callback] ==
+             {UOF.SDK.ProducerMonitor, :active_state_change, []}
+
+    refute Keyword.has_key?(content_opts, :active_state_callback)
+
     assert config.metadata_adapter == :pulsar_rabbitmq_source
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil
+    assert config.ownership == {:failover, :passive}
   end
 
   test "requires a Pulsar subscription" do

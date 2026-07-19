@@ -18,8 +18,9 @@ defmodule UOF.SDK.SystemPipeline do
     * `:routing_key_metadata_key` - the `message.metadata` field carrying the
       UOF routing key for AMQP/custom producers (default `:routing_key`).
     * `:connection_token_metadata_key` - the `message.metadata` field carrying a
-      per-connection token for reconnect detection (default `nil`, i.e. the
-      AMQP connection pid).
+      per-connection token for reconnect detection. With the default AMQP
+      producer, `nil` uses its consumer tag; custom producers without that
+      metadata fall back to the AMQP connection PID.
   """
 
   use Broadway
@@ -116,7 +117,11 @@ defmodule UOF.SDK.SystemPipeline do
   ## lifecycle side-effects --------------------------------------------------
 
   defp observe(ctx, %RoutingKey{message_type: "alive"}, msg) do
-    notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
+    # `subscribed=0` is itself a recovery signal. A malformed/missing timestamp
+    # must not hide it; the monitor can observe an alive without checkpointing.
+    if msg.product do
+      notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
+    end
   end
 
   defp observe(ctx, %RoutingKey{message_type: "snapshot_complete"}, msg) do

@@ -28,10 +28,7 @@ defmodule UOF.SDK.LogHandler do
   def handle_fixture_change(msg, ctx), do: log("fixture_change", msg, ctx)
   @impl true
   def handle_producer_status(producer) do
-    Logger.info(
-      "UOF.SDK producer #{producer.id} #{if producer.down?, do: "DOWN", else: "UP"} " <>
-        "delayed=#{producer.delayed?} reason=#{inspect(producer.reason)}"
-    )
+    Logger.info("UOF.SDK producer #{producer.id} status=#{producer.status}")
 
     :ok
   end

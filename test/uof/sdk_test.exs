@@ -1,28 +1,39 @@
 defmodule UOF.SDKTest do
   use ExUnit.Case, async: true
 
-  alias UOF.SDK.CheckpointStore
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
+  alias UOF.SDK.ProducerMonitor.Store
+  alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
+  alias UOF.SDK.ProducerMonitor.Store.Session
   alias UOF.SDK.SystemPipeline
 
-  defmodule CallbackOnlyCheckpointStore do
+  defmodule CallbackOnlyMonitorStore do
     @moduledoc false
-    @behaviour CheckpointStore
+    @behaviour Store
 
     @impl true
-    def get(_producer_id), do: :none
+    def load_session, do: %Session{}
 
     @impl true
-    def put(_producer_id, _timestamp), do: :ok
+    def load_producer_progress, do: %{}
 
     @impl true
-    def delete(_producer_id), do: :ok
+    def commit_session_change(tokens), do: %Session{tokens: tokens, generation: 1}
+
+    @impl true
+    def advance_checkpoint(_id, timestamp), do: %ProducerProgress{checkpoint: timestamp}
+
+    @impl true
+    def require_recovery(_id), do: %ProducerProgress{}
+
+    @impl true
+    def mark_synchronized(_id, generation), do: %ProducerProgress{synchronized_generation: generation}
   end
 
-  defmodule StartableCheckpointStore do
+  defmodule StartableMonitorStore do
     @moduledoc false
-    @behaviour CheckpointStore
+    @behaviour Store
 
     use GenServer
 
@@ -32,21 +43,30 @@ defmodule UOF.SDKTest do
     def init(opts), do: {:ok, opts}
 
     @impl true
-    def get(_producer_id), do: :none
+    def load_session, do: %Session{}
 
     @impl true
-    def put(_producer_id, _timestamp), do: :ok
+    def load_producer_progress, do: %{}
 
     @impl true
-    def delete(_producer_id), do: :ok
+    def commit_session_change(tokens), do: %Session{tokens: tokens, generation: 1}
+
+    @impl true
+    def advance_checkpoint(_id, timestamp), do: %ProducerProgress{checkpoint: timestamp}
+
+    @impl true
+    def require_recovery(_id), do: %ProducerProgress{}
+
+    @impl true
+    def mark_synchronized(_id, generation), do: %ProducerProgress{synchronized_generation: generation}
   end
 
-  test "checkpoint_store_child_specs omits callback-only stores" do
-    assert UOF.SDK.checkpoint_store_child_specs(CallbackOnlyCheckpointStore) == []
+  test "monitor_store_child_specs omits callback-only stores" do
+    assert UOF.SDK.monitor_store_child_specs(CallbackOnlyMonitorStore) == []
   end
 
-  test "checkpoint_store_child_specs includes stores with child specs" do
-    assert UOF.SDK.checkpoint_store_child_specs(StartableCheckpointStore) == [StartableCheckpointStore]
+  test "monitor_store_child_specs includes stores with child specs" do
+    assert UOF.SDK.monitor_store_child_specs(StartableMonitorStore) == [StartableMonitorStore]
   end
 
   test "child_specs passes normalized producer specs to system and content pipelines" do

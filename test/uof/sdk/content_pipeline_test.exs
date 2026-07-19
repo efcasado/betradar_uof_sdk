@@ -208,7 +208,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert ctx.event_urn == "sr:match:12345"
   end
 
-  test "observes the content AMQP connection pid from content-session alives" do
+  test "observes the content AMQP consumer tag from content-session alives" do
     name = Module.concat(__MODULE__, ConnObserve)
 
     start_link_supervised!(%{
@@ -226,13 +226,11 @@ defmodule UOF.SDK.ContentPipelineTest do
          ]}
     })
 
-    conn = spawn(fn -> :ok end)
-
     Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", amqp_channel: %{conn: %{pid: conn}}}
+      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", consumer_tag: "amq.ctag-content-1"}
     )
 
-    assert_receive {:connection_sink, {:content, ^conn}}
+    assert_receive {:connection_sink, {:content, "amq.ctag-content-1"}}
   end
 
   test "does not observe the content AMQP connection on event messages" do
@@ -253,10 +251,8 @@ defmodule UOF.SDK.ContentPipelineTest do
          ]}
     })
 
-    conn = spawn(fn -> :ok end)
-
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
-      metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-", amqp_channel: %{conn: %{pid: conn}}}
+      metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-", consumer_tag: "amq.ctag-content-1"}
     )
 
     assert_receive {:odds_change, _, _}
@@ -321,7 +317,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:message_sink, 1, 1}
-    assert_receive {:connection_sink, {:content, {"uof-content", "ctag-1"}}}
+    assert_receive {:connection_sink, {:content, "ctag-1"}}
   end
 
   test "observes a Pulsar RabbitMQ source connection token from event messages" do
@@ -356,6 +352,6 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:odds_change, _, _}
-    assert_receive {:connection_sink, {:content, {"uof-content", "ctag-1"}}}
+    assert_receive {:connection_sink, {:content, "ctag-1"}}
   end
 end

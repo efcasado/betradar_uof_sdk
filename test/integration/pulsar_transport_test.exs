@@ -92,8 +92,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     assert fixture_context.routing_key == "hi.-.pre.fixture_change.1.sr:match.67890.-"
     assert fixture_context.event_urn == "sr:match:67890"
 
-    assert_receive {:observed_connection, {:content, {queue_name, consumer_tag}}}, 10_000
-    assert is_binary(queue_name) and queue_name != ""
+    assert_receive {:observed_connection, {:content, consumer_tag}}, 10_000
     assert is_binary(consumer_tag) and consumer_tag != ""
 
     assert_receive {:observed_message, 1, 42}, 10_000
@@ -104,17 +103,17 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     publish_odds_change(channel, "111", 100)
 
     assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
-    assert_receive {:observed_connection, {:content, {old_queue, old_consumer_tag}}}, 10_000
+    assert_receive {:observed_connection, {:content, old_consumer_tag}}, 10_000
 
+    {:ok, old_queue} = TestSupport.source_queue()
     TestSupport.restart_source!()
-    new_queue = TestSupport.wait_for_new_source_queue!(old_queue)
+    _new_queue = TestSupport.wait_for_new_source_queue!(old_queue)
 
     publish_odds_change(channel, "222", 101)
 
     assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
-    assert_receive {:observed_connection, {:content, {^new_queue, new_consumer_tag}}}, 10_000
+    assert_receive {:observed_connection, {:content, new_consumer_tag}}, 10_000
 
-    refute new_queue == old_queue
     refute new_consumer_tag == old_consumer_tag
   end
 

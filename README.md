@@ -51,7 +51,7 @@ For Pulsar:
 def deps do
   [
     {:uof_sdk, "~> 0.1.0"},
-    {:off_broadway_pulsar, "~> 1.4"}
+    {:off_broadway_pulsar, "~> 1.5"}
   ]
 end
 ```
@@ -186,10 +186,9 @@ own last-known checkpoint. The signal is best-effort, not a fencing mechanism:
 briefly-overlapping actives can issue a duplicate recovery request, which
 wastes recovery quota but is otherwise harmless.
 `UOF.SDK.recover/2` returns `{:error, :passive}` on a standby instance.
-Requires `off_broadway_pulsar` with Failover active-state callbacks
-([PR #70](https://github.com/efcasado/off_broadway_pulsar/pull/70)). Pulsar
-monitors start passive, so without the initial callback no instance issues
-recoveries. AMQP monitors start active and do not use ownership callbacks.
+Pulsar monitors start passive and wait for the initial broker ownership report
+before issuing recoveries. AMQP monitors start active and do not use ownership
+callbacks.
 
 ### Options
 

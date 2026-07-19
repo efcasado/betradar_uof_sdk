@@ -26,10 +26,7 @@ defmodule UofSdk.MixProject do
       {:uof_schemas, "~> 0.2.0"},
       {:broadway, "~> 1.3"},
       {:broadway_rabbitmq, "~> 0.8", optional: true},
-      # TODO: return to hex once the failover active-state callback ships
-      # (https://github.com/efcasado/off_broadway_pulsar/pull/70)
-      {:off_broadway_pulsar,
-       github: "efcasado/off_broadway_pulsar", branch: "feat/failover-ownership-listener", optional: true},
+      {:off_broadway_pulsar, "~> 1.5", optional: true},
       # dev / test
       {:styler, "~> 1.2", only: [:dev, :test], runtime: false}
     ]

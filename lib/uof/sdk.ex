@@ -57,7 +57,7 @@ defmodule UOF.SDK do
   """
   @spec recover(integer(), keyword()) ::
           :ok | {:error, :already_recovering | :passive | :unknown_producer}
-  def recover(producer_id, opts \\ []), do: ProducerMonitor.recover(producer_id, opts)
+  defdelegate recover(producer_id, opts \\ []), to: ProducerMonitor
 
   @impl true
   def init(opts) do

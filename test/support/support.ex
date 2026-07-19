@@ -3,6 +3,8 @@ defmodule UOF.SDK.TestSupport do
 
   @pulsar_http_port System.get_env("PULSAR_HTTP_PORT", "18080")
   @rabbitmq_http_port System.get_env("RABBITMQ_HTTP_PORT", "25672")
+  @source_restart_attempts 300
+  @poll_interval_ms 100
 
   def start_http_client! do
     {:ok, _apps} = Application.ensure_all_started(:inets)
@@ -22,7 +24,7 @@ defmodule UOF.SDK.TestSupport do
     end
   end
 
-  def wait_for_new_source_queue!(old_queue, attempts \\ 100)
+  def wait_for_new_source_queue!(old_queue, attempts \\ @source_restart_attempts)
 
   def wait_for_new_source_queue!(old_queue, attempts) when attempts > 0 do
     case source_queue() do
@@ -30,13 +32,15 @@ defmodule UOF.SDK.TestSupport do
         queue
 
       _result ->
-        Process.sleep(100)
+        Process.sleep(@poll_interval_ms)
         wait_for_new_source_queue!(old_queue, attempts - 1)
     end
   end
 
   def wait_for_new_source_queue!(old_queue, 0) do
-    raise "RabbitMQ source queue did not change from #{old_queue}"
+    timeout_ms = @source_restart_attempts * @poll_interval_ms
+
+    raise "RabbitMQ source queue did not change from #{old_queue} within #{timeout_ms}ms"
   end
 
   def wait_for_subscription!(subscription, attempts \\ 100)

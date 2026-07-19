@@ -48,8 +48,10 @@ defmodule UOF.SDK do
   Manually trigger an odds recovery for a producer. Unlike calling the recovery
   API directly, this goes through the producer monitor: the producer shows as
   recovering and the request is correlated with its `snapshot_complete` and
-  stall-guarded, healing exactly like an automatic recovery. Pass `full: true`
-  to ignore the checkpoint and request a full snapshot. Refused with
+  stall-guarded, healing exactly like an automatic recovery. During restart,
+  the recovery intent is persisted immediately but HTTP waits until the system
+  and content pipelines are both ready. Pass `full: true` to ignore the
+  checkpoint and request a full snapshot. Refused with
   `{:error, :passive}` on an instance that does not currently own the system
   subscription (multi-instance Pulsar) — issue it on the active instance.
   """

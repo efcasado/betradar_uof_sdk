@@ -11,8 +11,9 @@ defmodule UOF.SDK.ProducerMonitor.Connections do
   # is seeded with the persisted baseline so resuming into an unchanged
   # session is not a change.
   #
-  # Persisted tokens are comparison baselines only — they never arm the
-  # startup gate (`active?`); only current-session observations do.
+  # Persisted tokens are comparison baselines, not readiness evidence. They do
+  # arm the restart gate, which remains closed until both namespaces have been
+  # observed in this process.
 
   @required_namespaces [:system, :content]
 
@@ -59,6 +60,18 @@ defmodule UOF.SDK.ProducerMonitor.Connections do
 
   def active?(%__MODULE__{} = connections) do
     map_size(connections.observed) > 0
+  end
+
+  # Persisted tokens mean this process is restarting a previously observed
+  # session. Once any current token arrives, an otherwise fresh process is
+  # likewise committed to completing the two-namespace startup gate.
+  def awaiting_readiness?(%__MODULE__{} = connections) do
+    not ready?(connections) and
+      (map_size(connections.persisted) > 0 or active?(connections))
+  end
+
+  def missing_namespaces(%__MODULE__{observed: observed}) do
+    Enum.reject(@required_namespaces, &Map.has_key?(observed, &1))
   end
 
   def ready?(%__MODULE__{observed: observed}) do

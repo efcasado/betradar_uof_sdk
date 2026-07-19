@@ -60,6 +60,27 @@ defmodule UOF.SDK.SystemPipelineTest do
     assert_receive {:snapshot_sink, 3, 77}
   end
 
+  test "routes an unsubscribed alive even when its timestamp is missing" do
+    name = Module.concat(__MODULE__, MissingAliveTimestamp)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {SystemPipeline, :start_link,
+         [
+           [
+             name: name,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    Broadway.test_message(name, ~s(<alive product="1" subscribed="0"/>), metadata: %{routing_key: "-.-.-.alive.-.-.-.-"})
+
+    assert_receive {:alive_sink, 1, nil, false}
+  end
+
   test "observes the AMQP consumer tag for reconnect detection" do
     name = Module.concat(__MODULE__, ConnObserve)
 

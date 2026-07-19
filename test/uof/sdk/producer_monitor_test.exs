@@ -325,7 +325,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
-  test "startup alive does not recover while only one connection namespace is ready", %{clock: clock} do
+  test "startup alive records recovery but defers HTTP until both connections are ready", %{clock: clock} do
     m = start_monitor(clock)
 
     ProducerMonitor.observe_connection(m, {:system, :conn_a})
@@ -333,14 +333,14 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(m)
 
     refute_received {:recover_called, _, _}
-    assert {:ok, %Producer{status: :down}} = ProducerMonitor.producer(m, 1)
+    assert_receive {:status, %Producer{status: :recovering}}
+    assert {:ok, %Producer{status: :recovering}} = ProducerMonitor.producer(m, 1)
 
     ProducerMonitor.observe_connection(m, {:content, :conn_a})
-    assert_receive {:status, %Producer{status: :recovering}}
     assert_receive {:recover_called, "pre", _}
   end
 
-  test "startup alive interval violation does not recover while only one connection namespace is ready", %{
+  test "pending startup recovery remains deferred before the readiness deadline", %{
     clock: clock
   } do
     m = start_monitor(clock)
@@ -348,15 +348,15 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.observe_connection(m, {:system, :conn_a})
     ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
+    assert_receive {:status, %Producer{status: :recovering}}
 
-    set_clock(clock, 1_000 + @inactivity + 1)
+    set_clock(clock, 1_000 + @inactivity - 1)
     tick(m)
 
     refute_received {:recover_called, _, _}
-    assert {:ok, %Producer{status: :down}} = ProducerMonitor.producer(m, 1)
+    assert {:ok, %Producer{status: :recovering}} = ProducerMonitor.producer(m, 1)
 
     ProducerMonitor.observe_connection(m, {:content, :conn_a})
-    assert_receive {:status, %Producer{status: :recovering}}
     assert_receive {:recover_called, "pre", _}
   end
 
@@ -649,6 +649,24 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:error, :unknown_producer} = ProducerMonitor.recover(m, 99, full: true)
   end
 
+  test "manual recovery is persisted but waits for restored connections", %{clock: clock} do
+    save_snapshot(%{1 => 1_000}, [1], %{system: "s1", content: "c1"})
+    m = start_monitor(clock)
+
+    assert :ok = ProducerMonitor.recover(m, 1, [])
+    assert_receive {:status, %Producer{status: :recovering}}
+    refute_received {:recover_called, _, _}
+    refute Snapshot.resumable?(Store.ETS.load(), 1)
+
+    ProducerMonitor.observe_connection(m, {:system, "s1"})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, "c1"})
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 1_000
+  end
+
   test "manual recovery completion establishes the alive timeout anchor", %{clock: clock} do
     m = start_monitor(clock)
 
@@ -808,6 +826,37 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %Producer{status: :up}}
   end
 
+  test "resumed producer without a current alive times out through the normal health check", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    sync(m)
+
+    set_clock(clock, 1_000 + @inactivity + 1)
+    tick(m)
+
+    assert_receive {:status, %Producer{status: :recovering}}
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 1_000
+  end
+
+  test "connection startup has a bounded readiness deadline", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+    sync(m)
+    state = :sys.get_state(m)
+
+    set_clock(clock, 1_000 + @inactivity + 1)
+
+    assert_raise RuntimeError,
+                 "producer monitor connection readiness timed out; missing namespaces: [:content]",
+                 fn -> ProducerMonitor.handle_info(:tick, state) end
+  end
+
   test "resumed producer recovers incrementally when a namespace token changed across restart", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 50_000)
@@ -839,6 +888,28 @@ defmodule UOF.SDK.ProducerMonitorTest do
     # Starting recovery must replace the resumable persisted state.
     sync(m)
     refute Snapshot.resumable?(Store.ETS.load(), 1)
+  end
+
+  test "unsubscribed alive remains pending until the second unchanged connection is ready", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+    ProducerMonitor.alive(m, 1, 1_000, false)
+    sync(m)
+
+    assert_receive {:status, %Producer{status: :recovering}}
+    refute_received {:recover_called, _, _}
+    refute Snapshot.resumable?(Store.ETS.load(), 1)
+
+    # The unchanged token does not itself indicate a reconnect. Becoming ready
+    # must nevertheless issue the recovery remembered from subscribed=0.
+    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 1_000
+
+    tick(m)
+    assert {:ok, %Producer{status: :recovering}} = ProducerMonitor.producer(m, 1)
   end
 
   test "does not resume a producer persisted as plain down", %{clock: clock} do
@@ -1039,15 +1110,31 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_recovery_triggered()
   end
 
-  test "an alive racing a passive report does not trigger recovery", %{clock: clock} do
+  test "unknown producer takes precedence over passive ownership", %{clock: clock} do
+    m = start_monitor([ownership: {:failover, :passive}], clock)
+
+    assert ProducerMonitor.recover(m, 99, []) == {:error, :unknown_producer}
+  end
+
+  test "an alive racing a passive report preserves recovery until promotion", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
     m = start_monitor(clock)
 
     report_active_state(m, :passive)
-    ProducerMonitor.alive(m, 1, 1_000, true)
+    ProducerMonitor.alive(m, 1, 1_000, false)
     sync(m)
 
     refute_receive {:recover_called, _product, _opts}
-    assert {:ok, %Producer{status: :down}} = ProducerMonitor.producer(m, 1)
+    assert_receive {:status, %Producer{status: :recovering}}
+    assert {:ok, %Producer{status: :recovering}} = ProducerMonitor.producer(m, 1)
+    refute Snapshot.resumable?(Store.ETS.load(), 1)
+
+    report_active_state(m, :active)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    assert_recovery_triggered()
   end
 
   test "repeated active-state reports are idempotent", %{clock: clock} do
@@ -1096,13 +1183,22 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert Store.ETS.load().connection_tokens == %{system: "s1", content: "c2"}
   end
 
-  test "persisted tokens alone do not arm the startup connection gate", %{clock: clock} do
+  test "persisted tokens arm the restart connection gate before observations arrive", %{clock: clock} do
     save_snapshot(%{}, [], %{system: "old-s", content: "old-c"})
     m = start_monitor(clock)
 
-    # No current-session observation yet: the persisted baselines must not
-    # hold the first alive-triggered recovery hostage.
+    # Persisted baselines identify a restart window. Recovery intent is durable,
+    # but HTTP must wait until both current pipelines have reattached.
     ProducerMonitor.alive(m, 1, 1_000, true)
+    sync(m)
+    assert_receive {:status, %Producer{status: :recovering}}
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:system, "old-s"})
+    sync(m)
+    refute_received {:recover_called, _, _}
+
+    ProducerMonitor.observe_connection(m, {:content, "old-c"})
     assert_recovery_triggered()
   end
 

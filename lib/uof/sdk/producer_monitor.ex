@@ -59,22 +59,31 @@ defmodule UOF.SDK.ProducerMonitor do
       `:up` after processing catches up, an `alive` is heard, and both pipeline
       connections are observed in the current process.
     * Persisted connection tokens are comparison baselines, not evidence that
-      the current pipelines are ready. Once both pipelines are observed, a
-      changed token removes every producer from the resumable set and starts
-      recovery.
-    * `subscribed=0` also starts recovery. Producers absent from the resumable
-      set start `:down` and recover on their first subscribed `alive`.
+      the current pipelines are ready. Recovery HTTP waits until both pipelines
+      are observed. If that does not happen within one alive-inactivity
+      interval, the monitor crashes so supervision restarts both pipelines.
+      Once ready, a changed token removes every producer from the resumable set
+      and starts recovery.
+    * A resumable producer gets one alive-inactivity interval to provide a
+      current heartbeat; silence then follows the normal recovery path instead
+      of leaving it in `:resuming` forever.
+    * `subscribed=0` records recovery immediately, even if it races demotion or
+      connection startup; only the HTTP request waits. Producers absent from
+      the resumable set start `:down` and recover on their first subscribed
+      `alive`.
 
   ## Control-plane ownership (multi-instance Pulsar)
 
   With the Pulsar transport, the system subscription is Failover: the broker
   delivers `alive`/`snapshot_complete` to exactly one instance. The transport
   wires that broker signal to `active_state_change/2`, and the monitor holds
-  control-plane authority only while active. While passive it neither issues
-  recovery requests nor transitions producer status — a demoted instance can
-  never observe the `snapshot_complete` for a request it issued, so issuing
-  from standby burns recovery quota in a stall-reissue loop. Content progress
-  observations continue while passive.
+  control-plane authority only while active. While passive it never issues
+  recovery requests or runs periodic health transitions — a demoted instance
+  cannot observe the `snapshot_complete` for a request it issued, so issuing
+  from standby burns recovery quota in a stall-reissue loop. An explicit
+  recovery-required alive racing demotion is nevertheless persisted and
+  remains pending for promotion. Content progress observations continue while
+  passive.
 
   Demotion drops in-flight recovery correlation (the completion will go to the
   new owner); affected producers stay `:recovering` and are reissued on
@@ -116,6 +125,7 @@ defmodule UOF.SDK.ProducerMonitor do
           handler: module() | nil,
           now_fun: (-> integer()),
           monitor_store: module(),
+          readiness_deadline_at: integer() | nil,
           inactivity_ms: non_neg_integer(),
           max_processing_delay_ms: non_neg_integer(),
           tick_ms: pos_integer(),
@@ -130,6 +140,7 @@ defmodule UOF.SDK.ProducerMonitor do
     :handler,
     :now_fun,
     :monitor_store,
+    :readiness_deadline_at,
     :inactivity_ms,
     :max_processing_delay_ms,
     :tick_ms,
@@ -178,7 +189,9 @@ defmodule UOF.SDK.ProducerMonitor do
   Manually trigger a recovery for `producer_id` (e.g. from an admin UI), going
   through the normal recovery lifecycle: the producer becomes `:recovering`,
   completion is correlated via `snapshot_complete`, and the
-  stall guard reissues if it goes missing. Pass `full: true` to ignore the
+  stall guard reissues if it goes missing. If a persisted connection session is
+  still reconnecting, the recovery requirement is recorded immediately and its
+  HTTP request waits for both pipelines. Pass `full: true` to ignore the
   checkpoint and request a full snapshot. Refused while the producer is already
   recovering, including during a cooldown or retry delay, and with
   `{:error, :passive}` while this instance does not own the system
@@ -235,11 +248,14 @@ defmodule UOF.SDK.ProducerMonitor do
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
       monitor_store: monitor_store,
+      readiness_deadline_at: nil,
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
       max_processing_delay_ms: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       recovery_overlap_ms: Keyword.get(opts, :recovery_overlap_ms, @default_recovery_overlap_ms)
     }
+
+    state = if owns_control?(state), do: start_active_monitoring(state), else: state
 
     schedule_tick(state)
     {:ok, state}
@@ -269,26 +285,22 @@ defmodule UOF.SDK.ProducerMonitor do
   def handle_call(:sync, _from, state), do: {:reply, :ok, state}
 
   def handle_call({:recover, id, opts}, _from, state) do
-    cond do
-      not owns_control?(state) ->
-        {:reply, {:error, :passive}, state}
-
-      producer_recovering?(state, id) ->
-        {:reply, {:error, :already_recovering}, state}
-
-      true ->
-        recover_known_producer(state, id, opts)
-    end
-  end
-
-  defp recover_known_producer(state, id, opts) do
     case Map.fetch(state.producers, id) do
-      {:ok, producer} ->
-        after_ts = if !opts[:full], do: after_from_checkpoint(state, producer)
-        {:reply, :ok, trigger_recovery(state, producer, after_ts)}
-
       :error ->
         {:reply, {:error, :unknown_producer}, state}
+
+      {:ok, producer} ->
+        cond do
+          not owns_control?(state) ->
+            {:reply, {:error, :passive}, state}
+
+          Producer.recovering?(producer) ->
+            {:reply, {:error, :already_recovering}, state}
+
+          true ->
+            after_ts = if !opts[:full], do: after_from_checkpoint(state, producer)
+            {:reply, :ok, request_recovery(state, producer, after_ts)}
+        end
     end
   end
 
@@ -336,7 +348,14 @@ defmodule UOF.SDK.ProducerMonitor do
       )
 
       state = %{state | ownership: ownership}
-      state = if active?, do: resume_pending_recoveries(state), else: park_recoveries(state)
+
+      state =
+        if active? do
+          state |> start_active_monitoring() |> resume_pending_recoveries()
+        else
+          state |> Map.put(:readiness_deadline_at, nil) |> park_recoveries()
+        end
+
       {:noreply, state}
     end
   end
@@ -363,6 +382,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state =
       if owns_control?(state) do
         now = state.now_fun.()
+        ensure_connection_readiness!(state, now)
         Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now))
       else
         # A passive instance sees no system alives and only a partial content
@@ -410,14 +430,10 @@ defmodule UOF.SDK.ProducerMonitor do
 
     case result do
       {:recovery_needed, producer, _cause} ->
-        # An alive can race a just-received passive report. Recovery also waits
-        # until both pipeline connections are ready once startup observation
-        # has begun.
-        if startup_connection_recovery_pending?(state) or not owns_control?(state) do
-          put_producer(state, producer)
-        else
-          trigger_recovery(state, producer)
-        end
+        # Preserve explicit recovery intent even if this alive races demotion
+        # or connection startup. Only HTTP issuance depends on ownership and
+        # readiness; the durable requirement itself must never be discarded.
+        request_recovery(state, producer)
 
       {:checkpoint, producer, timestamp} ->
         state
@@ -438,7 +454,7 @@ defmodule UOF.SDK.ProducerMonitor do
            Connections.ready?(state.connections)
          ) do
       {:recovery_needed, producer, _cause} ->
-        if startup_connection_recovery_pending?(state), do: state, else: trigger_recovery(state, producer)
+        request_recovery(state, producer)
 
       {:transition, producer} ->
         commit_producer_transition(state, producer)
@@ -448,21 +464,28 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  defp trigger_recovery(state, before) do
-    trigger_recovery(state, before, after_from_checkpoint(state, before))
+  defp request_recovery(state, before) do
+    request_recovery(state, before, after_from_checkpoint(state, before))
   end
 
-  defp trigger_recovery(state, before, after_ts) do
+  defp request_recovery(state, before, after_ts) do
+    {state, producer} = prepare_recovery(state, before, after_ts)
+    maybe_initiate(state, producer)
+  end
+
+  defp prepare_recovery(state, before, after_ts) do
     producer = Producer.prepare_recovery(before, after_ts)
 
     # The durable safety transition must precede HTTP issuance. If the monitor
     # crashes after the request, restart will require another recovery instead
     # of resuming from stale synchronized state.
-    state
-    |> put_producer(producer)
-    |> update_snapshot(&Snapshot.require_recovery(&1, before.id))
-    |> notify_recovery(producer)
-    |> initiate(producer)
+    state =
+      state
+      |> put_producer(producer)
+      |> update_snapshot(&Snapshot.require_recovery(&1, before.id))
+      |> notify_recovery(producer)
+
+    {state, producer}
   end
 
   defp commit_producer_transition(state, after_) do
@@ -567,24 +590,81 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp resume_pending_recoveries(state) do
     Enum.reduce(state.producers, state, fn {_id, producer}, state ->
-      if Producer.recovery_pending?(producer), do: initiate(state, producer), else: state
+      if Producer.recovery_pending?(producer), do: maybe_initiate(state, producer), else: state
     end)
   end
 
-  defp startup_connection_recovery_pending?(state) do
-    Connections.active?(state.connections) and not Connections.ready?(state.connections)
+  # A resumable producer is trusted only for one normal alive interval after
+  # this instance acquires control. Seeding the existing alive anchor lets the
+  # normal health check recover it if no current-session heartbeat arrives.
+  # Connection readiness gets the same interval; failure is process-fatal so
+  # :rest_for_one restarts both pipelines instead of waiting forever.
+  defp start_active_monitoring(state) do
+    now = state.now_fun.()
+
+    producers =
+      Map.new(state.producers, fn {id, producer} ->
+        producer =
+          if producer.status == :resuming and is_nil(producer.last_alive_at) do
+            %{producer | last_alive_at: now}
+          else
+            producer
+          end
+
+        {id, producer}
+      end)
+
+    arm_readiness_deadline(%{state | producers: producers}, now)
   end
 
+  defp arm_readiness_deadline(state, now \\ nil)
+
+  defp arm_readiness_deadline(%{readiness_deadline_at: nil} = state, now) do
+    if owns_control?(state) and Connections.awaiting_readiness?(state.connections) do
+      now = now || state.now_fun.()
+      %{state | readiness_deadline_at: now + state.inactivity_ms}
+    else
+      state
+    end
+  end
+
+  defp arm_readiness_deadline(state, _now), do: state
+
+  defp ensure_connection_readiness!(%{readiness_deadline_at: nil}, _now), do: :ok
+
+  defp ensure_connection_readiness!(%{readiness_deadline_at: deadline} = state, now) when now > deadline do
+    missing = Connections.missing_namespaces(state.connections)
+
+    raise RuntimeError,
+          "producer monitor connection readiness timed out; missing namespaces: #{inspect(missing)}"
+  end
+
+  defp ensure_connection_readiness!(_state, _now), do: :ok
+
   defp observe_connection(state, namespace, token) do
-    case Connections.observe(state.connections, namespace, token) do
-      {:recovery_needed, connections} ->
-        commit_connection_change(state, Connections.commit(connections))
+    was_ready? = Connections.ready?(state.connections)
 
-      {:not_ready, connections} ->
-        %{state | connections: connections}
+    state =
+      case Connections.observe(state.connections, namespace, token) do
+        {:recovery_needed, connections} ->
+          commit_connection_change(state, Connections.commit(connections))
 
-      {:unchanged, connections} ->
-        %{state | connections: connections}
+        {:not_ready, connections} ->
+          %{state | connections: connections}
+
+        {:unchanged, connections} ->
+          %{state | connections: connections}
+      end
+
+    # A recovery-required alive may have arrived after the first connection.
+    # Readiness itself must release that pending job even when the second token
+    # matches the persisted baseline and therefore reports `:unchanged`.
+    if not was_ready? and Connections.ready?(state.connections) do
+      state
+      |> Map.put(:readiness_deadline_at, nil)
+      |> resume_pending_recoveries()
+    else
+      arm_readiness_deadline(state)
     end
   end
 
@@ -612,7 +692,7 @@ defmodule UOF.SDK.ProducerMonitor do
           put_producer(state, producer)
 
         true ->
-          trigger_recovery(state, producer)
+          request_recovery(state, producer)
       end
     end)
   end
@@ -644,6 +724,14 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp initiate(state, producer) do
     put_producer(state, Producer.initiate_recovery(producer))
+  end
+
+  defp maybe_initiate(state, producer) do
+    if owns_control?(state) and not Connections.awaiting_readiness?(state.connections) do
+      initiate(state, producer)
+    else
+      state
+    end
   end
 
   defp after_from_checkpoint(state, producer) do
@@ -688,13 +776,6 @@ defmodule UOF.SDK.ProducerMonitor do
       end
 
     %{producer | recovery: nil}
-  end
-
-  defp producer_recovering?(state, id) do
-    case Map.fetch(state.producers, id) do
-      {:ok, producer} -> Producer.recovering?(producer)
-      :error -> false
-    end
   end
 
   defp recovery_in_flight?(producer) do

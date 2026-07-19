@@ -117,7 +117,9 @@ defmodule UOF.SDK.SystemPipeline do
   ## lifecycle side-effects --------------------------------------------------
 
   defp observe(ctx, %RoutingKey{message_type: "alive"}, msg) do
-    if msg.product && msg.timestamp do
+    # `subscribed=0` is itself a recovery signal. A malformed/missing timestamp
+    # must not hide it; the monitor can observe an alive without checkpointing.
+    if msg.product do
       notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
     end
   end

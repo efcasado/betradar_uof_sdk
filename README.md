@@ -169,10 +169,11 @@ was possible. The AMQP transport uses its own consumer tag the same way.
 With multiple SDK instances on the same subscription, the broker elects one
 instance as the Failover system-subscription owner and notifies each instance
 of its role. The SDK wires that signal to `UOF.SDK.ProducerMonitor`: only the
-active instance runs the control plane (producer health transitions and
-recovery requests), while passive instances keep consuming their Key-Shared
-content share. On promotion, the new owner recovers each producer from its own
-last-known checkpoint. The signal is best-effort, not a fencing mechanism:
+active instance runs periodic producer health transitions and issues recovery
+requests, while passive instances keep consuming their Key-Shared content
+share. A recovery-required alive racing demotion is retained but not issued
+until promotion. On promotion, the new owner recovers each producer from its
+own last-known checkpoint. The signal is best-effort, not a fencing mechanism:
 briefly-overlapping actives can issue a duplicate recovery request, which
 wastes recovery quota but is otherwise harmless.
 `UOF.SDK.recover/2` returns `{:error, :passive}` on a standby instance.
@@ -368,6 +369,14 @@ mechanics — briefly: a producer healthy at shutdown starts as `:resuming` and
 drains retained backlog instead of recovering immediately. A matching token
 means the upstream consume session did not change; avoiding a gap also requires
 the transport to retain the backlog.
+
+Persisted tokens also close the restart gate: recovery intent may be recorded
+immediately, but no recovery HTTP request is sent until both the system and
+content pipelines report their current sessions. If either pipeline does not
+become ready within `:inactivity_seconds`, the monitor crashes and the SDK's
+`:rest_for_one` supervisor restarts both pipelines. A resumable producer that
+never supplies a current-session alive uses the same interval before falling
+back to normal recovery.
 
 Whether a restart actually avoids recovery is decided by the transport. A
 direct AMQP session always mints a new consumer tag on restart, so recovery

@@ -16,7 +16,7 @@ defmodule UOF.SDK do
   keyword list as the child argument (`{UOF.SDK, sessions: [:live]}`) to
   override per start.
 
-  It supervises (in order, with `:rest_for_one`) an optional snapshot store,
+  It supervises (in order, with `:rest_for_one`) an optional monitor-state store,
   producer monitor, a system-message pipeline, and a content-message pipeline.
   Runtime state is held directly by the `UOF.SDK.ProducerMonitor` GenServer —
   no separate registry process is needed.

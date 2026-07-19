@@ -20,7 +20,7 @@ defmodule UOF.SDK.ConfigTest do
     assert config.ownership == :always_active
   end
 
-  test "defaults to AMQP transport with empty connection and ETS snapshot store" do
+  test "defaults to AMQP transport with empty connection and ETS monitor store" do
     config = Config.load(handler: MyApp.Handler)
 
     assert config.transport == :amqp
@@ -39,7 +39,7 @@ defmodule UOF.SDK.ConfigTest do
     assert {"unifiedfeed", routing_key: "-.-.-.snapshot_complete.*.*.*.42.#"} in system_opts[:bindings]
   end
 
-  test "accepts a custom snapshot store" do
+  test "accepts a custom monitor store" do
     config = Config.load(handler: MyApp.Handler, monitor_store: MyApp.PgStore)
     assert config.monitor_store == MyApp.PgStore
   end

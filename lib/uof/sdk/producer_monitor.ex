@@ -42,18 +42,18 @@ defmodule UOF.SDK.ProducerMonitor do
   `request_id` is pending (cooling down, retrying, or parked while passive); a
   job with a `request_id` is in flight. The producer's `:recovering` status is
   the public projection of that job, not a separate orchestration decision.
-  Before any new job can issue HTTP, the monitor durably removes that producer
-  from the resumable set so a crash cannot restart from stale synchronized
-  state.
+  Before any new job can issue HTTP, the monitor durably marks that producer as
+  requiring recovery so a crash cannot restart from stale synchronized state.
 
   The recovery defaults follow the official SDK's recovery guidance and should
   be changed with care.
 
   ## Restart resume
 
-  The state store holds one atomic snapshot: producer checkpoints, the IDs that
-  may resume without recovery, and committed connection tokens. At startup that
-  snapshot is restored:
+  The state store holds a connection generation with committed tokens and one
+  durable record per producer. A producer may resume only when its synchronized
+  generation matches the current connection generation and it has a checkpoint.
+  At startup that state is restored:
 
     * A resumable producer with a checkpoint starts as `:resuming`. It becomes
       `:up` after processing catches up, an `alive` is heard, and both pipeline
@@ -62,15 +62,15 @@ defmodule UOF.SDK.ProducerMonitor do
       the current pipelines are ready. Recovery HTTP waits until both pipelines
       are observed. If that does not happen within one alive-inactivity
       interval, the monitor crashes so supervision restarts both pipelines.
-      Once ready, a changed token removes every producer from the resumable set
-      and starts recovery.
+      Once ready, a changed token advances the connection generation, which
+      invalidates every previously synchronized producer, and starts recovery.
     * A resumable producer gets one alive-inactivity interval to provide a
       current heartbeat; silence then follows the normal recovery path instead
       of leaving it in `:resuming` forever.
     * `subscribed=0` records recovery immediately, even if it races demotion or
-      connection startup; only the HTTP request waits. Producers absent from
-      the resumable set start `:down` and recover on their first subscribed
-      `alive`.
+      connection startup; only the HTTP request waits. Producers not
+      synchronized in the current connection generation start `:down` and
+      recover on their first subscribed `alive`.
 
   ## Control-plane ownership (multi-instance Pulsar)
 
@@ -106,7 +106,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   alias UOF.SDK.ProducerMonitor.Connections
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.ProducerMonitor.Store.Snapshot
+  alias UOF.SDK.ProducerMonitor.Store.ConnectionState
+  alias UOF.SDK.ProducerMonitor.Store.ProducerState
 
   require Logger
 
@@ -119,7 +120,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @type state :: %__MODULE__{
           producers: %{optional(integer()) => Producer.t()},
-          snapshot: Snapshot.t(),
+          connection_state: ConnectionState.t(),
+          producer_states: %{optional(integer()) => ProducerState.t()},
           connections: Connections.t(),
           ownership: ownership(),
           handler: module() | nil,
@@ -134,7 +136,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @enforce_keys [
     :producers,
-    :snapshot,
+    :connection_state,
+    :producer_states,
     :connections,
     :ownership,
     :handler,
@@ -232,18 +235,26 @@ defmodule UOF.SDK.ProducerMonitor do
   @impl true
   def init(opts) do
     monitor_store = Keyword.get(opts, :monitor_store, UOF.SDK.ProducerMonitor.Store.ETS)
-    snapshot = monitor_store.load()
+    connection_state = monitor_store.load_connection_state()
+    producer_states = monitor_store.load_producer_states()
 
     producers =
       Map.new(load_producers(opts), fn producer ->
-        producer = producer |> restore_producer(snapshot) |> Producer.configure_recovery(opts)
+        producer_state = Map.get(producer_states, producer.id, %ProducerState{})
+
+        producer =
+          producer
+          |> restore_producer(producer_state, connection_state.generation)
+          |> Producer.configure_recovery(opts)
+
         {producer.id, producer}
       end)
 
     state = %__MODULE__{
       producers: producers,
-      snapshot: snapshot,
-      connections: Connections.new(snapshot.connection_tokens),
+      connection_state: connection_state,
+      producer_states: producer_states,
+      connections: Connections.new(connection_state.tokens),
       ownership: Keyword.get(opts, :ownership, {:failover, :passive}),
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
@@ -482,7 +493,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state =
       state
       |> put_producer(producer)
-      |> update_snapshot(&Snapshot.require_recovery(&1, before.id))
+      |> require_recovery(before.id)
       |> notify_recovery(producer)
 
     {state, producer}
@@ -497,15 +508,9 @@ defmodule UOF.SDK.ProducerMonitor do
 
   # Resuming safely requires both durable eligibility and a checkpoint. The
   # current-session heartbeat, connection, and catch-up gates live in check/3.
-  defp restore_producer(producer, snapshot) do
-    if Snapshot.resumable?(snapshot, producer.id) do
-      case Snapshot.checkpoint(snapshot, producer.id) do
-        checkpoint when is_integer(checkpoint) ->
-          %{producer | status: :resuming, last_message_timestamp: checkpoint}
-
-        nil ->
-          producer
-      end
+  defp restore_producer(producer, producer_state, connection_generation) do
+    if ProducerState.resumable?(producer_state, connection_generation) do
+      %{producer | status: :resuming, last_message_timestamp: producer_state.checkpoint}
     else
       producer
     end
@@ -669,9 +674,11 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp commit_connection_change(state, connections) do
+    connection_state = state.monitor_store.commit_connection_change(connections.persisted)
+
     state
     |> Map.put(:connections, connections)
-    |> update_snapshot(&Snapshot.commit_connection_change(&1, connections.persisted, Map.keys(state.producers)))
+    |> Map.put(:connection_state, connection_state)
     |> recover_after_connection_change()
   end
 
@@ -698,25 +705,37 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   # Runtime status is not stored. `:resuming` is reconstructed at startup from
-  # the resumable-producer set and checkpoint.
+  # the producer checkpoint and its synchronized connection generation.
   defp persist_producer_state(state, after_) do
     resumable? = after_.status in [:up, :delayed]
 
     if resumable? do
-      update_snapshot(state, &Snapshot.mark_synchronized(&1, after_.id))
+      mark_synchronized(state, after_.id)
     else
-      update_snapshot(state, &Snapshot.require_recovery(&1, after_.id))
+      require_recovery(state, after_.id)
     end
   end
 
-  defp update_snapshot(state, update) do
-    snapshot = update.(state.snapshot)
+  defp require_recovery(state, id) do
+    producer_state = Map.get(state.producer_states, id, %ProducerState{})
 
-    if snapshot == state.snapshot do
+    if is_nil(producer_state.synchronized_generation) do
       state
     else
-      :ok = state.monitor_store.save(snapshot)
-      %{state | snapshot: snapshot}
+      producer_state = state.monitor_store.require_recovery(id)
+      put_producer_state(state, id, producer_state)
+    end
+  end
+
+  defp mark_synchronized(state, id) do
+    generation = state.connection_state.generation
+    producer_state = Map.get(state.producer_states, id, %ProducerState{})
+
+    if producer_state.synchronized_generation == generation do
+      state
+    else
+      producer_state = state.monitor_store.mark_synchronized(id, generation)
+      put_producer_state(state, id, producer_state)
     end
   end
 
@@ -735,7 +754,7 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp after_from_checkpoint(state, producer) do
-    case Snapshot.checkpoint(state.snapshot, producer.id) do
+    case Map.get(state.producer_states, producer.id, %ProducerState{}).checkpoint do
       timestamp when is_integer(timestamp) ->
         timestamp
         |> checkpoint_after_overlap(state.recovery_overlap_ms)
@@ -753,7 +772,18 @@ defmodule UOF.SDK.ProducerMonitor do
   defp checkpoint_after_overlap(timestamp, overlap_ms), do: max(timestamp - overlap_ms, 0)
 
   defp put_checkpoint(state, id, timestamp) do
-    update_snapshot(state, &Snapshot.advance_checkpoint(&1, id, timestamp))
+    producer_state = Map.get(state.producer_states, id, %ProducerState{})
+
+    if is_integer(producer_state.checkpoint) and producer_state.checkpoint >= timestamp do
+      state
+    else
+      producer_state = state.monitor_store.advance_checkpoint(id, timestamp)
+      put_producer_state(state, id, producer_state)
+    end
+  end
+
+  defp put_producer_state(state, id, producer_state) do
+    %{state | producer_states: Map.put(state.producer_states, id, producer_state)}
   end
 
   defp clamp_to_window(timestamp, %Producer{recovery_window_minutes: nil}, _now), do: timestamp

@@ -17,16 +17,16 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   ## Recovery sequencing
 
   Preparing a recovery and issuing its HTTP request are deliberately separate.
-  `UOF.SDK.ProducerMonitor` first calls `prepare_recovery/2`, durably removes the
-  producer from the resumable set, and publishes the `:recovering` transition.
+  `UOF.SDK.ProducerMonitor` first calls `prepare_recovery/2`, durably marks the
+  producer as requiring recovery, and publishes the `:recovering` transition.
   Only then does it call `initiate_recovery/1`. This ordering guarantees that a
-  crash after issuing the request cannot restart from stale resumable state.
+  crash after issuing the request cannot restart from stale synchronized state.
 
-  A reconnect is different: its snapshot invalidation is persisted before the
-  producers are visited, so `restart_recovery/2` can replace an in-flight job
-  and initiate it immediately. Failed requests, stalls, and ownership demotion
-  all return a job to pending state, but their callers intentionally choose
-  different reissue times.
+  A reconnect is different: the new connection generation is persisted before
+  the producers are visited, so `restart_recovery/2` can replace an in-flight
+  job and initiate it immediately. Failed requests, stalls, and ownership
+  demotion all return a job to pending state, but their callers intentionally
+  choose different reissue times.
 
     * `:down` — not synchronized and no recovery is pending
     * `:recovering` — waiting to request, requesting, or awaiting recovery

@@ -198,7 +198,7 @@ recoveries. AMQP monitors start active and do not use ownership callbacks.
 | `:handler` | Required | Your `UOF.SDK.MessageHandler` module |
 | `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}` |
 | `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
-| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Atomic monitor snapshot persistence |
+| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Connection and per-producer recovery persistence |
 | `:concurrency` | `10` | Broadway processor concurrency per feed session |
 | `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |
 | `:max_processing_delay_seconds` | `20` | Consumer-lag threshold before a producer becomes `:delayed` |
@@ -298,10 +298,10 @@ The UOF protocol requires every producer to be recovered before its markets are
 safe to act on. A gap in the message stream can happen on first connect,
 reconnect, or alive heartbeat timeout. When a gap is detected, the SDK:
 
-1. Uses the checkpoint in the monitor's in-memory snapshot, loaded from its
-   store at startup.
-2. Atomically removes the producer from the snapshot's resumable set before
-   performing external I/O.
+1. Uses the checkpoint in the producer's durable state, loaded from its store
+   at startup.
+2. Atomically marks the producer as requiring recovery before performing
+   external I/O.
 3. Calls `UOF.API.Recovery.recover/2` with a unique `request_id`.
 4. Requests incremental recovery if a checkpoint exists, or full recovery if it
    does not.
@@ -327,11 +327,11 @@ original timestamp so messages are not skipped on retry.
 
 > [!NOTE]
 > The default `UOF.SDK.ProducerMonitor.Store.ETS` is in-memory. Checkpoints,
-> resumability state, and connection tokens are lost on VM restart, so a full
-> recovery is issued on the next start. This is fine for development and
-> low-volume producers, but production applications should use a persistent
-> store. The ETS store does survive monitor/pipeline crashes within the same VM,
-> so crash-restarts still resume without recovering.
+> producer synchronization generations, and connection state are lost on VM
+> restart, so a full recovery is issued on the next start. This is fine for
+> development and low-volume producers, but production applications should use
+> a persistent store. The ETS store does survive monitor/pipeline crashes within
+> the same VM, so crash-restarts still resume without recovering.
 
 Checkpoints are owned by `ProducerMonitor` and advanced from subscribed system
 `alive` heartbeats after the producer is already in sync. Content messages and
@@ -349,25 +349,39 @@ behaviour and configure it:
 config :uof_sdk, monitor_store: MyApp.ProducerMonitorStore
 ```
 
-The behaviour requires only `load/0` and `save/1`. They read and atomically
-replace one monitor snapshot containing:
+The behaviour separates the committed connection state from each producer's
+durable recovery state. Connection state contains the system and content tokens
+plus a monotonically increasing generation. Producer state contains its
+checkpoint and the connection generation in which it was last synchronized.
+A producer may resume retained backlog only when it has a checkpoint and its
+synchronization generation matches the current connection generation.
 
-- recovery checkpoints by producer ID
-- the producer IDs that may resume retained backlog without recovery
-- the committed system and content connection tokens
+Implement these callbacks:
 
-Keeping these values in one snapshot prevents a crash from exposing a new
-connection token alongside stale producer safety state.
+- `load_connection_state/0` and `load_producer_states/0`
+- `commit_connection_change/1`, which must atomically store both tokens and
+  advance the connection generation
+- `advance_checkpoint/2`, which must advance one producer's checkpoint
+  monotonically
+- `require_recovery/1`, which clears one producer's synchronized generation
+- `mark_synchronized/2`, which records the current connection generation for
+  one producer
+
+Advancing the connection generation invalidates every producer synchronized in
+an older generation without a multi-producer transaction. If the monitor
+crashes after committing the new tokens but before issuing recovery, the
+generation mismatch still prevents an unsafe resume. If it crashes before the
+connection commit, the old tokens cause the change to be detected again.
 
 Recovery preparation is persisted before the HTTP request is issued. This
 ordering is deliberate: if the monitor crashes after requesting recovery, the
 next monitor must recover again rather than incorrectly resume from state that
 still claimed the producer was synchronized.
 
-`save/1` must atomically replace the complete snapshot. A snapshot must also
-have exactly one writer: its `ProducerMonitor`. Concurrent writes from another
-monitor, node, or administration tool are unsupported and may overwrite newer
-state.
+Each mutation callback must atomically update the connection record or one
+producer record as described above. A store must also have exactly one writer:
+its `ProducerMonitor`. Concurrent writes from another monitor, node, or
+administration tool are unsupported and may overwrite newer state.
 
 ### Restart resume
 
@@ -421,7 +435,7 @@ start it before the producer monitor.
 
 ```text
 UOF.SDK
-|-- ProducerMonitor.Store*     - optional configured snapshot-store child
+|-- ProducerMonitor.Store*     - optional configured monitor-state store child
 |-- ProducerMonitor            - producer health and recovery orchestration
 |-- SystemPipeline             - feed consumer for alive and snapshot_complete
 `-- ContentPipeline            - feed consumer for event content
@@ -445,17 +459,21 @@ lag detection. It also consumes session-scoped `alive` messages only as lag
 freshness markers for quiet producers.
 
 `UOF.SDK.ProducerMonitor` defines and owns its runtime state struct. It contains
-the producer aggregates, connection-session state, ownership, durable
-`UOF.SDK.ProducerMonitor.Store.Snapshot`, and runtime dependencies. The focused
-modules own their respective transitions:
+the producer aggregates, connection-session state, ownership, loaded durable
+connection and producer records, and runtime dependencies. The focused modules
+own their respective transitions:
 
 - `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
   health observations, lifecycle transitions, and the complete recovery state:
   static request configuration, cooldown history, the optional pending/in-flight
   job, HTTP attempts, and timers.
 - `UOF.SDK.ProducerMonitor.Connections` detects consume-session changes.
-- `UOF.SDK.ProducerMonitor.Store.Snapshot` owns durable-state mutations.
-- `UOF.SDK.ProducerMonitor.Store` atomically loads and saves snapshots.
+- `UOF.SDK.ProducerMonitor.Store.ConnectionState` identifies the committed
+  consume sessions and their generation.
+- `UOF.SDK.ProducerMonitor.Store.ProducerState` records checkpoints and the
+  generation in which each producer was synchronized.
+- `UOF.SDK.ProducerMonitor.Store` defines granular atomic persistence
+  operations for those records.
 
 The `ProducerMonitor` GenServer is the public coordination boundary: it routes
 events, applies global ownership and connection gates, persists transitions,

@@ -96,6 +96,15 @@ needed, and logs incoming messages through `UOF.SDK.LogHandler`.
 > Configure one transport. The SDK derives the separate Broadway producers it
 > needs for content and system messages.
 
+The transports have different scaling models in this SDK. Pulsar supports
+horizontally distributed content processing: instances sharing a subscription
+divide messages through a Key-Shared subscription, while one instance owns
+system processing through Failover. The direct AMQP transport creates an
+exclusive queue per SDK instance, so instances do not share the workload; it
+is intended primarily for single-instance deployments with local Broadway
+concurrency. This distinction applies to the SDK's transport configuration,
+not to RabbitMQ and Pulsar generally.
+
 ### AMQP
 
 ```elixir

@@ -23,7 +23,7 @@ defmodule UofSdk.MixProject do
   defp deps do
     [
       {:uof_api, "~> 2.1"},
-      {:uof_schemas, "~> 0.2.0"},
+      {:uof_schemas, "~> 0.3.0"},
       {:broadway, "~> 1.3"},
       {:broadway_rabbitmq, "~> 0.8", optional: true},
       {:off_broadway_pulsar, "~> 1.5", optional: true},

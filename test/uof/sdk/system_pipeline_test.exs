@@ -147,12 +147,10 @@ defmodule UOF.SDK.SystemPipelineTest do
 
     Broadway.test_message(name, ~s(<alive product="1" timestamp="42" subscribed="1"/>),
       metadata: %{
-        metadata: %{
-          partition_key: "-.-.-.alive.-.-.-.-",
-          properties: [
-            %{key: "__rabbitmq_queue_name", value: "uof-system"},
-            %{key: "__rabbitmq_consumer_tag", value: "ctag-1"}
-          ]
+        key: "-.-.-.alive.-.-.-.-",
+        properties: %{
+          "__rabbitmq_queue_name" => "uof-system",
+          "__rabbitmq_consumer_tag" => "ctag-1"
         }
       }
     )

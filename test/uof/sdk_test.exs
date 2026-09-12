@@ -97,7 +97,7 @@ defmodule UOF.SDKTest do
 
   test "supervises a Pulsar client only for the Pulsar transport" do
     assert {:ok, {_flags, amqp_children}} = UOF.SDK.init(handler: MyApp.Handler)
-    refute Enum.any?(amqp_children, &(&1.id == Pulsar.Client))
+    refute Enum.any?(amqp_children, &(&1.id == :uof_sdk_pulsar))
 
     assert {:ok, {_flags, pulsar_children}} =
              UOF.SDK.init(
@@ -106,7 +106,7 @@ defmodule UOF.SDKTest do
              )
 
     assert Enum.any?(pulsar_children, fn child ->
-             child.id == Pulsar.Client and
+             child.id == :uof_sdk_pulsar and
                child.start ==
                  {Pulsar.Client, :start_link, [[name: :uof_sdk_pulsar, host: "pulsar://localhost:6650"]]}
            end)

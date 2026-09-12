@@ -14,9 +14,10 @@ defmodule UOF.SDK.MessageMetadata do
   end
 
   def routing_key(%Message{metadata: metadata}, :pulsar_rabbitmq_source, _key) do
-    partition_key(metadata[:single_metadata]) ||
-      partition_key(metadata[:metadata]) ||
-      ""
+    case metadata[:key] do
+      rk when is_binary(rk) -> rk
+      _ -> ""
+    end
   end
 
   # Both built-in adapters resolve the token to the AMQP consumer tag of the
@@ -33,47 +34,11 @@ defmodule UOF.SDK.MessageMetadata do
   def connection_token(%Message{metadata: metadata}, :amqp, key), do: Map.get(metadata, key)
 
   def connection_token(%Message{metadata: metadata}, :pulsar_rabbitmq_source, _key) do
-    case properties(metadata) do
+    case metadata[:properties] do
       %{"__rabbitmq_consumer_tag" => consumer_tag} -> consumer_tag
       _properties -> nil
     end
   end
-
-  defp partition_key(values) when is_list(values) do
-    Enum.find_value(values, &partition_key/1)
-  end
-
-  defp partition_key(%{partition_key: key}) when is_binary(key), do: key
-  defp partition_key(_metadata), do: nil
-
-  defp properties(metadata) do
-    metadata
-    |> Map.take([:single_metadata, :metadata])
-    |> Map.values()
-    |> Enum.reduce(%{}, &Map.merge(&2, properties_from_metadata(&1)))
-  end
-
-  defp properties_from_metadata(values) when is_list(values) do
-    values
-    |> Enum.map(&properties_from_metadata/1)
-    |> Enum.reduce(%{}, &Map.merge(&2, &1))
-  end
-
-  defp properties_from_metadata(%{properties: properties}), do: properties_from_key_values(properties)
-  defp properties_from_metadata(_metadata), do: %{}
-
-  defp properties_from_key_values(values) when is_list(values) do
-    Map.new(values, fn
-      %{key: key, value: value} -> {key, value}
-      %{"key" => key, "value" => value} -> {key, value}
-      {key, value} -> {to_string(key), value}
-    end)
-  end
-
-  defp properties_from_key_values(values) when is_map(values),
-    do: Map.new(values, fn {key, value} -> {to_string(key), value} end)
-
-  defp properties_from_key_values(_values), do: %{}
 
   # Custom AMQP producers may not opt in to BroadwayRabbitMQ's `:consumer_tag`
   # metadata. Preserve the previous reconnect token for those producers; a pid

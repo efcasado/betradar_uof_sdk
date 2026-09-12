@@ -199,7 +199,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     })
 
     xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
-    metadata = %{metadata: %{partition_key: "hi.-.live.odds_change.1.sr:match.12345.-"}}
+    metadata = %{key: "hi.-.live.odds_change.1.sr:match.12345.-"}
 
     Broadway.test_message(name, xml, metadata: metadata)
 
@@ -306,12 +306,10 @@ defmodule UOF.SDK.ContentPipelineTest do
 
     Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
       metadata: %{
-        metadata: %{partition_key: "-.-.-.alive.-.-.-.-"},
-        single_metadata: %{
-          properties: [
-            %{key: "__rabbitmq_queue_name", value: "uof-content"},
-            %{key: "__rabbitmq_consumer_tag", value: "ctag-1"}
-          ]
+        key: "-.-.-.alive.-.-.-.-",
+        properties: %{
+          "__rabbitmq_queue_name" => "uof-content",
+          "__rabbitmq_consumer_tag" => "ctag-1"
         }
       }
     )
@@ -341,12 +339,10 @@ defmodule UOF.SDK.ContentPipelineTest do
 
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
       metadata: %{
-        metadata: %{
-          partition_key: "hi.-.live.odds_change.1.sr:match.1.-",
-          properties: [
-            %{key: "__rabbitmq_queue_name", value: "uof-content"},
-            %{key: "__rabbitmq_consumer_tag", value: "ctag-1"}
-          ]
+        key: "hi.-.live.odds_change.1.sr:match.1.-",
+        properties: %{
+          "__rabbitmq_queue_name" => "uof-content",
+          "__rabbitmq_consumer_tag" => "ctag-1"
         }
       }
     )

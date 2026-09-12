@@ -6,7 +6,6 @@ defmodule UOF.SDK.Transport do
 
   @exchange "unifiedfeed"
   @pulsar_client :uof_sdk_pulsar
-  @pulsar_conn_opts [:socket_opts, :auth, :conn_timeout]
 
   @content_message_types ~w[
     odds_change
@@ -78,25 +77,27 @@ defmodule UOF.SDK.Transport do
     ensure_adapter!(Producer, :off_broadway_pulsar, :pulsar)
 
     host = Keyword.fetch!(opts, :host)
-    Keyword.fetch!(opts, :topic)
+    topic = Keyword.fetch!(opts, :topic)
     subscription = Keyword.fetch!(opts, :subscription)
 
     client_opts =
       opts
       |> Keyword.get(:conn_opts, [])
-      |> Keyword.take(@pulsar_conn_opts)
       |> Keyword.merge(name: @pulsar_client, host: host)
 
     base_opts =
       opts
       |> Keyword.drop([
         :host,
+        :topic,
+        :topics,
         :conn_opts,
         :client,
         :routing_key_metadata_key,
         :connection_token_metadata_key
       ])
       |> Keyword.put(:client, @pulsar_client)
+      |> Keyword.put(:topics, [topic])
 
     # The system subscription is Failover, so the broker elects one instance
     # as its sole receiver. Ownership reports feed ProducerMonitor, which holds
@@ -118,8 +119,8 @@ defmodule UOF.SDK.Transport do
       # Neither producer carries :host, so both reuse this one connection
       # context instead of each calling Pulsar.start/1.
       children: [{Client, client_opts}],
-      content: pulsar_producer(base_opts, subscription, :content, :Key_Shared),
-      system: pulsar_producer(system_opts, subscription, :system, :Failover),
+      content: pulsar_producer(base_opts, subscription, :content, :key_shared),
+      system: pulsar_producer(system_opts, subscription, :system, :failover),
       ownership: {:failover, :passive},
       metadata_adapter: :pulsar_rabbitmq_source,
       routing_key_metadata_key: :routing_key,

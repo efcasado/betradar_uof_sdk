@@ -454,58 +454,13 @@ start it before the producer monitor.
 
 ## Architecture
 
-`UOF.SDK` is a library supervisor that starts the following components in order:
+The SDK supervises a producer monitor, a shared transport client, and separate
+Broadway pipelines for system and content messages. Direct AMQP uses one connection
+with a channel per pipeline; Pulsar uses Failover for system processing and Key-Shared
+for distributed content delivery.
 
-```text
-UOF.SDK
-|-- ProducerMonitor.Store*     - optional configured monitor-state store child
-|-- ProducerMonitor            - producer health and recovery orchestration
-|-- Transport client           - shared AMQP connection owner or Pulsar client
-|-- SystemPipeline             - feed consumer for alive and snapshot_complete
-`-- ContentPipeline            - feed consumer for event content
-```
-
-`*` The store appears in the supervision tree only when the configured
-`UOF.SDK.ProducerMonitor.Store` implementation provides `child_spec/1`.
-
-Messages flow in one direction:
-
-1. Pipelines receive raw AMQP or Pulsar messages.
-2. The SDK decodes the XML payload.
-3. The SDK calls your `MessageHandler`.
-
-`SystemPipeline` owns system traffic such as `alive` and `snapshot_complete`.
-It notifies `ProducerMonitor` for producer lifecycle, recovery correlation, and
-checkpoint advancement.
-
-`ContentPipeline` owns event content and reports content-queue timestamps for
-lag detection. It also consumes session-scoped `alive` messages only as lag
-freshness markers for quiet producers.
-
-`UOF.SDK.ProducerMonitor` defines and owns its runtime state struct. It contains
-the producer aggregates, connection-session state, ownership, loaded durable
-session and producer-progress records, and runtime dependencies. The focused
-modules own their respective transitions:
-
-- `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
-  health observations, lifecycle transitions, and the complete recovery state:
-  static request configuration, cooldown history, the optional pending/in-flight
-  job, HTTP attempts, and timers.
-- `UOF.SDK.ProducerMonitor.Connections` detects consume-session changes.
-- `UOF.SDK.ProducerMonitor.Store.Session` identifies the committed consume
-  sessions and their generation.
-- `UOF.SDK.ProducerMonitor.Store.ProducerProgress` records checkpoints and the
-  generation in which each producer was synchronized.
-- `UOF.SDK.ProducerMonitor.Store` defines granular atomic persistence
-  operations for those records.
-
-The `ProducerMonitor` GenServer is the public coordination boundary: it routes
-events, applies global ownership and connection gates, persists transitions,
-and publishes status callbacks. `UOF.SDK.producers/0` reads its runtime state
-through a `GenServer.call`.
-
-For Pulsar transports, the SDK reads the original AMQP routing key from the
-Pulsar partition key produced by the RabbitMQ source connector.
+See the [architecture guide](docs/architecture.md) for process ownership, message flow,
+startup, recovery, persistence, and restart behaviour.
 
 ## Integration testing
 

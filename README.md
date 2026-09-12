@@ -126,9 +126,12 @@ config :uof_api,
   auth_token: System.get_env("UOF_ACCESS_TOKEN")
 ```
 
-`transport: {:amqp, connection: [...]}` is passed to
-[`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html)
-for both pipelines, with SDK-owned bindings for content and system traffic.
+`transport: {:amqp, connection: [...]}` configures one supervised AMQP connection
+shared by both [`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html)
+pipelines. Each pipeline
+uses its own channel and exclusive queue, with SDK-owned bindings for content
+and system traffic. Channel restarts leave the shared connection open; connection
+loss reconnects both consumers, whose new consumer tags trigger recovery.
 
 Known Betradar AMQP hosts:
 
@@ -438,6 +441,7 @@ start it before the producer monitor.
 UOF.SDK
 |-- ProducerMonitor.Store*     - optional configured monitor-state store child
 |-- ProducerMonitor            - producer health and recovery orchestration
+|-- Transport client           - shared AMQP connection owner or Pulsar client
 |-- SystemPipeline             - feed consumer for alive and snapshot_complete
 `-- ContentPipeline            - feed consumer for event content
 ```

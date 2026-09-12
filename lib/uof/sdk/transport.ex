@@ -3,6 +3,7 @@ defmodule UOF.SDK.Transport do
 
   alias OffBroadway.Pulsar.Producer
   alias Pulsar.Client
+  alias UOF.SDK.AMQP.Connection
 
   @exchange "unifiedfeed"
   @pulsar_client :uof_sdk_pulsar
@@ -50,9 +51,9 @@ defmodule UOF.SDK.Transport do
     connection = Keyword.get(opts, :connection, [])
 
     %{
-      children: [],
-      content: rabbitmq_producer(connection, content_bindings(node_id)),
-      system: rabbitmq_producer(connection, system_bindings(node_id)),
+      children: [{Connection, connection: connection}],
+      content: rabbitmq_producer(content_bindings(node_id)),
+      system: rabbitmq_producer(system_bindings(node_id)),
       ownership: :always_active,
       metadata_adapter: :amqp,
       routing_key_metadata_key: :routing_key,
@@ -63,10 +64,11 @@ defmodule UOF.SDK.Transport do
   # :consumer_tag metadata is the per-consume connection token used for
   # reconnect detection; the amqp library includes it in every basic_deliver
   # even though broadway_rabbitmq doesn't document it.
-  defp rabbitmq_producer(connection, bindings) do
+  defp rabbitmq_producer(bindings) do
     {BroadwayRabbitMQ.Producer,
      queue: "",
-     connection: connection,
+     client: UOF.SDK.AMQP.Client,
+     connection: {:custom_pool, Connection, Connection},
      declare: [exclusive: true, auto_delete: true],
      bindings: bindings,
      on_failure: :reject,

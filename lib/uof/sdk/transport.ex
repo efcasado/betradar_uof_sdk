@@ -48,7 +48,7 @@ defmodule UOF.SDK.Transport do
   defp amqp_producers(opts, node_id) do
     ensure_adapter!(BroadwayRabbitMQ.Producer, :broadway_rabbitmq, :amqp)
 
-    connection = Keyword.get(opts, :connection, [])
+    connection = opts |> Keyword.get(:connection, []) |> Connection.validate!()
 
     %{
       children: [{Connection, connection: connection}],

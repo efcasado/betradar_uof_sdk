@@ -1,97 +1,136 @@
-if Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool) do
-  defmodule UOF.SDK.AMQP.Connection do
-    @moduledoc false
+defmodule UOF.SDK.AMQP.Connection do
+  @moduledoc false
 
+  # Betradar permits one connection, while BroadwayRabbitMQ's default client
+  # opens a connection per producer. Its ChannelPool extension lets both SDK
+  # pipelines share one connection and obtain separate channels.
+  # This supervised coordinator delegates socket ownership to Session so
+  # checkouts can return promptly while a connection attempt is in progress.
+
+  use GenServer
+
+  alias AMQP.Channel
+  alias BroadwayRabbitMQ.AmqpClient
+  alias UOF.SDK.AMQP.Error
+  alias UOF.SDK.AMQP.Session
+
+  if Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool) do
     @behaviour BroadwayRabbitMQ.ChannelPool
-
-    use GenServer
-
-    alias AMQP.Channel
-    alias AMQP.Connection
-
-    # Both producers check out channels from this single connection owner.
-    # Connection attempts are serialized here; Broadway owns retry/backoff.
-    def start_link(opts) do
-      GenServer.start_link(__MODULE__, Keyword.fetch!(opts, :connection), name: Keyword.get(opts, :name, __MODULE__))
-    end
-
-    @impl GenServer
-    def init(options) do
-      Process.flag(:trap_exit, true)
-      {:ok, %{options: options, connection: nil}}
-    end
-
-    @impl BroadwayRabbitMQ.ChannelPool
-    def checkout_channel(server) do
-      # The AMQP client's connection timeout bounds the attempt. A shorter
-      # call timeout could leave a successful connection behind the caller.
-      with {:ok, connection} <- GenServer.call(server, :connection, :infinity) do
-        # Open in the producer process so SelectiveConsumer belongs to it.
-        case Channel.open(connection) do
-          {:ok, channel} -> {:ok, channel}
-          {:error, reason} -> pool_error(reason)
-        end
-      end
-    catch
-      :exit, reason -> pool_error(reason)
-    end
-
-    @impl BroadwayRabbitMQ.ChannelPool
-    def checkin_channel(_server, channel) do
-      # Never close the shared connection when a producer stops or its queue
-      # setup fails. Channels are disposed of rather than reused.
-      case Channel.close(channel) do
-        :ok -> :ok
-        {:error, reason} -> pool_error(reason)
-      end
-    catch
-      :exit, {:noproc, _} -> :ok
-      :exit, reason -> pool_error(reason)
-    end
-
-    @impl GenServer
-    def handle_call(:connection, _from, state) do
-      if state.connection && Process.alive?(state.connection.pid) do
-        {:reply, {:ok, state.connection}, state}
-      else
-        case open(state.options) do
-          {:ok, connection} ->
-            Process.link(connection.pid)
-            {:reply, {:ok, connection}, %{state | connection: connection}}
-
-          {:error, reason} ->
-            {:reply, pool_error(reason), %{state | connection: nil}}
-        end
-      end
-    end
-
-    @impl GenServer
-    def handle_info({:EXIT, pid, _reason}, %{connection: %{pid: pid}} = state) do
-      {:noreply, %{state | connection: nil}}
-    end
-
-    # An old connection's EXIT can arrive after a checkout has replaced it.
-    def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
-
-    @impl GenServer
-    def terminate(_reason, %{connection: nil}), do: :ok
-
-    def terminate(_reason, %{connection: connection}) do
-      if Process.alive?(connection.pid), do: Connection.close(connection)
-    catch
-      :exit, _reason -> :ok
-    end
-
-    defp open(options) do
-      Connection.open(options)
-    catch
-      # Mirror BroadwayRabbitMQ's cleanup of a timed-out connect call: the
-      # underlying AMQP process must not establish an orphan connection later.
-      :exit, {:timeout, {:gen_server, :call, [pid, :connect, timeout]}} when is_integer(timeout) ->
-        Process.exit(pid, :kill)
-        {:error, :timeout}
-    end
-
-    defp pool_error(reason), do: {:error, RuntimeError.exception("AMQP channel checkout failed: #{inspect(reason)}")}
   end
+
+  @compile {:no_warn_undefined, [Channel, AmqpClient]}
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, validate!(Keyword.fetch!(opts, :connection)), name: __MODULE__)
+  end
+
+  # Reuse the adapter's validation before replacing connection options with a
+  # custom pool. This preserves URI and unknown-key checks without a second schema.
+  def validate!(options) when is_binary(options) or is_list(options) do
+    case AmqpClient.init(queue: "", declare: [exclusive: true], connection: options) do
+      {:ok, _} -> options
+      {:error, reason} -> raise ArgumentError, "invalid AMQP connection: #{reason}"
+    end
+  end
+
+  def validate!(other) do
+    raise ArgumentError, "expected AMQP :connection to be a keyword list or a URI, got: #{inspect(other)}"
+  end
+
+  @impl true
+  def init(options), do: {:ok, %{options: options, session: nil, connection: nil, error: nil}}
+
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool), do: BroadwayRabbitMQ.ChannelPool, else: false)
+  def checkout_channel(server) do
+    with {:ok, connection} <- GenServer.call(server, :connection) do
+      # Open in the producer process so SelectiveConsumer belongs to it.
+      case Channel.open(connection) do
+        {:ok, channel} -> {:ok, channel}
+        {:error, reason} -> {:error, %Error{operation: :checkout, reason: reason}}
+      end
+    end
+  catch
+    :exit, reason ->
+      if Error.retryable?(reason) do
+        {:error, %Error{operation: :checkout, reason: reason}}
+      else
+        :erlang.raise(:exit, reason, __STACKTRACE__)
+      end
+  end
+
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool), do: BroadwayRabbitMQ.ChannelPool, else: false)
+  def checkin_channel(_server, channel) do
+    # Discard rather than reuse. A successful close replies before the channel
+    # process exits; wait for DOWN instead of killing that normal shutdown and
+    # turning it into an internal error on the shared connection.
+    ref = Process.monitor(channel.pid)
+
+    try do
+      Channel.close(channel)
+    catch
+      :exit, _ -> :ok
+    end
+
+    receive do
+      {:DOWN, ^ref, :process, _, _} -> :ok
+    after
+      1_000 ->
+        Process.exit(channel.pid, :kill)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} -> :ok
+        end
+    end
+  end
+
+  @impl true
+  def handle_call(:connection, _, %{connection: %{pid: pid} = connection} = state) do
+    if Process.alive?(pid) do
+      {:reply, {:ok, connection}, state}
+    else
+      connect(%{state | connection: nil})
+    end
+  end
+
+  def handle_call(:connection, _, state), do: connect(state)
+
+  @impl true
+  def handle_info({:connected, pid, connection}, %{session: {pid, _}} = state) do
+    {:noreply, %{state | connection: connection, error: nil}}
+  end
+
+  def handle_info({:connect_failed, pid, reason}, %{session: {pid, _}} = state) do
+    {:noreply, %{state | error: reason}}
+  end
+
+  def handle_info({:DOWN, ref, :process, _, :normal}, %{session: {_, ref}} = state) do
+    {:noreply, %{state | session: nil, connection: nil}}
+  end
+
+  def handle_info({:DOWN, ref, :process, _, reason}, %{session: {_, ref}} = state) do
+    {:stop, reason, state}
+  end
+
+  defp connect(%{error: reason} = state) when not is_nil(reason) do
+    {:reply, {:error, %Error{operation: :connect, reason: reason}}, %{state | error: nil}}
+  end
+
+  defp connect(%{session: nil} = state) do
+    case Session.start(self(), state.options) do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+        connecting(%{state | session: {pid, ref}})
+
+      {:error, {:already_started, _}} ->
+        # A previous owner's session is still finishing its handshake/cleanup.
+        connecting(state)
+
+      {:error, reason} ->
+        {:reply, {:error, %Error{operation: :connect, reason: reason}}, state}
+    end
+  end
+
+  defp connect(state), do: connecting(state)
+
+  defp connecting(state), do: {:reply, {:error, %Error{operation: :connect, reason: :connecting}}, state}
 end

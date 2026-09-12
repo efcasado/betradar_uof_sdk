@@ -133,6 +133,21 @@ uses its own channel and exclusive queue, with SDK-owned bindings for content
 and system traffic. Channel restarts leave the shared connection open; connection
 loss reconnects both consumers, whose new consumer tags trigger recovery.
 
+Connection establishment runs in a monitored session. While it is connecting,
+checkouts return promptly and Broadway retries with backoff. If the SDK owner
+stops during a handshake, that session finishes the bounded AMQP open and closes
+its result; a replacement attempt waits for cleanup to complete.
+
+Connection-open spans remain available at
+`[:broadway_rabbitmq, :amqp, :open_connection, :start | :stop | :exception]`.
+For returned failures, `[:uof_sdk, :amqp, :setup_failure]` reports the original
+`:operation`, `:reason`, and `:retryable` classification. BroadwayRabbitMQ 0.8 requires a known reason to
+enter its backoff path, so retryable failures use its `:econnrefused` alias;
+use the SDK event for the actual cause. Authentication and protocol rejections
+retain their original reasons and follow Broadway's failure policy. Unexpected
+exits and exceptions propagate after channel cleanup; only known transient
+transport failures are converted to retries.
+
 Known Betradar AMQP hosts:
 
 | Environment | Host |

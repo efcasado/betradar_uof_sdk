@@ -83,11 +83,23 @@ Betradar unifiedfeed exchange
  SystemPipeline   ContentPipeline
 ```
 
-`UOF.SDK.AMQP.Connection` implements BroadwayRabbitMQ's channel-checkout interface. It
-serializes connection creation and returns a separate channel to each producer. Channels
-are opened in the requesting producer process so their consumer ownership remains local
-to Broadway. Checking a channel back in closes that channel; the connection owner controls
-the lifetime of the shared connection.
+`UOF.SDK.AMQP.Connection` is the supervised coordinator implementing BroadwayRabbitMQ's
+channel-checkout interface. It starts and monitors a `UOF.SDK.AMQP.Session` process that owns
+connection establishment and the socket lifetime. The Session is monitored atomically at
+startup, so even an immediate connection failure retains its exit reason.
+
+Connection establishment runs asynchronously. While an attempt is pending, checkouts return
+`:connecting` and Broadway retries with backoff. Once connected, each producer opens its own
+channel so its consumer ownership remains local to Broadway. Checking a channel back in
+requests an AMQP close; the protocol finishes teardown without force-killing the channel
+and disrupting the shared connection.
+
+The Session is outside the SDK supervision tree and monitors the coordinator. If the
+coordinator stops during a handshake, the Session finishes the bounded open and closes its
+result. Its registered name prevents a replacement attempt until cleanup completes. SDK
+supervisor shutdown can therefore return before socket cleanup finishes. Connection cleanup
+waits for graceful termination and uses a bounded wait before forcing disposal of the socket
+process if it remains alive after the close call.
 
 The system queue receives `alive` and `snapshot_complete`. The content queue receives event
 messages and `alive` messages used to observe content freshness. Bindings also account for
@@ -99,7 +111,14 @@ session receives a new consumer tag, which the monitor uses to detect a possible
 
 Broadway owns reconnect backoff. A channel failure replaces that channel while the shared
 connection remains available. A connection failure causes both consumers to obtain channels
-on a replacement connection. Stopping the connection owner closes the connection as well.
+on a replacement connection. Observing a previous transient connection failure also starts
+the next attempt, while preserving the failure reason for reporting.
+
+`UOF.SDK.AMQP.Client` adapts channel setup to BroadwayRabbitMQ's retry contract. Known transient
+failures, including normal shutdown during a pending AMQP call, use backoff. Permanent
+failures retain their cause, and unexpected exits and exceptions propagate after channel
+cleanup. Permission rejection raises explicitly because Broadway otherwise retries it.
+The SDK's setup-failure telemetry preserves the original reason and retry classification.
 
 ## Pulsar
 

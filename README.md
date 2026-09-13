@@ -161,21 +161,13 @@ config :uof_sdk,
   }
 ```
 
-The RabbitMQ source connector and Pulsar deployment must meet these requirements:
+Use the SDK's RabbitMQ source connector to supply the feed payload and metadata.
+The current SDK requires a non-partitioned topic or a topic with exactly one
+partition so its system subscription has one active recovery coordinator.
 
-- Use a non-partitioned topic or a topic with exactly one partition.
-- Publish the AMQP routing key as the Pulsar message key.
-- Publish the original XML body as the Pulsar payload.
-- Publish a server-generated consumer tag (`amq.ctag-…`), unique per consume
-  session, in the `__rabbitmq_consumer_tag` message property. Do not pin a fixed tag.
-- Use key-based batching on the connector's Pulsar producer if batching is enabled,
-  or disable batching. Mixed-key batches break Key-Shared routing.
-- Preserve retained backlog: disable message TTL or set it above the worst-case
-  downtime, and use a `producer_exception` backlog quota policy to prevent eviction.
-
-See the [Pulsar architecture](docs/architecture.md#pulsar) for ownership and
-failover, and [restart resume](docs/architecture.md#restart-resume) for continuity
-requirements across SDK restarts.
+See the [Pulsar architecture](docs/architecture.md#pulsar) for connector behavior,
+batching, backlog retention, and failover, and
+[restart resume](docs/architecture.md#restart-resume) for restart continuity.
 
 ### Options
 

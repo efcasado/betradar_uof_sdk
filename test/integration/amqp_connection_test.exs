@@ -74,7 +74,10 @@ defmodule UOF.SDK.AMQP.ConnectionIntegrationTest do
         end)
 
       opts =
-        Keyword.put(opts, :after_connect, fn channel ->
+        opts
+        # Production backoff can exceed the test's receive deadline.
+        |> Keyword.merge(backoff_min: 10, backoff_max: 50, backoff_type: :exp)
+        |> Keyword.put(:after_connect, fn channel ->
           send(parent, {:channel, kind, channel})
           :ok
         end)
@@ -107,6 +110,10 @@ defmodule UOF.SDK.AMQP.ConnectionIntegrationTest do
     assert_receive {:channel, :content, replacement}, 5_000
     assert replacement.conn.pid == system.conn.pid
     assert Process.alive?(system.pid)
+
+    # after_connect runs before queue setup and subscription. Wait for that
+    # setup to complete before exercising the separate socket-failure case.
+    for producer <- Broadway.producer_names(Module.concat(__MODULE__, :content)), do: :sys.get_state(producer)
 
     # A socket failure must replace both channels on one new connection.
     :ok = AMQP.Connection.close(system.conn)

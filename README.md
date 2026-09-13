@@ -126,28 +126,14 @@ config :uof_api,
   auth_token: System.get_env("UOF_ACCESS_TOKEN")
 ```
 
-`transport: {:amqp, connection: [...]}` configures one supervised AMQP connection
-shared by both [`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html)
-pipelines. Each pipeline
-uses its own channel and exclusive queue, with SDK-owned bindings for content
-and system traffic. Channel restarts leave the shared connection open; connection
-loss reconnects both consumers, whose new consumer tags trigger recovery.
+`transport: {:amqp, connection: [...]}` configures one shared AMQP connection,
+with a separate channel and exclusive queue for each pipeline. See the
+[direct AMQP architecture](docs/architecture.md#direct-amqp) for connection
+ownership, reconnection, and failure handling.
 
-Connection establishment runs in a monitored session. While it is connecting,
-checkouts return promptly and Broadway retries with backoff. If the SDK owner
-stops during a handshake, that session finishes the bounded AMQP open and closes
-its result; a replacement attempt waits for cleanup to complete.
-
-Connection-open spans remain available at
-`[:broadway_rabbitmq, :amqp, :open_connection, :start | :stop | :exception]`.
-For returned failures, `[:uof_sdk, :amqp, :setup_failure]` reports the original
-`:operation`, `:reason`, and `:retryable` classification. BroadwayRabbitMQ 0.8 requires a known reason to
-enter its backoff path, so retryable failures use its `:econnrefused` alias;
-use the SDK event for the actual cause. Authentication and protocol rejections
-retain their original reasons and follow Broadway's failure policy. Unexpected
-exits and exceptions propagate after channel cleanup; only known transient
-transport failures are converted to retries. Permission rejection
-(`:not_allowed`) raises explicitly because Broadway otherwise retries it.
+Custom AMQP producers sharing a connection must provide `:consumer_tag` metadata
+or an explicit reconnect token to detect channel-only reconnects. The legacy
+connection-pid fallback detects only connection replacement.
 
 Known Betradar AMQP hosts:
 
@@ -159,10 +145,10 @@ Known Betradar AMQP hosts:
 
 ### Pulsar
 
-For Pulsar, configure one topic and base subscription. The SDK derives the
-content subscription as Key-Shared and the system subscription as Failover.
-It starts one supervised Pulsar client named `:uof_sdk_pulsar`; both subscriptions
-share that client, and it is not started when using the AMQP transport.
+For Pulsar, configure one topic and base subscription. Use the same topic and
+base subscription across SDK instances that should share content delivery. The
+SDK derives `<subscription>-content` (Key-Shared) and `<subscription>-system`
+(Failover), sharing one supervised Pulsar client.
 
 ```elixir
 config :uof_sdk,
@@ -175,44 +161,21 @@ config :uof_sdk,
   }
 ```
 
-Pulsar support assumes the SDK's RabbitMQ source connector contract:
+The RabbitMQ source connector and Pulsar deployment must meet these requirements:
 
-- The RabbitMQ source connector produces to a Pulsar topic with a single
-  partition (a non-partitioned topic, or a partitioned topic with exactly one
-  partition). Failover subscription ownership is assigned per partition, so
-  with multiple partitions different SDK instances can each own a slice of the
-  system subscription — `alive` and `snapshot_complete` messages then split
-  across instances and no single instance holds the control plane (producer
-  health tracking and recovery triggering).
-- The AMQP routing key is published as the Pulsar message key.
-- The original XML body is published as the Pulsar payload.
-- `__rabbitmq_consumer_tag` is published as a message property and is a
-  server-generated consumer tag (`amq.ctag-…`), unique per consume session. A
-  connector that pins a fixed consumer tag blinds reconnect detection.
+- Use a non-partitioned topic or a topic with exactly one partition.
+- Publish the AMQP routing key as the Pulsar message key.
+- Publish the original XML body as the Pulsar payload.
+- Publish a server-generated consumer tag (`amq.ctag-…`), unique per consume
+  session, in the `__rabbitmq_consumer_tag` message property. Do not pin a fixed tag.
+- Use key-based batching on the connector's Pulsar producer if batching is enabled,
+  or disable batching. Mixed-key batches break Key-Shared routing.
+- Preserve retained backlog: disable message TTL or set it above the worst-case
+  downtime, and use a `producer_exception` backlog quota policy to prevent eviction.
 
-The SDK uses the consumer tag as a reconnect token and triggers recovery when
-it changes: a new tag means a new upstream consume session, so a delivery gap
-was possible. The AMQP transport uses its own consumer tag the same way.
-Custom AMQP producers sharing a connection must provide `:consumer_tag` metadata
-or an explicit reconnect token to detect channel-only reconnects. The legacy
-connection-pid fallback detects only connection replacement.
-
-#### Multi-instance control plane
-
-With multiple SDK instances on the same subscription, the broker elects one
-instance as the Failover system-subscription owner and notifies each instance
-of its role. The SDK wires that signal to `UOF.SDK.ProducerMonitor`: only the
-active instance runs periodic producer health transitions and issues recovery
-requests, while passive instances keep consuming their Key-Shared content
-share. A recovery-required alive racing demotion is retained but not issued
-until promotion. On promotion, the new owner recovers each producer from its
-own last-known checkpoint. The signal is best-effort, not a fencing mechanism:
-briefly-overlapping actives can issue a duplicate recovery request, which
-wastes recovery quota but is otherwise harmless.
-`UOF.SDK.recover/2` returns `{:error, :passive}` on a standby instance.
-Pulsar monitors start passive and wait for the initial broker ownership report
-before issuing recoveries. AMQP monitors start active and do not use ownership
-callbacks.
+See the [Pulsar architecture](docs/architecture.md#pulsar) for ownership and
+failover, and [restart resume](docs/architecture.md#restart-resume) for continuity
+requirements across SDK restarts.
 
 ### Options
 
@@ -291,7 +254,9 @@ reported.
 
 > [!WARNING]
 > Keep callbacks fast. Slow handlers can delay later messages for the same
-> event and may mark a producer as delayed. Offload heavy work asynchronously.
+> event and may mark a producer as delayed. If you offload work, make the handoff
+> durable before returning when it represents completed delivery. See
+> [handler execution](docs/architecture.md#handler-execution-and-delivery).
 
 ## Producer health and recovery
 
@@ -307,140 +272,50 @@ UOF.SDK.producer(1)
 #=> {:ok, %UOF.SDK.ProducerMonitor.Producer{...}}
 ```
 
-A producer reports one lifecycle `status`:
+The SDK handles producer synchronization and recovery automatically. Applications
+use producer status to decide how feed health affects their business operations;
+content delivery continues during recovery. See the architecture guide for
+[startup and recovery](docs/architecture.md#startup-and-recovery),
+[health and operational signals](docs/architecture.md#health-and-operational-signals),
+and [restart resume](docs/architecture.md#restart-resume).
 
-- `:down` — not synchronized and no recovery is in flight
-- `:recovering` — waiting to request, requesting, or awaiting recovery
-  completion
-- `:up` — synchronized and safe
-- `:delayed` — the remote feed is healthy but local processing is behind
-- `:resuming` — draining retained backlog after restart while awaiting
-  current-session confirmation
+## Implementing a ProducerMonitor Store backend
 
-The UOF protocol requires every producer to be recovered before its markets are
-safe to act on. A gap in the message stream can happen on first connect,
-reconnect, or alive heartbeat timeout. When a gap is detected, the SDK:
-
-1. Uses the checkpoint in the producer's durable state, loaded from its store
-   at startup.
-2. Atomically marks the producer as requiring recovery before performing
-   external I/O.
-3. Calls `UOF.API.Recovery.recover/2` with a unique `request_id`.
-4. Requests incremental recovery if a checkpoint exists, or full recovery if it
-   does not.
-5. Receives replayed messages over the same feed.
-6. Marks the producer up when `snapshot_complete` arrives with the matching
-   `request_id`. That system message also establishes the alive-timeout anchor.
-
-`snapshot_complete` is handled on the system pipeline by design. It means the
-feed has finished publishing a recovery replay, not that this SDK instance has
-finished executing all handler callbacks for replayed content.
-
-Local backlog is handled separately by the content lag monitor. If processed
-content-queue timestamps fall behind by more than
-`:max_processing_delay_seconds`, the producer becomes `:delayed` until
-processing catches up. Event messages and content-session `alive` messages both
-advance this lag timestamp; system `alive` messages do not.
-
-A stall guard, configured with `:max_recovery_time`, reissues the recovery
-request if no `snapshot_complete` arrives within the deadline. It preserves the
-original timestamp so messages are not skipped on retry.
-
-## Monitor state persistence
-
-> [!NOTE]
-> The default `UOF.SDK.ProducerMonitor.Store.ETS` is in-memory. Checkpoints,
-> producer synchronization generations, and session state are lost on VM
-> restart, so a full recovery is issued on the next start. This is fine for
-> development and low-volume producers, but production applications should use
-> a persistent store. The ETS store does survive monitor/pipeline crashes within
-> the same VM, so crash-restarts still resume without recovering.
-
-Checkpoints are owned by `ProducerMonitor` and advanced from subscribed system
-`alive` heartbeats after the producer is already in sync. Content messages and
-content-session `alive` messages do not write checkpoints directly.
-
-On recovery, the SDK subtracts `:recovery_overlap_seconds` from the stored
-checkpoint before requesting incremental recovery. This intentionally replays a
-bounded amount of data to cover concurrent processing and distributed-consumer
-skew. Handlers should be idempotent and tolerate duplicates.
-
-To persist across VM restarts, implement the `UOF.SDK.ProducerMonitor.Store`
-behaviour and configure it:
+The store persists consume-session identity and per-producer recovery progress.
+Implement `UOF.SDK.ProducerMonitor.Store` to use your application's persistent
+backend, then configure it:
 
 ```elixir
 config :uof_sdk, monitor_store: MyApp.ProducerMonitorStore
 ```
 
-The behaviour separates the committed consume session from each producer's
-durable recovery progress. The session contains the system and content tokens
-plus a monotonically increasing generation. Producer progress contains its
-checkpoint and the session generation in which it was last synchronized.
-A producer may resume retained backlog only when it has a checkpoint and its
-synchronization generation matches the current session generation.
+> [!NOTE]
+> The default `UOF.SDK.ProducerMonitor.Store.ETS` is in-memory. Records survive
+> monitor and pipeline restarts while the store process remains alive, but are
+> lost when that process or the VM stops. Use a persistent backend when progress
+> must survive those boundaries.
 
-Implement these callbacks:
+Implement the six callbacks in the [store behaviour](lib/uof/sdk/producer_monitor/store.ex):
 
-- `load_session/0` and `load_producer_progress/0`
-- `commit_session_change/1`, which must atomically store both tokens and
-  advance the session generation
-- `advance_checkpoint/2`, which must advance one producer's checkpoint
-  monotonically
-- `require_recovery/1`, which clears one producer's synchronized generation
-- `mark_synchronized/2`, which records the current session generation for
-  one producer
+| Callback | Responsibility |
+| --- | --- |
+| `load_session/0` | Return the committed `Store.Session` |
+| `load_producer_progress/0` | Return a map of producer IDs to `Store.ProducerProgress` |
+| `commit_session_change/1` | Atomically store the tokens and advance the generation |
+| `advance_checkpoint/2` | Advance one producer's checkpoint monotonically |
+| `require_recovery/1` | Clear one producer's synchronized generation |
+| `mark_synchronized/2` | Record one producer's synchronized generation |
 
-Advancing the session generation invalidates every producer synchronized in
-an older generation without a multi-producer transaction. If the monitor
-crashes after committing the new tokens but before issuing recovery, the
-generation mismatch still prevents an unsafe resume. If it crashes before the
-session commit, the old tokens cause the change to be detected again.
+Mutation callbacks return the updated record directly, after the write completes.
+Preserve unrelated fields and make each mutation atomic. Backend failures must
+remain visible; do not return empty records or report success when a write fails.
 
-Recovery preparation is persisted before the HTTP request is issued. This
-ordering is deliberate: if the monitor crashes after requesting recovery, the
-next monitor must recover again rather than incorrectly resume from state that
-still claimed the producer was synchronized.
+Each logical store supports exactly one writer: its `ProducerMonitor`. If SDK
+instances share a database, isolate each monitor's records in a stable namespace.
+The store does not coordinate ownership between instances.
 
-Each mutation callback must atomically update the session record or one
-producer record as described above. A store must also have exactly one writer:
-its `ProducerMonitor`. Concurrent writes from another monitor, node, or
-administration tool are unsupported and may overwrite newer state.
-
-### Restart resume
-
-With a persistent store, `ProducerMonitor` restores resumability state and
-connection tokens at startup instead of assuming a gap. See
-`UOF.SDK.ProducerMonitor`'s moduledoc ("Restart resume" section) for the full
-mechanics — briefly: a producer healthy at shutdown starts as `:resuming` and
-drains retained backlog instead of recovering immediately. A matching token
-means the upstream consume session did not change; avoiding a gap also requires
-the transport to retain the backlog.
-
-Persisted tokens also close the restart gate: recovery intent may be recorded
-immediately, but no recovery HTTP request is sent until both the system and
-content pipelines report their current sessions. If either pipeline does not
-become ready within `:inactivity_seconds`, the monitor crashes and the SDK's
-`:rest_for_one` supervisor restarts both pipelines. A resumable producer that
-never supplies a current-session alive uses the same interval before falling
-back to normal recovery.
-
-Whether a restart actually avoids recovery is decided by the transport. A
-direct AMQP session always mints a new consumer tag on restart, so recovery
-still fires (the exclusive queue lost messages while down). A Pulsar transport
-fed by a long-lived source connector keeps the same connector tag across app
-restarts, and the durable subscription retains the backlog — so deployments
-restart, drain, and resume without an odds recovery. `subscribed=0` alives and
-token changes replayed from the backlog still force recovery when a genuine
-upstream gap happened while the app was down.
-
-The Pulsar broker must not drop retained backlog: configure no message TTL (or
-one comfortably above your worst-case downtime) and a `producer_exception`
-backlog quota policy — evicted backlog is a silent gap the SDK cannot detect.
-
-Stores that are backed by infrastructure your application already supervises,
-such as an Ecto repo, do not need to be started by the SDK. Configure the store
-module and make sure the repo is part of your application supervision tree
-before `UOF.SDK`.
+If your backend is already supervised by the application, omit the optional store
+`child_spec/1` and start its infrastructure before the SDK:
 
 ```elixir
 children = [
@@ -449,8 +324,13 @@ children = [
 ]
 ```
 
-If a store owns a process of its own, implement `child_spec/1`; the SDK will
-start it before the producer monitor.
+If the store owns a process, implement `child_spec/1`; the SDK starts it before
+`ProducerMonitor`. The [ETS backend](lib/uof/sdk/producer_monitor/store/ets.ex)
+provides a small reference implementation of the callback semantics.
+
+See [ProducerMonitor.Store](docs/architecture.md#producermonitorstore) in the
+architecture guide for record semantics, callback lifecycle, durability,
+namespace isolation, and implementation validation.
 
 ## Architecture
 

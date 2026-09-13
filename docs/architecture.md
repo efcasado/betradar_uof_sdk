@@ -164,6 +164,10 @@ The supported topic has a single partition: either a non-partitioned topic or a 
 topic with exactly one partition. Failover ownership is assigned per partition, so this
 layout gives the system subscription one active owner.
 
+Ownership reports are coordination signals, not fencing tokens; brief overlap during
+failover can issue duplicate recovery requests. Each instance uses its own stored progress
+when it becomes active.
+
 The monitor starts passive and waits for the broker's ownership report. The active owner
 runs periodic health checks and issues recovery requests. Passive instances continue their
 content processing. Demotion parks in-flight recoveries; promotion permits pending work to
@@ -445,7 +449,7 @@ alone does not prove delivery continuity or replace broker backlog retention.
 
 Incremental recovery subtracts the configured overlap from the checkpoint and clamps the
 result to the producer's advertised recovery window. Handlers must tolerate replayed
-messages. The [README's persistence guide](../README.md#monitor-state-persistence) describes
+messages. The [README's persistence guide](../README.md#implementing-a-producermonitor-store-backend) describes
 the configuration and operational requirements alongside the transport setup.
 
 ## Implementation Notes for Contributors

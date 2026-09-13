@@ -176,7 +176,8 @@ resume. Manual recovery on a passive instance returns `{:error, :passive}`.
 The connector is outside the SDK supervision tree. Restarting an SDK instance therefore
 does not necessarily restart the upstream AMQP session. A durable subscription can retain
 messages while that instance is offline; retention settings must preserve the backlog needed
-for the deployment's restart behaviour.
+for the deployment's restart behaviour. Disable message TTL or set it above the worst-case
+downtime, and use a `producer_exception` backlog quota policy to prevent eviction.
 
 ## Message Processing
 

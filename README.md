@@ -161,7 +161,9 @@ config :uof_sdk,
   }
 ```
 
-The RabbitMQ source connector and Pulsar deployment must meet these requirements:
+Use the SDK's RabbitMQ source connector to supply the feed payload and metadata.
+The current SDK requires a non-partitioned topic or a topic with exactly one
+partition so its system subscription has one active recovery coordinator.
 
 - The RabbitMQ source connector produces to a Pulsar topic with a single
   partition (a non-partitioned topic, or a partitioned topic with exactly one

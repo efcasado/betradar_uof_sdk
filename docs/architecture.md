@@ -239,40 +239,132 @@ The lifecycle states describe the monitor's view:
 A pending or in-flight recovery job is projected as `:recovering` when state is reported.
 Internal request functions, timers, and job correlation stay out of the public producer view.
 
-## Persistence and Restart Resume
+## ProducerMonitor.Store
 
-The store holds two kinds of durable records:
+`UOF.SDK.ProducerMonitor.Store` is the persistence boundary for the monitor's recovery
+and restart decisions. The monitor owns the policy and calls the store; applications
+choose the storage implementation. The store holds consume-session identity and producer
+progress. Feed messages, application business state, broker acknowledgements, and runtime
+recovery jobs remain outside this contract.
 
-| Record | Contents |
-| --- | --- |
-| Session | Committed system/content consume tokens and a generation |
-| Producer progress | Recovery checkpoint and the generation in which the producer synchronized |
+The default `Store.ETS` implementation keeps records in a table owned by its supervised
+process. Records survive monitor and pipeline restarts while that process remains alive,
+but disappear when the store process or VM stops. Implement a persistent store when progress
+must survive those boundaries. A persistent backend can serve several SDK instances, but
+each monitor must have its own logical store with exactly one writer.
+
+### Stored Records
+
+The behaviour defines two structs:
+
+| Record | Fields | Meaning |
+| --- | --- | --- |
+| `Store.Session` | `tokens`, `generation` | Committed system/content consume tokens and their monotonically increasing generation |
+| `Store.ProducerProgress` | `checkpoint`, `synchronized_generation` | One producer's recovery timestamp in milliseconds and the generation in which it synchronized |
 
 Changing a consume session atomically advances its generation. Every producer synchronized
-in an older generation then requires recovery, without a transaction updating all producer
-records. Persisting recovery intent before external I/O also ensures a restart can rediscover
-unfinished work.
+in an older generation then requires recovery, without a transaction rewriting all producer
+records. A producer is eligible for restart resume only when it has a checkpoint and its
+`synchronized_generation` matches the current session generation. Eligibility still requires
+runtime continuity and freshness checks before the monitor considers the producer up.
 
-Subscribed system heartbeats advance checkpoints after synchronization. Incremental recovery
-subtracts the configured overlap from the checkpoint and clamps the result to the producer's
-advertised recovery window. A checkpoint selects a replay start time; it is separate from an
-application transaction or broker acknowledgement.
+A genuinely empty store returns `%Store.Session{}` and `%{}` from its load callbacks.
+Mutations for a previously unseen producer start from `%Store.ProducerProgress{}`. These
+initial values represent missing records, not a fallback for an unavailable backend.
+
+### Callback Lifecycle
+
+Callbacks execute synchronously in the monitor process. Load callbacks return records;
+mutation callbacks return the resulting record directly, which the monitor adopts as its
+current state. They do not return `:ok` or `{:ok, record}`.
+
+| Callback | When the monitor uses it | Required result and effect |
+| --- | --- | --- |
+| `load_session/0` | Monitor initialization | Return the committed `Store.Session` |
+| `load_producer_progress/0` | Monitor initialization | Return a map of producer IDs to `Store.ProducerProgress` |
+| `commit_session_change/1` | Current consume tokens change | Atomically store the token map and increment the generation; return the new session |
+| `advance_checkpoint/2` | An eligible subscribed system heartbeat advances progress | Advance that producer's checkpoint monotonically, preserve its synchronization generation, and return its progress |
+| `require_recovery/1` | A producer must no longer resume as synchronized | Clear its synchronization generation, preserve its checkpoint, and return its progress |
+| `mark_synchronized/2` | A producer is considered synchronized in the current session | Store the supplied generation, preserve its checkpoint, and return its progress |
+
+The monitor avoids writes when its current records already represent the required state.
+Content messages and content-session heartbeats do not write checkpoints. A checkpoint
+selects a recovery replay start time; it is separate from an application transaction or
+broker acknowledgement.
+
+For example, suppose the session generation is 7 and producer 1 has a checkpoint and
+`synchronized_generation: 7`. A changed consume token commits generation 8. Producer 1's
+unchanged progress is now ineligible to resume. Recovery preparation records that recovery
+is required before issuing HTTP; successful synchronization records generation 8. If the
+monitor crashes after the session commit or recovery preparation, the persisted state still
+prevents it from resuming as though no gap occurred.
+
+### Implementing and Configuring a Store
+
+Implement the six callbacks in the [store behaviour](../lib/uof/sdk/producer_monitor/store.ex)
+and configure the module:
+
+```elixir
+config :uof_sdk, monitor_store: MyApp.ProducerMonitorStore
+```
+
+Each mutation must atomically update its session record or producer record and preserve
+unrelated fields. For a persistent implementation, complete the durable write before
+returning. A successful return must not mean that a write has merely been queued elsewhere.
+Maintain checkpoint monotonicity even when an older timestamp is supplied.
+
+The callback API has no error-tuple contract. Let backend failures raise or exit so startup
+or supervision can handle them visibly. Returning empty records on a failed load or claiming
+a failed write succeeded would give the monitor an incorrect recovery baseline. Because
+calls run in the monitor, configure backend timeouts appropriate to its availability needs.
+
+Each logical store has exactly one writer: its `ProducerMonitor`. Concurrent writes from
+another monitor, SDK instance, or administration tool are unsupported. With a shared
+database, isolate each monitor's session and producer records in a stable namespace that
+survives that instance's restart. The callback API takes no store-instance argument; the
+configured module is responsible for selecting its backend and namespace. The store does
+not elect the active Pulsar consumer or coordinate ownership between SDK instances.
+
+If the backend is already supervised by the host application, start it before the SDK and
+omit the optional store `child_spec/1`:
+
+```elixir
+children = [
+  MyApp.Repo,
+  UOF.SDK
+]
+```
+
+If the store owns a process, implement `child_spec/1` (for example through `use GenServer`
+and `start_link/1`). The SDK starts that store module as its first child, before loading
+monitor state. The SDK supplies the module as the child specification, so its default child
+argument is `[]`; backend configuration belongs to the store implementation. A store-process
+restart also restarts the monitor and downstream consumers through `:rest_for_one`.
+
+Use the [ETS implementation](../lib/uof/sdk/producer_monitor/store/ets.ex) as a small reference
+for callback semantics, and the [store tests](../test/uof/sdk/producer_monitor/store/ets_test.exs)
+as examples of the contract. For a persistent implementation, also verify records survive
+backend/client restarts, failed operations remain visible, and separate monitor namespaces
+do not overwrite each other. Cover empty initialization, monotonic checkpoints, preservation
+of unrelated fields, generation changes, and recovery invalidation.
+
+### Restart Resume
 
 At startup, a producer with a checkpoint and a matching synchronization generation enters
-`:resuming`. Persisted tokens are comparison baselines. The current pipelines must report their
-sessions again, and the monitor uses heartbeat and content-freshness observations to decide
-when to leave that state. Session-readiness deadlines prevent an incomplete restart from
-waiting indefinitely.
+`:resuming`. Persisted tokens are comparison baselines. The current pipelines must report
+their sessions again, and the monitor uses heartbeat and content-freshness observations to
+decide when to leave that state. Session-readiness deadlines prevent an incomplete restart
+from waiting indefinitely.
 
 Direct AMQP reconnects create new consume sessions and require recovery. Pulsar can resume
 retained backlog when its upstream connector session remains unchanged. An upstream session
-change or recovery-required heartbeat still enters the normal recovery path.
+change or recovery-required heartbeat still enters the normal recovery path. Persistence
+alone does not prove delivery continuity or replace broker backlog retention.
 
-The default ETS store survives monitor and pipeline restarts while its owning process remains
-alive. It loses state when that process or VM stops. A persistent store supports progress
-across VM restarts and must honor the behaviour's atomic mutation contracts and single-writer
-ownership. The [README's store guide](../README.md#monitor-state-persistence) describes those
-callbacks and how to supervise their backing infrastructure.
+Incremental recovery subtracts the configured overlap from the checkpoint and clamps the
+result to the producer's advertised recovery window. Handlers must tolerate replayed
+messages. The [README's persistence guide](../README.md#monitor-state-persistence) describes
+the configuration and operational requirements alongside the transport setup.
 
 ## Implementation Notes for Contributors
 

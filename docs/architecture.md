@@ -179,20 +179,49 @@ transport delivery
     → transport acknowledgement
 ```
 
+### Ordering and Scale-Out
+
 Within an instance, the content pipeline partitions messages by sport-event URN. Messages
 for one event go to the same processor, while different events can be handled concurrently.
 System messages use a separate pipeline so producer monitoring has its own processing lane.
+There is no processing-completion ordering between the system and content pipelines.
+
+Pulsar dispatch and local Broadway partitioning use different keys. The connector supplies
+the full AMQP routing key as the Pulsar message key, while Broadway extracts the event URN
+for local dispatch. Different routing keys for the same event can therefore reach different
+SDK instances. Local event partitioning does not establish event-wide ordering across those
+instances. Applications that require that guarantee must account for the upstream keying
+and their distributed processing design.
+
+### Handler Execution and Delivery
 
 The content callback runs synchronously in a Broadway processor. It receives the decoded
 feed struct and a `UOF.SDK.Context`, and its return contract is `:ok`. Returning lets Broadway
 complete the message. Applications that hand work to another process should make that
 handoff durable before returning if it is the point at which they consider delivery complete.
 
+The pipeline does not interpret callback return values as failure signals: returning
+`{:error, reason}` is not a request to reject or retry a message. Decoding errors and raised
+processing failures enter Broadway's failure path. Applications own retries of handler
+side effects and must account for duplicate or stale deliveries when doing so.
+
+`handle_producer_status/1` runs synchronously in `ProducerMonitor`, rather than a content
+processor. A slow status callback blocks monitor observations, recovery coordination, and
+state queries; a callback exception fails that monitor process. Keep status callbacks short.
+Store calls and recovery HTTP requests also execute in the monitor, so their latency affects
+when it can process the next observation or timer message.
+
 Handler persistence and transport acknowledgement are separate operations. Applications
 should make their effects idempotent because reconnects and recovery can replay messages.
 Failures pass through the pipeline's failure callback, which logs context and emits
 `[:uof_sdk, :message, :failed]` telemetry. The AMQP transport rejects failed messages without
 requeue; Pulsar acknowledgement and redelivery follow the configured adapter behaviour.
+A message failure emits diagnostics but does not directly request producer recovery.
+
+Content delivery is not gated on producer health. Live and replayed content can reach handlers
+while a producer is `:down`, `:recovering`, or `:delayed`. The SDK reports synchronization and
+health; applications decide how those reports affect their business operations. A producer
+becoming `:up` is not a barrier proving that all application side effects have completed.
 
 Raw system messages are internal inputs. `alive` observations update producer health and
 recovery progress, and `snapshot_complete` correlates recovery completion. Applications
@@ -238,6 +267,50 @@ The lifecycle states describe the monitor's view:
 
 A pending or in-flight recovery job is projected as `:recovering` when state is reported.
 Internal request functions, timers, and job correlation stay out of the public producer view.
+
+## Health and Operational Signals
+
+A running supervisor, an established transport connection, and a synchronized producer are
+separate states. Use producer status to understand feed synchronization and processing lag;
+use transport and message diagnostics to investigate why progress has stopped.
+
+### Time and Recovery Controls
+
+Public duration settings are in seconds and converted to milliseconds internally. Feed
+timestamps and stored checkpoints are epoch milliseconds. Heartbeat inactivity uses local
+observation time; content lag compares local wall-clock time with processed feed timestamps.
+Clock skew can therefore affect lag observations. Recovery cooldown uses monotonic time.
+
+| Setting | What it measures or controls | Effect |
+| --- | --- | --- |
+| `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Requests recovery on an observed heartbeat timeout; also bounds session-readiness waiting |
+| `max_processing_delay_seconds` | Age of the latest observed content timestamp, including content-session heartbeats | Moves synchronized producers between `:up` and `:delayed`; freshness also gates restart resume |
+| `min_interval_between_recoveries` | Per-producer recovery-request cooldown and delay after a failed request | Defers requests or retries while recovery remains pending |
+| `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp |
+| `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window |
+
+These controls have distinct purposes. Content lag alone is not a heartbeat failure, and
+recovery overlap is not a timeout. Health checks and timer messages are handled by the
+monitor, subject to control-plane ownership and its current recovery state; durations are
+not hard real-time deadlines. See the [configuration reference](../README.md#configuration)
+for defaults and the [recovery guide](../README.md#producer-health-and-recovery) for usage.
+
+### Observability
+
+| Signal | What it tells the application |
+| --- | --- |
+| `UOF.SDK.producers/0` and `UOF.SDK.producer/1` | Current per-producer lifecycle state and observations |
+| `handle_producer_status/1` | Reported producer-state transitions, delivered synchronously by the monitor |
+| `[:uof_sdk, :message, :failed]` | A decoding or processing failure, with routing context and failure reason |
+| `[:uof_sdk, :recovery, :initiated]` | A successful recovery request, with producer ID, request ID, and replay start timestamp; not recovery completion |
+| `[:uof_sdk, :amqp, :setup_failure]` | A returned AMQP setup failure, preserving the operation, original reason, and retry classification |
+| `[:broadway_rabbitmq, :amqp, :open_connection, :start / :stop / :exception]` | Spans around shared AMQP connection establishment |
+
+Correlate recovery logs and initiation events by producer and request ID, then observe
+producer status for lifecycle progress. Message-failure logs include routing context and
+a truncated payload. AMQP diagnostics distinguish expected retries from permanent failures;
+unexpected exceptions and exits also appear through process failure reports. A quiet error
+log alone does not establish readiness or prove that handlers have completed their work.
 
 ## ProducerMonitor.Store
 

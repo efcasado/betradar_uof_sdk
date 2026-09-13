@@ -42,7 +42,9 @@ defmodule UOF.SDK.MessageMetadata do
 
   # Custom AMQP producers may not opt in to BroadwayRabbitMQ's `:consumer_tag`
   # metadata. Preserve the previous reconnect token for those producers; a pid
-  # cannot match across VM restarts, which safely forces recovery.
+  # cannot match across VM restarts, which safely forces recovery. This fallback
+  # only detects connection replacement: custom producers sharing a connection
+  # must expose :consumer_tag (or an explicit token) to detect channel reconnects.
   defp connection_pid(%Message{metadata: %{amqp_channel: %{conn: %{pid: pid}}}}), do: pid
   defp connection_pid(_message), do: nil
 end

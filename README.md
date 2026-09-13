@@ -126,9 +126,28 @@ config :uof_api,
   auth_token: System.get_env("UOF_ACCESS_TOKEN")
 ```
 
-`transport: {:amqp, connection: [...]}` is passed to
-[`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html)
-for both pipelines, with SDK-owned bindings for content and system traffic.
+`transport: {:amqp, connection: [...]}` configures one supervised AMQP connection
+shared by both [`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html)
+pipelines. Each pipeline
+uses its own channel and exclusive queue, with SDK-owned bindings for content
+and system traffic. Channel restarts leave the shared connection open; connection
+loss reconnects both consumers, whose new consumer tags trigger recovery.
+
+Connection establishment runs in a monitored session. While it is connecting,
+checkouts return promptly and Broadway retries with backoff. If the SDK owner
+stops during a handshake, that session finishes the bounded AMQP open and closes
+its result; a replacement attempt waits for cleanup to complete.
+
+Connection-open spans remain available at
+`[:broadway_rabbitmq, :amqp, :open_connection, :start | :stop | :exception]`.
+For returned failures, `[:uof_sdk, :amqp, :setup_failure]` reports the original
+`:operation`, `:reason`, and `:retryable` classification. BroadwayRabbitMQ 0.8 requires a known reason to
+enter its backoff path, so retryable failures use its `:econnrefused` alias;
+use the SDK event for the actual cause. Authentication and protocol rejections
+retain their original reasons and follow Broadway's failure policy. Unexpected
+exits and exceptions propagate after channel cleanup; only known transient
+transport failures are converted to retries. Permission rejection
+(`:not_allowed`) raises explicitly because Broadway otherwise retries it.
 
 Known Betradar AMQP hosts:
 
@@ -174,6 +193,9 @@ Pulsar support assumes the SDK's RabbitMQ source connector contract:
 The SDK uses the consumer tag as a reconnect token and triggers recovery when
 it changes: a new tag means a new upstream consume session, so a delivery gap
 was possible. The AMQP transport uses its own consumer tag the same way.
+Custom AMQP producers sharing a connection must provide `:consumer_tag` metadata
+or an explicit reconnect token to detect channel-only reconnects. The legacy
+connection-pid fallback detects only connection replacement.
 
 #### Multi-instance control plane
 
@@ -438,6 +460,7 @@ start it before the producer monitor.
 UOF.SDK
 |-- ProducerMonitor.Store*     - optional configured monitor-state store child
 |-- ProducerMonitor            - producer health and recovery orchestration
+|-- Transport client           - shared AMQP connection owner or Pulsar client
 |-- SystemPipeline             - feed consumer for alive and snapshot_complete
 `-- ContentPipeline            - feed consumer for event content
 ```

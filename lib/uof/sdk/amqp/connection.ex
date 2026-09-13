@@ -112,7 +112,18 @@ defmodule UOF.SDK.AMQP.Connection do
   end
 
   defp connect(%{error: reason} = state) when not is_nil(reason) do
-    {:reply, {:error, %Error{operation: :connect, reason: reason}}, %{state | error: nil}}
+    # Report the previous attempt while starting the next one, so observing an
+    # error does not consume a whole backoff interval without making progress.
+    # Permanent failures remain visible until supervision restarts the owner.
+    state =
+      if Error.retryable?(reason) do
+        {:reply, _, next_state} = connect(%{state | error: nil})
+        next_state
+      else
+        state
+      end
+
+    {:reply, {:error, %Error{operation: :connect, reason: reason}}, state}
   end
 
   defp connect(%{session: nil} = state) do

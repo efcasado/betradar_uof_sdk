@@ -28,14 +28,18 @@ defmodule UOF.SDK.AMQP.Error do
              :timeout,
              :unknown_host,
              :nxdomain,
-             :noproc,
-             :not_allowed
+             :noproc
            ], do: true
 
   # Preserve Broadway's retry of an ambiguous disconnect during authentication.
   def retryable?({:auth_failure, ~c"Disconnected"}), do: true
   def retryable?({:socket_closed_unexpectedly, _}), do: true
   def retryable?({:server_initiated_close, 320, _}), do: true
+  # A process that closes normally can disappear while an AMQP call is pending.
+  # Bare callback exits remain non-retryable.
+  def retryable?({reason, {module, :call, _}}) when reason in [:normal, :shutdown] and module in [:gen_server, GenServer],
+    do: true
+
   def retryable?({:shutdown, reason}), do: retryable?(reason)
   def retryable?({reason, {:gen_server, :call, _}}), do: retryable?(reason)
   def retryable?({reason, {GenServer, :call, _}}), do: retryable?(reason)

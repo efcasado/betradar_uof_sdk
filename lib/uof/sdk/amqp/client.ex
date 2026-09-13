@@ -21,6 +21,7 @@ defmodule UOF.SDK.AMQP.Client do
 
   @compile {:no_warn_undefined, [Basic, Queue, AmqpClient]}
 
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
   def init(opts) do
     {{:custom_pool, _module, _args} = pool, opts} = Keyword.pop!(opts, :connection)
 
@@ -30,12 +31,18 @@ defmodule UOF.SDK.AMQP.Client do
     with {:ok, config} <- AmqpClient.init(opts), do: {:ok, %{config | connection: pool}}
   end
 
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
   defdelegate ack(channel, delivery_tag), to: AmqpClient
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
   defdelegate reject(channel, delivery_tag, opts), to: AmqpClient
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
   defdelegate consume(channel, config), to: AmqpClient
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
   defdelegate cancel(channel, consumer_tag), to: AmqpClient
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
   defdelegate close_connection(config, channel), to: AmqpClient
 
+  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
   def setup_channel(%{connection: {:custom_pool, pool, args}} = config) do
     case pool.checkout_channel(args) do
       {:ok, channel} -> setup(channel, config, pool, args)
@@ -113,6 +120,10 @@ defmodule UOF.SDK.AMQP.Client do
 
     # BroadwayRabbitMQ 0.8 only retries selected reasons. The SDK event above
     # retains the original reason; only retryable failures use its backoff alias.
+    # Broadway retries :not_allowed itself, so returning it would override our
+    # permanent permission-failure policy.
+    if error.reason == :not_allowed, do: raise(error)
+
     {:error, if(retryable, do: :econnrefused, else: error.reason)}
   end
 end

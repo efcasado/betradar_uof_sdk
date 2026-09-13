@@ -92,9 +92,56 @@ defmodule UOF.SDK.AMQP.ConnectionTest do
     ref = Process.monitor(conn.pid)
     Process.exit(owner, :kill)
     assert Task.await(broker, 5_000) == :closed
-    assert_receive {:DOWN, ^ref, :process, _, _}, 1_000
+    assert_receive {:DOWN, ^ref, :process, _, reason}, 1_000
+    refute reason == :killed
     assert_receive {:DOWN, ^session_ref, :process, _, _}, 1_000
   end
+
+  test "permanent connection errors remain visible without starting another session" do
+    owner = start_supervised!({Connection, connection: []})
+    reason = {:auth_failure, ~c"ACCESS_REFUSED"}
+    :sys.replace_state(owner, fn state -> %{state | error: reason} end)
+
+    for _ <- 1..2 do
+      assert {:error, %Error{reason: ^reason}} = Connection.checkout_channel(owner)
+      assert %{session: nil, error: ^reason} = :sys.get_state(owner)
+    end
+  end
+
+  test "reporting a transient failure also starts the next connection attempt" do
+    # Reserve then release a local port to produce a real refused connection.
+    {:ok, listener} = :gen_tcp.listen(0, [])
+    {:ok, port} = :inet.port(listener)
+    :ok = :gen_tcp.close(listener)
+    owner = start_supervised!({Connection, connection: [host: "127.0.0.1", port: port]})
+    test_pid = self()
+    id = make_ref()
+    event = [:broadway_rabbitmq, :amqp, :open_connection, :start]
+    :telemetry.attach(id, event, fn _, _, _, _ -> send(test_pid, :attempt) end, nil)
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    assert {:error, %Error{reason: :connecting}} = Connection.checkout_channel(owner)
+    assert_receive :attempt, 1_000
+    await_failed_attempt(owner)
+    assert {:error, %Error{reason: :econnrefused}} = Connection.checkout_channel(owner)
+    assert_receive :attempt, 1_000
+    await_failed_attempt(owner)
+  end
+
+  defp await_failed_attempt(owner, attempts \\ 100)
+
+  defp await_failed_attempt(owner, attempts) when attempts > 0 do
+    case :sys.get_state(owner) do
+      %{session: nil, error: :econnrefused} ->
+        :ok
+
+      _ ->
+        Process.sleep(10)
+        await_failed_attempt(owner, attempts - 1)
+    end
+  end
+
+  defp await_failed_attempt(_, 0), do: flunk("connection attempt did not fail")
 
   test "unexpected messages crash the connection owner" do
     owner = start_supervised!({Connection, connection: []}, restart: :temporary)

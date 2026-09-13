@@ -63,12 +63,17 @@ defmodule UOF.SDK.AMQP.Session do
       Connection.close(connection)
     catch
       :exit, _ -> :ok
-    after
-      Process.exit(connection.pid, :kill)
     end
 
     receive do
       {:DOWN, ^ref, :process, _, _} -> :ok
+    after
+      1_000 ->
+        Process.exit(connection.pid, :kill)
+
+        receive do
+          {:DOWN, ^ref, :process, _, _} -> :ok
+        end
     end
   end
 

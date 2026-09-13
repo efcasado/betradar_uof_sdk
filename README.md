@@ -146,7 +146,8 @@ enter its backoff path, so retryable failures use its `:econnrefused` alias;
 use the SDK event for the actual cause. Authentication and protocol rejections
 retain their original reasons and follow Broadway's failure policy. Unexpected
 exits and exceptions propagate after channel cleanup; only known transient
-transport failures are converted to retries.
+transport failures are converted to retries. Permission rejection
+(`:not_allowed`) raises explicitly because Broadway otherwise retries it.
 
 Known Betradar AMQP hosts:
 

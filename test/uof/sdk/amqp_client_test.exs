@@ -3,6 +3,8 @@ defmodule UOF.SDK.AMQP.ClientTest do
 
   alias UOF.SDK.AMQP.Client
   alias UOF.SDK.AMQP.Error
+  alias UOF.SDK.ContentPipeline
+  alias UOF.SDK.LogHandler
 
   defmodule UnavailablePool do
     @moduledoc false
@@ -39,6 +41,69 @@ defmodule UOF.SDK.AMQP.ClientTest do
     def checkin_channel(_, _), do: :ok
   end
 
+  defmodule ClosingChannel do
+    @moduledoc false
+    use GenServer
+
+    def init(reason), do: {:ok, reason}
+    def handle_call(:"queue.declare", _, reason), do: {:stop, reason, reason}
+  end
+
+  defmodule ClosingPool do
+    @moduledoc false
+    @behaviour BroadwayRabbitMQ.ChannelPool
+
+    @impl true
+    def checkout_channel({test_pid, reason}) do
+      {:ok, pid} = GenServer.start(ClosingChannel, reason)
+      send(test_pid, {:checkout, self()})
+      {:ok, %AMQP.Channel{pid: pid}}
+    end
+
+    @impl true
+    def checkin_channel(_, _), do: :ok
+  end
+
+  for reason <- [:normal, :shutdown], module <- [:gen_server, GenServer] do
+    @reason reason
+    @caller module
+    test "the same producer retries #{@reason} from #{@caller}.call during setup" do
+      caller = @caller
+
+      start_supervised!(
+        {ContentPipeline,
+         name: __MODULE__.ClosingPipeline,
+         handler: LogHandler,
+         concurrency: 1,
+         producer:
+           {BroadwayRabbitMQ.Producer,
+            queue: "",
+            declare: [exclusive: true],
+            client: Client,
+            on_failure: :reject,
+            connection: {:custom_pool, ClosingPool, {self(), @reason}},
+            after_connect: fn channel -> caller.call(channel.pid, :"queue.declare") end,
+            backoff_min: 10,
+            backoff_max: 20}}
+      )
+
+      assert_receive {:checkout, producer}, 1_000
+      for _ <- 1..4, do: assert_receive({:checkout, ^producer}, 1_000)
+      assert Process.alive?(producer)
+    end
+  end
+
+  test "permission rejection raises with its original reason and permanent telemetry" do
+    id = make_ref()
+    test_pid = self()
+    :telemetry.attach(id, [:uof_sdk, :amqp, :setup_failure], fn _, _, metadata, _ -> send(test_pid, metadata) end, nil)
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    error = assert_raise Error, fn -> Client.setup_channel(config(RejectedPool, :not_allowed)) end
+    assert error.reason == :not_allowed
+    assert_receive %{reason: :not_allowed, retryable: false}
+  end
+
   defp config(pool, args) do
     assert {:ok, config} = Client.init(queue: "", declare: [exclusive: true], connection: {:custom_pool, pool, args})
     config
@@ -62,9 +127,9 @@ defmodule UOF.SDK.AMQP.ClientTest do
 
   test "an unavailable connection is retried by the same Broadway producer" do
     start_supervised!(
-      {UOF.SDK.ContentPipeline,
+      {ContentPipeline,
        name: __MODULE__.Pipeline,
-       handler: UOF.SDK.LogHandler,
+       handler: LogHandler,
        concurrency: 1,
        producer:
          {BroadwayRabbitMQ.Producer,

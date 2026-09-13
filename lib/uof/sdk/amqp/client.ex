@@ -15,13 +15,15 @@ defmodule UOF.SDK.AMQP.Client do
 
   require Logger
 
-  if Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient) do
-    @behaviour BroadwayRabbitMQ.RabbitmqClient
-  end
+  @rabbitmq_client if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient),
+                     do: BroadwayRabbitMQ.RabbitmqClient,
+                     else: false
+                   )
+  if @rabbitmq_client, do: @behaviour(@rabbitmq_client)
 
   @compile {:no_warn_undefined, [Basic, Queue, AmqpClient]}
 
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
+  @impl @rabbitmq_client
   def init(opts) do
     {{:custom_pool, _module, _args} = pool, opts} = Keyword.pop!(opts, :connection)
 
@@ -31,18 +33,18 @@ defmodule UOF.SDK.AMQP.Client do
     with {:ok, config} <- AmqpClient.init(opts), do: {:ok, %{config | connection: pool}}
   end
 
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
+  @impl @rabbitmq_client
   defdelegate ack(channel, delivery_tag), to: AmqpClient
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
+  @impl @rabbitmq_client
   defdelegate reject(channel, delivery_tag, opts), to: AmqpClient
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
+  @impl @rabbitmq_client
   defdelegate consume(channel, config), to: AmqpClient
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
+  @impl @rabbitmq_client
   defdelegate cancel(channel, consumer_tag), to: AmqpClient
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
+  @impl @rabbitmq_client
   defdelegate close_connection(config, channel), to: AmqpClient
 
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient), do: BroadwayRabbitMQ.RabbitmqClient, else: false)
+  @impl @rabbitmq_client
   def setup_channel(%{connection: {:custom_pool, pool, args}} = config) do
     case pool.checkout_channel(args) do
       {:ok, channel} -> setup(channel, config, pool, args)
@@ -116,7 +118,11 @@ defmodule UOF.SDK.AMQP.Client do
       retryable: retryable
     })
 
-    if error.reason != :connecting, do: Logger.error(Exception.message(error))
+    # Broadway already logs :econnrefused verbatim. Other transient reasons
+    # need their original cause logged before translation to its backoff alias.
+    if error.reason not in [:connecting, :econnrefused] do
+      Logger.log(if(retryable, do: :warning, else: :error), Exception.message(error))
+    end
 
     # BroadwayRabbitMQ 0.8 only retries selected reasons. The SDK event above
     # retains the original reason; only retryable failures use its backoff alias.

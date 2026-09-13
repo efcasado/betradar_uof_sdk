@@ -6,6 +6,33 @@ defmodule UOF.SDK.AMQP.ConnectionTest do
   alias UOF.SDK.AMQP.Session
   alias UOF.SDK.TestSupport.AMQPHandshake
 
+  defmodule ClosingChannel do
+    @moduledoc false
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+    def init(_), do: {:ok, nil}
+    # AMQP can acknowledge close while the channel is still tearing down.
+    def handle_call({:close, _, _}, _, state), do: {:reply, :closing, state}
+  end
+
+  test "checking in a closing channel does not force-kill its pending teardown" do
+    pid = start_supervised!(ClosingChannel, restart: :temporary)
+    ref = Process.monitor(pid)
+    assert :ok = Connection.checkin_channel(Connection, %AMQP.Channel{pid: pid})
+    refute_receive {:DOWN, ^ref, :process, ^pid, _}, 1_100
+    assert Process.alive?(pid)
+  end
+
+  test "session startup monitors even an immediate normal exit" do
+    {owner, owner_ref} = spawn_monitor(fn -> :ok end)
+    assert_receive {:DOWN, ^owner_ref, :process, ^owner, :normal}
+    # With an already-dead owner the continuation exits immediately. The
+    # startup monitor must retain :normal rather than observe a dead pid.
+    assert {:ok, {session, ref}} = Session.start(owner, [])
+    assert_receive {:DOWN, ^ref, :process, ^session, :normal}, 1_000
+  end
+
   # `AMQP.Connection.open/1` ignores keys it does not know and falls back to
   # guest@localhost, so these have to be rejected here: nothing downstream
   # looks at them any more.

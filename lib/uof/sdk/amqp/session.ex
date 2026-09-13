@@ -13,7 +13,9 @@ defmodule UOF.SDK.AMQP.Session do
   @compile {:no_warn_undefined, Connection}
 
   def start(owner, options) do
-    GenServer.start(__MODULE__, {owner, options}, name: __MODULE__)
+    # Install the monitor atomically, before a fast connection failure can
+    # terminate the session and turn its real exit reason into :noproc.
+    :gen_server.start_monitor({:local, __MODULE__}, __MODULE__, {owner, options}, [])
   end
 
   @impl true

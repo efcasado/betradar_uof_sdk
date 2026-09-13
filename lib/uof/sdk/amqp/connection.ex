@@ -14,9 +14,8 @@ defmodule UOF.SDK.AMQP.Connection do
   alias UOF.SDK.AMQP.Error
   alias UOF.SDK.AMQP.Session
 
-  if Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool) do
-    @behaviour BroadwayRabbitMQ.ChannelPool
-  end
+  @channel_pool if(Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool), do: BroadwayRabbitMQ.ChannelPool, else: false)
+  if @channel_pool, do: @behaviour(@channel_pool)
 
   @compile {:no_warn_undefined, [Channel, AmqpClient]}
 
@@ -40,7 +39,7 @@ defmodule UOF.SDK.AMQP.Connection do
   @impl true
   def init(options), do: {:ok, %{options: options, session: nil, connection: nil, error: nil}}
 
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool), do: BroadwayRabbitMQ.ChannelPool, else: false)
+  @impl @channel_pool
   def checkout_channel(server) do
     with {:ok, connection} <- GenServer.call(server, :connection) do
       # Open in the producer process so SelectiveConsumer belongs to it.
@@ -58,29 +57,15 @@ defmodule UOF.SDK.AMQP.Connection do
       end
   end
 
-  @impl if(Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool), do: BroadwayRabbitMQ.ChannelPool, else: false)
+  @impl @channel_pool
+  # AMQP may reply before teardown completes, or report an already-closing
+  # channel. Leave that teardown to the protocol: force-killing a channel is
+  # reported as an internal error and would close the shared connection.
   def checkin_channel(_server, channel) do
-    # Discard rather than reuse. A successful close replies before the channel
-    # process exits; wait for DOWN instead of killing that normal shutdown and
-    # turning it into an internal error on the shared connection.
-    ref = Process.monitor(channel.pid)
-
-    try do
-      Channel.close(channel)
-    catch
-      :exit, _ -> :ok
-    end
-
-    receive do
-      {:DOWN, ^ref, :process, _, _} -> :ok
-    after
-      1_000 ->
-        Process.exit(channel.pid, :kill)
-
-        receive do
-          {:DOWN, ^ref, :process, _, _} -> :ok
-        end
-    end
+    Channel.close(channel)
+    :ok
+  catch
+    :exit, _ -> :ok
   end
 
   @impl true
@@ -111,37 +96,28 @@ defmodule UOF.SDK.AMQP.Connection do
     {:stop, reason, state}
   end
 
-  defp connect(%{error: reason} = state) when not is_nil(reason) do
-    # Report the previous attempt while starting the next one, so observing an
-    # error does not consume a whole backoff interval without making progress.
-    # Permanent failures remain visible until supervision restarts the owner.
-    state =
-      if Error.retryable?(reason) do
-        {:reply, _, next_state} = connect(%{state | error: nil})
-        next_state
-      else
-        state
-      end
+  defp connect(state) do
+    reason = state.error || :connecting
+    state = if Error.retryable?(reason), do: ensure_session(%{state | error: nil}), else: state
 
-    {:reply, {:error, %Error{operation: :connect, reason: reason}}, state}
+    # Report the previous failure while starting the next transient attempt.
+    # A new startup error takes precedence; permanent errors remain visible.
+    {:reply, {:error, %Error{operation: :connect, reason: state.error || reason}}, state}
   end
 
-  defp connect(%{session: nil} = state) do
+  defp ensure_session(%{session: nil} = state) do
     case Session.start(self(), state.options) do
-      {:ok, pid} ->
-        ref = Process.monitor(pid)
-        connecting(%{state | session: {pid, ref}})
+      {:ok, session} ->
+        %{state | session: session}
 
       {:error, {:already_started, _}} ->
         # A previous owner's session is still finishing its handshake/cleanup.
-        connecting(state)
+        state
 
       {:error, reason} ->
-        {:reply, {:error, %Error{operation: :connect, reason: reason}}, state}
+        %{state | error: reason}
     end
   end
 
-  defp connect(state), do: connecting(state)
-
-  defp connecting(state), do: {:reply, {:error, %Error{operation: :connect, reason: :connecting}}, state}
+  defp ensure_session(state), do: state
 end

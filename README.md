@@ -193,6 +193,9 @@ Pulsar support assumes the SDK's RabbitMQ source connector contract:
 The SDK uses the consumer tag as a reconnect token and triggers recovery when
 it changes: a new tag means a new upstream consume session, so a delivery gap
 was possible. The AMQP transport uses its own consumer tag the same way.
+Custom AMQP producers sharing a connection must provide `:consumer_tag` metadata
+or an explicit reconnect token to detect channel-only reconnects. The legacy
+connection-pid fallback detects only connection replacement.
 
 #### Multi-instance control plane
 

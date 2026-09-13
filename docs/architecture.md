@@ -151,6 +151,15 @@ message key, and includes its server-generated consumer tag in the
 `__rabbitmq_consumer_tag` property. Key-Shared dispatch follows that message key. The SDK
 reads the routing key and upstream consume-session identity from this metadata.
 
+> [!WARNING]
+> If batching is enabled for the RabbitMQ source connector's Pulsar producer, use
+> key-based batching (`KEY_BASED`). Alternatively, disable producer batching.
+> Default batching can combine different routing keys in one batch, which Pulsar
+> routes using the first message's key. This breaks the Key-Shared distribution
+> semantics required by the content subscription. Configure this on the connector's
+> producer; SDK consumer configuration cannot repair mixed-key batches. See
+> [Pulsar's Key-Shared producer requirements](https://pulsar.apache.org/docs/4.2.x/concepts-messaging/).
+
 The supported topic has a single partition: either a non-partitioned topic or a partitioned
 topic with exactly one partition. Failover ownership is assigned per partition, so this
 layout gives the system subscription one active owner.

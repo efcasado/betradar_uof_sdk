@@ -14,8 +14,9 @@ defmodule UOF.SDK.AMQP.Connection do
   alias UOF.SDK.AMQP.Error
   alias UOF.SDK.AMQP.Session
 
-  @channel_pool if(Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool), do: BroadwayRabbitMQ.ChannelPool, else: false)
-  if @channel_pool, do: @behaviour(@channel_pool)
+  if Code.ensure_loaded?(BroadwayRabbitMQ.ChannelPool) do
+    @behaviour BroadwayRabbitMQ.ChannelPool
+  end
 
   @compile {:no_warn_undefined, [Channel, AmqpClient]}
 
@@ -36,10 +37,8 @@ defmodule UOF.SDK.AMQP.Connection do
     raise ArgumentError, "expected AMQP :connection to be a keyword list or a URI, got: #{inspect(other)}"
   end
 
-  @impl true
   def init(options), do: {:ok, %{options: options, session: nil, connection: nil, error: nil}}
 
-  @impl @channel_pool
   def checkout_channel(server) do
     with {:ok, connection} <- GenServer.call(server, :connection) do
       # Open in the producer process so SelectiveConsumer belongs to it.
@@ -57,7 +56,6 @@ defmodule UOF.SDK.AMQP.Connection do
       end
   end
 
-  @impl @channel_pool
   # AMQP may reply before teardown completes, or report an already-closing
   # channel. Leave that teardown to the protocol: force-killing a channel is
   # reported as an internal error and would close the shared connection.
@@ -68,7 +66,6 @@ defmodule UOF.SDK.AMQP.Connection do
     :exit, _ -> :ok
   end
 
-  @impl true
   def handle_call(:connection, _, %{connection: %{pid: pid} = connection} = state) do
     if Process.alive?(pid) do
       {:reply, {:ok, connection}, state}
@@ -79,7 +76,6 @@ defmodule UOF.SDK.AMQP.Connection do
 
   def handle_call(:connection, _, state), do: connect(state)
 
-  @impl true
   def handle_info({:connected, pid, connection}, %{session: {pid, _}} = state) do
     {:noreply, %{state | connection: connection, error: nil}}
   end

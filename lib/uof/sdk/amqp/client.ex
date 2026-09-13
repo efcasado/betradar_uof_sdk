@@ -15,15 +15,12 @@ defmodule UOF.SDK.AMQP.Client do
 
   require Logger
 
-  @rabbitmq_client if(Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient),
-                     do: BroadwayRabbitMQ.RabbitmqClient,
-                     else: false
-                   )
-  if @rabbitmq_client, do: @behaviour(@rabbitmq_client)
+  if Code.ensure_loaded?(BroadwayRabbitMQ.RabbitmqClient) do
+    @behaviour BroadwayRabbitMQ.RabbitmqClient
+  end
 
   @compile {:no_warn_undefined, [Basic, Queue, AmqpClient]}
 
-  @impl @rabbitmq_client
   def init(opts) do
     {{:custom_pool, _module, _args} = pool, opts} = Keyword.pop!(opts, :connection)
 
@@ -33,18 +30,12 @@ defmodule UOF.SDK.AMQP.Client do
     with {:ok, config} <- AmqpClient.init(opts), do: {:ok, %{config | connection: pool}}
   end
 
-  @impl @rabbitmq_client
   defdelegate ack(channel, delivery_tag), to: AmqpClient
-  @impl @rabbitmq_client
   defdelegate reject(channel, delivery_tag, opts), to: AmqpClient
-  @impl @rabbitmq_client
   defdelegate consume(channel, config), to: AmqpClient
-  @impl @rabbitmq_client
   defdelegate cancel(channel, consumer_tag), to: AmqpClient
-  @impl @rabbitmq_client
   defdelegate close_connection(config, channel), to: AmqpClient
 
-  @impl @rabbitmq_client
   def setup_channel(%{connection: {:custom_pool, pool, args}} = config) do
     case pool.checkout_channel(args) do
       {:ok, channel} -> setup(channel, config, pool, args)

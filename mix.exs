@@ -22,7 +22,7 @@ defmodule UofSdk.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:uof_api, "~> 2.1"},
+      {:uof_api, "~> 3.0"},
       {:uof_schemas, "~> 0.3.0"},
       {:broadway, "~> 1.3"},
       {:broadway_rabbitmq, "~> 0.8", optional: true},

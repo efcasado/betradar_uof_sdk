@@ -17,7 +17,7 @@ defmodule UOF.SDK do
   override per start.
 
   It supervises (in order, with `:rest_for_one`) an optional monitor-state store,
-  producer monitor, an optional transport client, a system-message pipeline,
+  producer monitor, a shared transport client, a system-message pipeline,
   and a content-message pipeline. Runtime state is held directly by the
   `UOF.SDK.ProducerMonitor` GenServer — no separate registry process is needed.
   """
@@ -83,8 +83,8 @@ defmodule UOF.SDK do
     # consumers report failover ownership, and :rest_for_one must take the
     # client and pipelines down with a crashed monitor so re-subscribing Pulsar
     # consumers deliver a fresh ownership report to its restarted passive
-    # state. AMQP has no client child or ownership callback and is configured
-    # permanently active by the transport.
+    # state. AMQP shares a connection child without an ownership callback and
+    # is configured permanently active by the transport.
     Supervisor.init(lifecycle ++ config.transport_children ++ child_specs(config), strategy: :rest_for_one)
   end
 

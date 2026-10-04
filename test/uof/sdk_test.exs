@@ -1,6 +1,7 @@
 defmodule UOF.SDKTest do
   use ExUnit.Case, async: true
 
+  alias UOF.SDK.AMQP.Connection
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.ProducerMonitor.Store
@@ -76,12 +77,12 @@ defmodule UOF.SDKTest do
     assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
     assert system_opts[:name] == SystemPipeline
     assert {BroadwayRabbitMQ.Producer, system_producer_opts} = system_opts[:producer]
-    assert system_producer_opts[:connection] == conn
+    assert system_producer_opts[:connection] == {:custom_pool, Connection, Connection}
 
     assert content_opts[:name] == ContentPipeline
     assert content_opts[:handler] == MyApp.Handler
     assert {BroadwayRabbitMQ.Producer, content_producer_opts} = content_opts[:producer]
-    assert content_producer_opts[:connection] == conn
+    assert content_producer_opts[:connection] == system_producer_opts[:connection]
   end
 
   test "child_specs passes concurrency through to the content pipeline" do
@@ -110,5 +111,18 @@ defmodule UOF.SDKTest do
                child.start ==
                  {Pulsar.Client, :start_link, [[name: :uof_sdk_pulsar, host: "pulsar://localhost:6650"]]}
            end)
+  end
+
+  test "supervises the shared AMQP connection after the monitor and before both pipelines" do
+    assert {:ok, {flags, children}} = UOF.SDK.init(handler: MyApp.Handler)
+    assert flags.strategy == :rest_for_one
+
+    assert Enum.map(children, & &1.id) == [
+             UOF.SDK.ProducerMonitor.Store.ETS,
+             UOF.SDK.ProducerMonitor,
+             Connection,
+             SystemPipeline,
+             ContentPipeline
+           ]
   end
 end

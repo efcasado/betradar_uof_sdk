@@ -14,18 +14,6 @@ defmodule UOF.SDK.MessageMetadataTest do
     assert MessageMetadata.connection_token(message, :amqp, nil) == "amq.ctag-1"
   end
 
-  test "retains the connection pid fallback for custom AMQP producers" do
-    pid = self()
-
-    message = %Message{
-      data: "",
-      acknowledger: {Broadway.NoopAcknowledger, nil, nil},
-      metadata: %{amqp_channel: %{conn: %{pid: pid}}}
-    }
-
-    assert MessageMetadata.connection_token(message, :amqp, nil) == pid
-  end
-
   test "reads the Pulsar routing key from the connector's routing key property" do
     message = %Message{
       data: "",

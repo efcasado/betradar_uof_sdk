@@ -146,19 +146,56 @@ The system subscription uses Failover to select the instance that coordinates pr
 health and recovery. These are independent subscriptions to the same topic: the system
 pipeline filters out event content before decoding it.
 
-The connector publishes the original XML payload, uses the AMQP routing key as the Pulsar
-message key, and includes its server-generated consumer tag in the
-`__rabbitmq_consumer_tag` property. Key-Shared dispatch follows that message key. The SDK
-reads the routing key and upstream consume-session identity from this metadata.
+### Connector Contract
+
+The connector publishes the original XML payload and keeps routing metadata separate from
+the key used for distributed dispatch:
+
+| Field | Purpose |
+| --- | --- |
+| Pulsar message key | Sport-event URN for event messages; `system` for `alive` and `snapshot_complete` |
+| `__rabbitmq_routing_key` property | Original AMQP routing key, used by the SDK for message type, event identity, and node filtering |
+| `__rabbitmq_consumer_tag` property | Server-generated upstream consume-session identity, used to detect possible gaps |
+
+Use a RabbitMQ source connector with `messageKeyRules` and `__rabbitmq_routing_key`
+support ([apache/pulsar-connectors#140](https://github.com/apache/pulsar-connectors/pull/140)).
+Configure these rules in its source configuration; the first full match wins, and
+unmatched keys retain the original routing key:
+
+```json
+{
+  "messageKeyRules": [
+    {
+      "regex": "^[^.]*\\.[^.]*\\.[^.]*\\.(?:alive|snapshot_complete)(?:\\..*)?$",
+      "replacement": "system"
+    },
+    {
+      "regex": "^(?:[^.:]*\\.)+?([^.:]+:[^.:]+)\\.([^.\\-][^.]*)(?:\\..*)?$",
+      "replacement": "$1:$2"
+    }
+  ]
+}
+```
+
+These are JSON rules for the connector, not SDK consumer options. See
+[`docker-compose.yml`](../docker-compose.yml) for the complete local source setup
+(with the extra dollar-sign escaping required by Compose). Do not configure a fixed
+consumer tag: each new upstream consume session must have a distinct server-generated
+tag (`amq.ctag-…`) so the SDK can detect reconnects.
 
 > [!WARNING]
 > If batching is enabled for the RabbitMQ source connector's Pulsar producer, use
 > key-based batching (`KEY_BASED`). Alternatively, disable producer batching.
-> Default batching can combine different routing keys in one batch, which Pulsar
+> Default batching can combine different events and system messages in one batch, which Pulsar
 > routes using the first message's key. This breaks the Key-Shared distribution
 > semantics required by the content subscription. Configure this on the connector's
 > producer; SDK consumer configuration cannot repair mixed-key batches. See
 > [Pulsar's Key-Shared producer requirements](https://pulsar.apache.org/docs/4.2.x/concepts-messaging/).
+
+For the connector CLI, select key-based batching with
+`pulsar-admin sources create --batch-builder KEY_BASED`.
+
+### Ownership and Failover
 
 The supported topic has a single partition: either a non-partitioned topic or a partitioned
 topic with exactly one partition. Failover ownership is assigned per partition, so this
@@ -172,6 +209,27 @@ The monitor starts passive and waits for the broker's ownership report. The acti
 runs periodic health checks and issues recovery requests. Passive instances continue their
 content processing. Demotion parks in-flight recoveries; promotion permits pending work to
 resume. Manual recovery on a passive instance returns `{:error, :passive}`.
+
+### Node Isolation
+
+The source connector binds `#`, so a topic can contain recovery traffic for several
+subscriptions using the same access token. Both SDK pipelines inspect the original routing
+key and acknowledge messages addressed to another node without decoding them, invoking a
+handler, or updating the monitor. Unaddressed messages (`-` in the node position) are
+accepted by every node. A `nil` or non-positive `node_id` disables this filtering.
+
+For Pulsar, `node_id` identifies a subscription, not an individual SDK instance:
+
+- All instances sharing a base subscription must use the same positive `node_id`.
+  Otherwise Key-Shared can deliver part of a recovery replay to instances that discard it,
+  while the active system consumer still accepts `snapshot_complete`: a silent gap.
+- Distinct base subscriptions using the same access token need distinct positive IDs to
+  isolate their recovery replays and `snapshot_complete` messages.
+- Use `nil` only when a single subscription consumes the access token.
+
+Direct AMQP scopes recovery traffic through queue bindings as well as pipeline filtering.
+
+### Backlog and Restart Continuity
 
 The connector is outside the SDK supervision tree. Restarting an SDK instance therefore
 does not necessarily restart the upstream AMQP session. A durable subscription can retain
@@ -187,6 +245,7 @@ Content follows a short path:
 transport delivery
     → routing-key metadata
     → Broadway partition dispatch
+    → node filtering
     → XML decoding
     → application callback
     → content timestamp observation
@@ -200,12 +259,16 @@ for one event go to the same processor, while different events can be handled co
 System messages use a separate pipeline so producer monitoring has its own processing lane.
 There is no processing-completion ordering between the system and content pipelines.
 
-Pulsar dispatch and local Broadway partitioning use different keys. The connector supplies
-the full AMQP routing key as the Pulsar message key, while Broadway extracts the event URN
-for local dispatch. Different routing keys for the same event can therefore reach different
-SDK instances. Local event partitioning does not establish event-wide ordering across those
-instances. Applications that require that guarantee must account for the upstream keying
-and their distributed processing design.
+With the [connector rules above](#connector-contract), Pulsar Key-Shared dispatch and local
+Broadway partitioning use the same event identity. Different message types for one event,
+such as `odds_change` and `bet_stop`, reach the same SDK instance and the same local
+processor. Using the full routing key instead would split those message types across
+instances and defeat per-event ordering. Key-based batching is part of this contract.
+
+This preserves the per-event processing lane, not exactly-once delivery or a total order
+across events. Reconnects, redelivery, and recovery can replay messages. Applications must
+still handle duplicates and stale updates, and preserve ordering themselves if they offload
+work from the synchronous callback.
 
 ### Handler Execution and Delivery
 

@@ -2,8 +2,7 @@
 
 > [!IMPORTANT]
 > This is an **unofficial Elixir SDK** for Betradar's Unified Odds Feed (UOF).
-> Betradar offers official Java and .NET SDKs. You can read more about them at
-> <https://sdk.sportradar.com>.
+> Betradar offers official Java and .NET SDKs at <https://sdk.sportradar.com>.
 
 An Elixir SDK for Betradar's [Unified Odds Feed](https://docs.betradar.com/)
 (UOF). It connects to the feed, decodes XML messages into structs, sends those
@@ -28,145 +27,58 @@ Your application handles:
   messages.
 - Persistence of the data you care about.
 - Idempotency for replayed or duplicated messages.
-- Persistent checkpoint storage in production.
+- [Persistent checkpoint storage](docs/architecture.md#persistence) in
+  production.
 
 ## Installation
 
-Add the SDK and one transport dependency to your application.
-
-For AMQP:
-
-```elixir
-def deps do
-  [
-    {:uof_sdk, "~> 0.1.0"},
-    {:broadway_rabbitmq, "~> 0.8"}
-  ]
-end
-```
-
-For Pulsar:
+Add the SDK and one transport adapter to `mix.exs`, then run `mix deps.get`. The
+SDK requires Elixir 1.20+.
 
 ```elixir
 def deps do
   [
     {:uof_sdk, "~> 0.1.0"},
-    {:off_broadway_pulsar, "~> 2.0"}
+    {:broadway_rabbitmq, "~> 0.8.2"}
   ]
 end
 ```
 
-## Quick start
+For Pulsar, replace `broadway_rabbitmq` with `{:off_broadway_pulsar, "~> 2.0"}`.
+Only the adapter for your chosen transport is required.
 
-The fastest way to verify a connection is to use the built-in log handler.
+## Choosing a transport
 
-Configure one transport with your Betradar access token and virtual host:
+| | AMQP | Pulsar |
+| --- | --- | --- |
+| Connects | Directly to Betradar | Through a RabbitMQ source connector into a Pulsar topic |
+| Scales through | Local Broadway concurrency in one instance | Key-Shared content delivery across instances |
+| On restart | Always recovers | Can resume from retained backlog |
 
-```elixir
-config :uof_sdk,
-  handler: UOF.SDK.LogHandler,
-  node_id: 1,
-  transport: {:amqp,
-    connection: [
-      host: "stgmq.betradar.com",
-      username: System.get_env("UOF_ACCESS_TOKEN"),
-      password: "",
-      virtual_host: "/unifiedfeed/12345",
-      ssl_options: []
-    ]
-  }
-
-config :uof_api,
-  base_url: "https://stgapi.betradar.com/v1",
-  auth_token: System.get_env("UOF_ACCESS_TOKEN")
-```
-
-Start the SDK manually:
-
-```elixir
-UOF.SDK.start_link([])
-```
-
-The SDK connects to the feed, monitors producer health, performs recovery when
-needed, and logs incoming messages through `UOF.SDK.LogHandler`.
-
-## Configuration
-
-> [!NOTE]
-> Configure one transport. The SDK derives the separate Broadway producers it
-> needs for content and system messages.
-
-The transports have different scaling models in this SDK. Pulsar supports
-horizontally distributed content processing: instances sharing a subscription
-divide messages through a Key-Shared subscription, while one instance owns
-system processing through Failover. The direct AMQP transport creates an
-exclusive queue per SDK instance, so instances do not share the workload; it
-is intended primarily for single-instance deployments with local Broadway
-concurrency. This distinction applies to the SDK's transport configuration,
-not to RabbitMQ and Pulsar generally.
+Direct AMQP is primarily for single-instance deployments with local Broadway concurrency.
+Its exclusive queues do not divide work across SDK instances. Pulsar adds durable buffering
+and distributes content across instances sharing a subscription. This is a property of
+the SDK's transport setup, not a general limitation of RabbitMQ or Pulsar.
 
 ### AMQP
 
-```elixir
-config :uof_sdk,
-  handler: MyApp.FeedHandler,
-  node_id: 1,
-  transport: {:amqp,
-    connection: [
-      host: "stgmq.betradar.com",
-      username: System.get_env("UOF_ACCESS_TOKEN"),
-      password: "",
-      virtual_host: "/unifiedfeed/12345",
-      ssl_options: []
-    ]
-  }
+`transport: {:amqp, connection: [...]}` connects directly to Betradar. The
+[quick start](#quick-start) contains a complete integration-environment configuration.
 
-config :uof_api,
-  base_url: "https://stgapi.betradar.com/v1",
-  auth_token: System.get_env("UOF_ACCESS_TOKEN")
-```
-
-`transport: {:amqp, connection: [...]}` configures one supervised AMQP connection
-shared by both [`BroadwayRabbitMQ.Producer`](https://hexdocs.pm/broadway_rabbitmq/BroadwayRabbitMQ.Producer.html)
-pipelines. Each pipeline
-uses its own channel and exclusive queue, with SDK-owned bindings for content
-and system traffic. Channel restarts leave the shared connection open; connection
-loss reconnects both consumers, whose new consumer tags trigger recovery.
-
-Connection establishment runs in a monitored session. While it is connecting,
-checkouts return promptly and Broadway retries with backoff. If the SDK owner
-stops during a handshake, that session finishes the bounded AMQP open and closes
-its result; a replacement attempt waits for cleanup to complete.
-
-Connection-open spans remain available at
-`[:broadway_rabbitmq, :amqp, :open_connection, :start | :stop | :exception]`.
-For returned failures, `[:uof_sdk, :amqp, :setup_failure]` reports the original
-`:operation`, `:reason`, and `:retryable` classification. BroadwayRabbitMQ 0.8 requires a known reason to
-enter its backoff path, so retryable failures use its `:econnrefused` alias;
-use the SDK event for the actual cause. Authentication and protocol rejections
-retain their original reasons and follow Broadway's failure policy. Unexpected
-exits and exceptions propagate after channel cleanup; only known transient
-transport failures are converted to retries. Permission rejection
-(`:not_allowed`) raises explicitly because Broadway otherwise retries it.
-
-Known Betradar AMQP hosts:
-
-| Environment | Host |
-|-------------|------|
+| Environment | AMQP host |
+| --- | --- |
 | Production | `mq.betradar.com` |
 | Integration | `stgmq.betradar.com` |
 | Replay | `replaymq.betradar.com` |
 
 ### Pulsar
 
-For Pulsar, configure one topic and base subscription. The SDK derives the
-content subscription as Key-Shared and the system subscription as Failover.
-It starts one supervised Pulsar client named `:uof_sdk_pulsar`; both subscriptions
-share that client, and it is not started when using the AMQP transport.
+With the Pulsar adapter installed, replace the [quick start](#quick-start)'s `:uof_sdk`
+configuration with:
 
 ```elixir
 config :uof_sdk,
-  handler: MyApp.FeedHandler,
+  handler: UOF.SDK.LogHandler,
   node_id: 1,
   transport: {:pulsar,
     host: "pulsar://localhost:6650",
@@ -175,143 +87,141 @@ config :uof_sdk,
   }
 ```
 
-Pulsar support assumes the SDK's RabbitMQ source connector contract:
+Keep the `:uof_api` configuration: Pulsar still needs API access for producer descriptions
+and recovery. This example assumes a running broker and a RabbitMQ source connector
+configured according to the [connector contract](docs/architecture.md#connector-contract),
+not just a Pulsar topic. Instances that share content delivery use the same topic, base
+subscription, and `node_id`. Additional transport options are passed to
+[`OffBroadway.Pulsar.Producer`](https://hexdocs.pm/off_broadway_pulsar/OffBroadway.Pulsar.Producer.html);
+`:conn_opts` configures the shared client. The SDK owns the two subscription types and the
+system consumer's ownership callback.
 
-- The RabbitMQ source connector produces to a Pulsar topic with a single
-  partition (a non-partitioned topic, or a partitioned topic with exactly one
-  partition). Failover subscription ownership is assigned per partition, so
-  with multiple partitions different SDK instances can each own a slice of the
-  system subscription — `alive` and `snapshot_complete` messages then split
-  across instances and no single instance holds the control plane (producer
-  health tracking and recovery triggering).
-- The AMQP routing key is published as the `__rabbitmq_routing_key` message
-  property (apache/pulsar-connectors#140).
-- The Pulsar message key is the ordering scope: the sport-event URN for event
-  messages and `system` for `alive`/`snapshot_complete`. Key-Shared hashes on
-  it, so every message type for one event lands on the same instance. Keyed by
-  the raw routing key, `odds_change` and `bet_stop` for the same event would
-  hash differently and could be processed out of order on different instances.
-  Configure the connector with these `messageKeyRules` (first full match wins;
-  unmatched keys keep the routing key):
+See the [architecture guide](docs/architecture.md#pulsar) for the connector contract,
+key-based batching, failover, and node isolation.
 
-  ```json
-  "messageKeyRules": [
-    {
-      "regex": "^[^.]*\\.[^.]*\\.[^.]*\\.(?:alive|snapshot_complete)(?:\\..*)?$",
-      "replacement": "system"
-    },
-    {
-      "regex": "^(?:[^.:]*\\.)+?([^.:]+:[^.:]+)\\.([^.\\-][^.]*)(?:\\..*)?$",
-      "replacement": "$1:$2"
-    }
-  ]
-  ```
+## Quick start
 
-- The source batches by key (`pulsar-admin sources create --batch-builder
-  KEY_BASED`). Key-Shared dispatches a batch as one unit under a single key,
-  so the default batcher folds messages for different events, and system
-  messages, into one entry and defeats the keys above.
-- The original XML body is published as the Pulsar payload.
-- `__rabbitmq_consumer_tag` is published as a message property and is a
-  server-generated consumer tag (`amq.ctag-…`), unique per consume session. A
-  connector that pins a fixed consumer tag blinds reconnect detection.
+This example connects directly to Betradar over AMQP. You need a UOF access token
+and your assigned virtual host. For distributed consumption, see
+[Pulsar setup](#pulsar).
 
-The SDK uses the consumer tag as a reconnect token and triggers recovery when
-it changes: a new tag means a new upstream consume session, so a delivery gap
-was possible. The AMQP transport uses its own consumer tag the same way.
-Custom AMQP producers must provide `:consumer_tag` metadata or set
-`:connection_token_metadata_key`; without a token, reconnects go undetected.
+Set `UOF_ACCESS_TOKEN` in your environment. In `config/runtime.exs`, configure the
+feed and recovery API for the same environment. Replace `/unifiedfeed/12345` with
+your assigned virtual host:
 
-#### Multi-instance control plane
+```elixir
+import Config
 
-With multiple SDK instances on the same subscription, the broker elects one
-instance as the Failover system-subscription owner and notifies each instance
-of its role. The SDK wires that signal to `UOF.SDK.ProducerMonitor`: only the
-active instance runs periodic producer health transitions and issues recovery
-requests, while passive instances keep consuming their Key-Shared content
-share. A recovery-required alive racing demotion is retained but not issued
-until promotion. On promotion, the new owner recovers each producer from its
-own last-known checkpoint. The signal is best-effort, not a fencing mechanism:
-briefly-overlapping actives can issue a duplicate recovery request, which
-wastes recovery quota but is otherwise harmless.
-`UOF.SDK.recover/2` returns `{:error, :passive}` on a standby instance.
-Pulsar monitors start passive and wait for the initial broker ownership report
-before issuing recoveries. AMQP monitors start active and do not use ownership
-callbacks.
+config :uof_sdk,
+  handler: UOF.SDK.LogHandler,
+  node_id: 1,
+  transport: {:amqp,
+    connection: [
+      host: "stgmq.betradar.com",
+      username: System.fetch_env!("UOF_ACCESS_TOKEN"),
+      password: "",
+      virtual_host: "/unifiedfeed/12345",
+      ssl_options: []
+    ]
+  }
 
-`:node_id` identifies a subscription, not an instance. Recovery requests carry
-the active instance's `node_id`, and Key-Shared spreads the replay across every
-instance on the subscription, each of which drops messages addressed to
-another node. So:
+config :uof_api,
+  base_url: "https://stgapi.betradar.com/v1",
+  auth_token: System.fetch_env!("UOF_ACCESS_TOKEN")
+```
 
-- All instances on one subscription must share the same `node_id`. With mixed
-  ids, instances drop their share of the active instance's replay, while its
-  `snapshot_complete` still completes the recovery: a silent gap.
-- Distinct subscriptions on the same access token need distinct `node_id`s,
-  or each receives the other's replays and `snapshot_complete`.
-- `nil` disables node scoping; use it only when one subscription consumes the
-  access token.
+These are integration-environment endpoints. See
+[AMQP hosts](#amqp) and [configuration options](#configuration).
 
-### Options
+Add `UOF.SDK` to your application's supervision tree:
 
-| Option | Default | Notes |
-|--------|---------|-------|
-| `:handler` | Required | Your `UOF.SDK.MessageHandler` module |
-| `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}` |
-| `:node_id` | `nil` | Scopes recovery replays and `snapshot_complete` to this client: AMQP via bindings, both transports by filtering in the pipelines. One per Pulsar subscription, shared by all its instances (see "Multi-instance control plane") |
-| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Session and producer-progress persistence |
-| `:concurrency` | `10` | Broadway processor concurrency per feed session |
-| `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |
-| `:max_processing_delay_seconds` | `20` | Consumer-lag threshold before a producer becomes `:delayed` |
-| `:min_interval_between_recoveries` | `30` | Recovery cooldown in seconds |
-| `:max_recovery_time` | `3600` | Stall deadline before reissuing recovery in seconds |
-| `:recovery_overlap_seconds` | `300` | Seconds subtracted from the stored checkpoint when requesting incremental recovery |
+```elixir
+children = [
+  UOF.SDK
+]
 
-> [!NOTE]
-> Recovery throttling defaults follow the official SDK guidance.
-> `:recovery_overlap_seconds` is specific to this SDK and should be tuned for
-> your deployment.
+Supervisor.start_link(children, strategy: :one_for_one, name: MyApp.Supervisor)
+```
 
-## Implementing a handler
+For an interactive smoke test instead, call `UOF.SDK.start_link([])` from
+`iex -S mix`. Start the SDK only once per VM.
 
-`UOF.SDK.LogHandler` logs every message and producer-status change. Use it for a
-first connection, then switch to your own handler when you are ready to process
-messages.
+The SDK connects, synchronizes producers, and logs feed messages through
+`UOF.SDK.LogHandler`. Startup does not mean recovery has completed. Inspect
+producer health with:
 
-To implement a handler, `use UOF.SDK.MessageHandler`. It provides no-op defaults
-for every callback, so override only the callbacks your application needs.
+```elixir
+UOF.SDK.producers()
+UOF.SDK.producer(1)
+```
+
+To handle messages yourself, replace the log handler with your own module.
+`use UOF.SDK.MessageHandler` provides no-op defaults, so override only the
+callbacks you need:
 
 ```elixir
 defmodule MyApp.FeedHandler do
   use UOF.SDK.MessageHandler
 
+  require Logger
+
   @impl true
   def handle_odds_change(odds_change, ctx) do
-    # ctx.producer_id, ctx.event_urn, ctx.routing_key
+    Logger.debug("Odds changed for #{ctx.event_urn}: #{inspect(odds_change)}")
     :ok
   end
 
   @impl true
-  def handle_bet_settlement(settlement, _ctx), do: :ok
-
-  @impl true
   def handle_producer_status(producer) do
-    # producer.status
+    Logger.info("Producer #{producer.id}: #{producer.status}")
     :ok
   end
 end
 ```
 
-Every callback except `handle_producer_status/1` receives:
+Set `handler: MyApp.FeedHandler` in the SDK configuration. Content callbacks
+receive the decoded feed struct and a `UOF.SDK.Context` with producer, message,
+routing, and event identity. Keep callbacks short, return `:ok`, and make effects
+idempotent. If you offload work, make the handoff durable before returning.
 
-- The decoded feed struct.
-- A `UOF.SDK.Context` with `producer_id`, `event_urn`, `routing_key`, and
-  `message_type`.
+The [architecture guide](docs/architecture.md) covers the details beyond first
+connection.
 
-Common callbacks:
+## Configuration
 
-| Callback | Source / concept |
-|----------|------------------|
+Configure `:uof_sdk` through application environment, as shown in the
+[quick start](#quick-start). `UOF.SDK.start_link/1` also accepts keyword
+overrides. Configure one transport; the SDK derives its system and content consumers.
+The `:uof_api` access token and base URL must match the feed environment because startup
+loads producer descriptions and recovery uses the HTTP API.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `:handler` | Required | Module implementing `UOF.SDK.MessageHandler` |
+| `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}`; see [Choosing a transport](#choosing-a-transport) |
+| `:node_id` | `nil` | Positive ID scopes recovery replays and `snapshot_complete`; shared by every instance on one Pulsar subscription, distinct across subscriptions using the same access token |
+| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Session and producer-progress persistence; see [store implementation](docs/architecture.md#implementing-and-configuring-a-store) |
+| `:concurrency` | `10` | Number of content processors in each SDK instance |
+| `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
+| `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound |
+| `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
+| `:max_recovery_time` | `3600` | Wait for recovery completion before reissuing a stalled request |
+| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery |
+
+Public durations are in seconds. Recovery throttling defaults follow the official SDK
+guidance; the overlap setting is SDK-specific and should be tuned for the deployment.
+See [time and recovery controls](docs/architecture.md#time-and-recovery-controls) for the precise semantics.
+
+## Handler reference
+
+Implement `UOF.SDK.MessageHandler` with `use UOF.SDK.MessageHandler`, then set the module
+as `:handler`. The [quick start](#quick-start) shows a minimal handler;
+all callbacks have overridable no-op defaults. Content callbacks receive a decoded
+`UOF.Schemas.Feed.*` struct and a `UOF.SDK.Context` containing `producer_id`, `message_type`,
+`routing_key`, and `event_urn`.
+
+| Callback | Feed message or lifecycle signal |
+| --- | --- |
 | `handle_odds_change/2` | [Odds Change](https://docs.sportradar.com/uof/data-and-features/messages/event/odds-change) |
 | `handle_bet_settlement/2` | [Bet Settlement](https://docs.sportradar.com/uof/data-and-features/messages/event/bet-settlement) |
 | `handle_bet_stop/2` | [Bet Stop](https://docs.sportradar.com/uof/data-and-features/messages/event/bet-stop) |
@@ -319,246 +229,27 @@ Common callbacks:
 | `handle_rollback_bet_cancel/2` | [Rollback Bet Cancel](https://docs.sportradar.com/uof/data-and-features/messages/event/rollback-bet-cancel) |
 | `handle_rollback_bet_settlement/2` | [Rollback Bet Settlements](https://docs.sportradar.com/uof/data-and-features/messages/event/rollback-bet-settlements) |
 | `handle_fixture_change/2` | [Fixture Change](https://docs.sportradar.com/uof/data-and-features/messages/event/fixture-change) |
-| `handle_producer_status/1` | SDK producer lifecycle state, derived from [alive](https://docs.sportradar.com/uof/data-and-features/messages/system/alive) and recovery handling |
+| `handle_producer_status/1` | Lifecycle status transition; receives the same producer struct as `UOF.SDK.producer/1` |
 
-Raw `alive` messages are consumed internally for recovery, checkpointing, and
-producer health. Applications should use `handle_producer_status/1` instead of
-reacting to heartbeat traffic directly. Status callbacks run only when the
-producer's lifecycle `status` changes; timestamp and checkpoint updates are not
-reported.
+Raw `alive` and `snapshot_complete` messages are internal. Status callbacks run only when
+the lifecycle status changes; timestamp and checkpoint updates do not invoke them.
 
-> [!WARNING]
-> Keep callbacks fast. Slow handlers can delay later messages for the same
-> event and may mark a producer as delayed. Offload heavy work asynchronously.
+See [message processing](docs/architecture.md#message-processing) for ordering, delivery,
+and failure semantics.
 
-## Producer health and recovery
+## Testing
 
-Producer state is available synchronously and through the
-`handle_producer_status/1` callback. Both return the same `UOF.SDK.ProducerMonitor.Producer`
-struct.
-
-```elixir
-UOF.SDK.producers()
-#=> [%UOF.SDK.ProducerMonitor.Producer{id: 1, product: "liveodds", status: :up, ...}, ...]
-
-UOF.SDK.producer(1)
-#=> {:ok, %UOF.SDK.ProducerMonitor.Producer{...}}
-```
-
-A producer reports one lifecycle `status`:
-
-- `:down` — not synchronized and no recovery is in flight
-- `:recovering` — waiting to request, requesting, or awaiting recovery
-  completion
-- `:up` — synchronized and safe
-- `:delayed` — the remote feed is healthy but local processing is behind
-- `:resuming` — draining retained backlog after restart while awaiting
-  current-session confirmation
-
-The UOF protocol requires every producer to be recovered before its markets are
-safe to act on. A gap in the message stream can happen on first connect,
-reconnect, or alive heartbeat timeout. When a gap is detected, the SDK:
-
-1. Uses the checkpoint in the producer's durable state, loaded from its store
-   at startup.
-2. Atomically marks the producer as requiring recovery before performing
-   external I/O.
-3. Calls `UOF.API.Recovery.recover/2` with a unique `request_id`.
-4. Requests incremental recovery if a checkpoint exists, or full recovery if it
-   does not.
-5. Receives replayed messages over the same feed.
-6. Marks the producer up when `snapshot_complete` arrives with the matching
-   `request_id`. That system message also establishes the alive-timeout anchor.
-
-`snapshot_complete` is handled on the system pipeline by design. It means the
-feed has finished publishing a recovery replay, not that this SDK instance has
-finished executing all handler callbacks for replayed content.
-
-Local backlog is handled separately by the content lag monitor. If processed
-content-queue timestamps fall behind by more than
-`:max_processing_delay_seconds`, the producer becomes `:delayed` until
-processing catches up. Event messages and content-session `alive` messages both
-advance this lag timestamp; system `alive` messages do not.
-
-A stall guard, configured with `:max_recovery_time`, reissues the recovery
-request if no `snapshot_complete` arrives within the deadline. It preserves the
-original timestamp so messages are not skipped on retry.
-
-## Monitor state persistence
-
-> [!NOTE]
-> The default `UOF.SDK.ProducerMonitor.Store.ETS` is in-memory. Checkpoints,
-> producer synchronization generations, and session state are lost on VM
-> restart, so a full recovery is issued on the next start. This is fine for
-> development and low-volume producers, but production applications should use
-> a persistent store. The ETS store does survive monitor/pipeline crashes within
-> the same VM, so crash-restarts still resume without recovering.
-
-Checkpoints are owned by `ProducerMonitor` and advanced from subscribed system
-`alive` heartbeats after the producer is already in sync. Content messages and
-content-session `alive` messages do not write checkpoints directly.
-
-On recovery, the SDK subtracts `:recovery_overlap_seconds` from the stored
-checkpoint before requesting incremental recovery. This intentionally replays a
-bounded amount of data to cover concurrent processing and distributed-consumer
-skew. Handlers should be idempotent and tolerate duplicates.
-
-To persist across VM restarts, implement the `UOF.SDK.ProducerMonitor.Store`
-behaviour and configure it:
-
-```elixir
-config :uof_sdk, monitor_store: MyApp.ProducerMonitorStore
-```
-
-The behaviour separates the committed consume session from each producer's
-durable recovery progress. The session contains the system and content tokens
-plus a monotonically increasing generation. Producer progress contains its
-checkpoint and the session generation in which it was last synchronized.
-A producer may resume retained backlog only when it has a checkpoint and its
-synchronization generation matches the current session generation.
-
-Implement these callbacks:
-
-- `load_session/0` and `load_producer_progress/0`
-- `commit_session_change/1`, which must atomically store both tokens and
-  advance the session generation
-- `advance_checkpoint/2`, which must advance one producer's checkpoint
-  monotonically
-- `require_recovery/1`, which clears one producer's synchronized generation
-- `mark_synchronized/2`, which records the current session generation for
-  one producer
-
-Advancing the session generation invalidates every producer synchronized in
-an older generation without a multi-producer transaction. If the monitor
-crashes after committing the new tokens but before issuing recovery, the
-generation mismatch still prevents an unsafe resume. If it crashes before the
-session commit, the old tokens cause the change to be detected again.
-
-Recovery preparation is persisted before the HTTP request is issued. This
-ordering is deliberate: if the monitor crashes after requesting recovery, the
-next monitor must recover again rather than incorrectly resume from state that
-still claimed the producer was synchronized.
-
-Each mutation callback must atomically update the session record or one
-producer record as described above. A store must also have exactly one writer:
-its `ProducerMonitor`. Concurrent writes from another monitor, node, or
-administration tool are unsupported and may overwrite newer state.
-
-### Restart resume
-
-With a persistent store, `ProducerMonitor` restores resumability state and
-connection tokens at startup instead of assuming a gap. See
-`UOF.SDK.ProducerMonitor`'s moduledoc ("Restart resume" section) for the full
-mechanics — briefly: a producer healthy at shutdown starts as `:resuming` and
-drains retained backlog instead of recovering immediately. A matching token
-means the upstream consume session did not change; avoiding a gap also requires
-the transport to retain the backlog.
-
-Persisted tokens also close the restart gate: recovery intent may be recorded
-immediately, but no recovery HTTP request is sent until both the system and
-content pipelines report their current sessions. If either pipeline does not
-become ready within `:inactivity_seconds`, the monitor crashes and the SDK's
-`:rest_for_one` supervisor restarts both pipelines. A resumable producer that
-never supplies a current-session alive uses the same interval before falling
-back to normal recovery.
-
-Whether a restart actually avoids recovery is decided by the transport. A
-direct AMQP session always mints a new consumer tag on restart, so recovery
-still fires (the exclusive queue lost messages while down). A Pulsar transport
-fed by a long-lived source connector keeps the same connector tag across app
-restarts, and the durable subscription retains the backlog — so deployments
-restart, drain, and resume without an odds recovery. `subscribed=0` alives and
-token changes replayed from the backlog still force recovery when a genuine
-upstream gap happened while the app was down.
-
-The Pulsar broker must not drop retained backlog: configure no message TTL (or
-one comfortably above your worst-case downtime) and a `producer_exception`
-backlog quota policy — evicted backlog is a silent gap the SDK cannot detect.
-
-Stores that are backed by infrastructure your application already supervises,
-such as an Ecto repo, do not need to be started by the SDK. Configure the store
-module and make sure the repo is part of your application supervision tree
-before `UOF.SDK`.
-
-```elixir
-children = [
-  MyApp.Repo,
-  UOF.SDK
-]
-```
-
-If a store owns a process of its own, implement `child_spec/1`; the SDK will
-start it before the producer monitor.
-
-## Architecture
-
-`UOF.SDK` is a library supervisor that starts the following components in order:
-
-```text
-UOF.SDK
-|-- ProducerMonitor.Store*     - optional configured monitor-state store child
-|-- ProducerMonitor            - producer health and recovery orchestration
-|-- Transport client           - shared AMQP connection owner or Pulsar client
-|-- SystemPipeline             - feed consumer for alive and snapshot_complete
-`-- ContentPipeline            - feed consumer for event content
-```
-
-`*` The store appears in the supervision tree only when the configured
-`UOF.SDK.ProducerMonitor.Store` implementation provides `child_spec/1`.
-
-Messages flow in one direction:
-
-1. Pipelines receive raw AMQP or Pulsar messages.
-2. The SDK decodes the XML payload.
-3. The SDK calls your `MessageHandler`.
-
-`SystemPipeline` owns system traffic such as `alive` and `snapshot_complete`.
-It notifies `ProducerMonitor` for producer lifecycle, recovery correlation, and
-checkpoint advancement.
-
-`ContentPipeline` owns event content and reports content-queue timestamps for
-lag detection. It also consumes session-scoped `alive` messages only as lag
-freshness markers for quiet producers.
-
-`UOF.SDK.ProducerMonitor` defines and owns its runtime state struct. It contains
-the producer aggregates, connection-session state, ownership, loaded durable
-session and producer-progress records, and runtime dependencies. The focused
-modules own their respective transitions:
-
-- `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
-  health observations, lifecycle transitions, and the complete recovery state:
-  static request configuration, cooldown history, the optional pending/in-flight
-  job, HTTP attempts, and timers.
-- `UOF.SDK.ProducerMonitor.Connections` detects consume-session changes.
-- `UOF.SDK.ProducerMonitor.Store.Session` identifies the committed consume
-  sessions and their generation.
-- `UOF.SDK.ProducerMonitor.Store.ProducerProgress` records checkpoints and the
-  generation in which each producer was synchronized.
-- `UOF.SDK.ProducerMonitor.Store` defines granular atomic persistence
-  operations for those records.
-
-The `ProducerMonitor` GenServer is the public coordination boundary: it routes
-events, applies global ownership and connection gates, persists transitions,
-and publishes status callbacks. `UOF.SDK.producers/0` reads its runtime state
-through a `GenServer.call`.
-
-For Pulsar transports, the SDK reads the original AMQP routing key from the
-`__rabbitmq_routing_key` property produced by the RabbitMQ source connector.
-
-## Integration testing
-
-The integration test builds the RabbitMQ source connector, starts the complete
-Docker Compose environment, verifies synthetic UOF events end to end, and
-cleans up afterward:
+Use `make compile` and `make test-unit` for development checks. The Docker-backed
+integration test builds the RabbitMQ source connector, starts the Compose environment,
+verifies synthetic UOF events end to end, and cleans up afterward:
 
 ```bash
 make test-integration
 ```
 
-Use `make compile` and `make test-unit` for the usual development checks.
-
-The connector repository, revision, and checkout directory can be overridden
-with `RABBITMQ_SOURCE_REPO`, `RABBITMQ_SOURCE_REF`, and
-`RABBITMQ_SOURCE_DIR`. Gradle builds incrementally, and CI uses the same command
-with a persistent Gradle cache. The ordinary `mix test` suite excludes this
-Docker-backed test.
+The connector repository, revision, and checkout directory can be overridden with
+`RABBITMQ_SOURCE_REPO`, `RABBITMQ_SOURCE_REF`, and `RABBITMQ_SOURCE_DIR`.
+[`Makefile`](Makefile) pins a connector revision with the required message-key rules
+and routing-key property support. The built connector is cached per revision, locally
+under `tmp/` and in CI, so changing `RABBITMQ_SOURCE_REF` triggers a rebuild. Ordinary
+`mix test` excludes the Docker-backed test.

@@ -1,9 +1,12 @@
 SHELL := /bin/bash
 
-RABBITMQ_SOURCE_REPO ?= https://github.com/efcasado/pulsar-connectors.git
-RABBITMQ_SOURCE_REF ?= improve/rabbitmq-source-connector
-RABBITMQ_SOURCE_DIR ?= $(CURDIR)/tmp/pulsar-connectors
-RABBITMQ_SOURCE_NAR ?= $(CURDIR)/tmp/rabbitmq-source.nar
+# apache/pulsar-connectors#140 (messageKeyRules, __rabbitmq_routing_key).
+# Any commit, branch or tag; the build is cached per ref.
+RABBITMQ_SOURCE_REPO ?= https://github.com/apache/pulsar-connectors.git
+RABBITMQ_SOURCE_REF ?= 7012976b702f0644c50494fb3988a2e7d5c5d65d
+RABBITMQ_SOURCE_DIR ?= $(CURDIR)/tmp/pulsar-connectors-$(RABBITMQ_SOURCE_REF)
+RABBITMQ_SOURCE_NAR ?= $(CURDIR)/tmp/rabbitmq-source-$(RABBITMQ_SOURCE_REF).nar
+export RABBITMQ_SOURCE_NAR
 MIX ?= $(shell command -v mix >/dev/null 2>&1 && echo mix || echo "mise exec -- mix")
 
 .PHONY: deps compile test test-unit rabbitmq-source integration-up integration-down test-integration integration-test
@@ -24,9 +27,10 @@ rabbitmq-source: $(RABBITMQ_SOURCE_NAR)
 $(RABBITMQ_SOURCE_NAR):
 	@set -euo pipefail; \
 	if [[ ! -d "$(RABBITMQ_SOURCE_DIR)" ]]; then \
-		mkdir -p "$(dir $(RABBITMQ_SOURCE_DIR))"; \
-		git clone --branch "$(RABBITMQ_SOURCE_REF)" --depth 1 \
-			"$(RABBITMQ_SOURCE_REPO)" "$(RABBITMQ_SOURCE_DIR)"; \
+		git init --quiet "$(RABBITMQ_SOURCE_DIR)"; \
+		git -C "$(RABBITMQ_SOURCE_DIR)" fetch --quiet --depth 1 \
+			"$(RABBITMQ_SOURCE_REPO)" "$(RABBITMQ_SOURCE_REF)"; \
+		git -C "$(RABBITMQ_SOURCE_DIR)" checkout --quiet FETCH_HEAD; \
 	fi; \
 	"$(RABBITMQ_SOURCE_DIR)/gradlew" -p "$(RABBITMQ_SOURCE_DIR)" :rabbitmq:assemble; \
 	connector_nar="$$(find "$(RABBITMQ_SOURCE_DIR)/rabbitmq/build/libs" -maxdepth 1 \

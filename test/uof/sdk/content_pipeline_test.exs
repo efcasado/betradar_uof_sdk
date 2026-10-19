@@ -208,6 +208,39 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert ctx.event_urn == "sr:match:12345"
   end
 
+  test "reads the routing key from the Pulsar RabbitMQ source property when the key is the event URN" do
+    name = Module.concat(__MODULE__, PulsarRoutingKeyProperty)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             metadata_adapter: :pulsar_rabbitmq_source
+           ]
+         ]}
+    })
+
+    xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
+
+    metadata = %{
+      key: "sr:match:12345",
+      properties: %{"__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.12345.-"}
+    }
+
+    Broadway.test_message(name, xml, metadata: metadata)
+
+    assert_receive {:odds_change, %Feed.OddsChange{}, ctx}, 1_000
+    assert ctx.routing_key == "hi.-.live.odds_change.1.sr:match.12345.-"
+    assert ctx.message_type == "odds_change"
+    assert ctx.event_urn == "sr:match:12345"
+  end
+
   test "observes the content AMQP consumer tag from content-session alives" do
     name = Module.concat(__MODULE__, ConnObserve)
 

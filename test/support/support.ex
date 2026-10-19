@@ -68,6 +68,46 @@ defmodule UOF.SDK.TestSupport do
     raise "Pulsar subscription #{subscription} did not become ready"
   end
 
+  # A subscription nobody consumes from, so its backlog can be peeked.
+  def create_probe_subscription!(subscription) do
+    url = ~c"#{topic_admin_url()}/subscription/#{subscription}"
+
+    case :httpc.request(:put, {url, [], ~c"application/json", ~c""}, [timeout: 5_000], []) do
+      {:ok, {{_version, status, _reason}, _headers, _body}} when status in [200, 204] -> :ok
+      result -> raise "could not create Pulsar subscription #{subscription}: #{inspect(result)}"
+    end
+  end
+
+  def delete_subscription(subscription) do
+    url = ~c"#{topic_admin_url()}/subscription/#{subscription}"
+    :httpc.request(:delete, {url, []}, [timeout: 5_000], [])
+    :ok
+  end
+
+  @doc """
+  Partition key of each backlog entry of `subscription`, oldest first. Peeking
+  is per entry, so a batch shows as one key: a batch mixing message keys would
+  surface only one of them.
+  """
+  def peek_entry_keys(subscription, position \\ 1, acc \\ []) do
+    url = ~c"#{topic_admin_url()}/subscription/#{subscription}/position/#{position}"
+
+    case :httpc.request(:get, {url, []}, [timeout: 5_000], body_format: :binary) do
+      {:ok, {{_version, 200, _reason}, headers, _body}} ->
+        key = Enum.find_value(headers, fn {name, value} -> partition_key_header(name, value) end)
+        peek_entry_keys(subscription, position + 1, [key | acc])
+
+      _result ->
+        Enum.reverse(acc)
+    end
+  end
+
+  defp partition_key_header(name, value) do
+    if String.downcase(to_string(name)) == "x-pulsar-partition-key", do: to_string(value)
+  end
+
+  defp topic_admin_url, do: "http://localhost:#{@pulsar_http_port}/admin/v2/persistent/public/default/uof-feed"
+
   def source_queue do
     url = ~c"http://localhost:#{@rabbitmq_http_port}/api/queues/%2f"
     authorization = ~c"Basic #{Base.encode64("guest:guest")}"

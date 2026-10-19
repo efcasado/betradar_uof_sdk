@@ -27,7 +27,7 @@ Your application handles:
   messages.
 - Persistence of the data you care about.
 - Idempotency for replayed or duplicated messages.
-- [Persistent checkpoint storage](docs/architecture.md#producermonitorstore) in
+- [Persistent checkpoint storage](docs/architecture.md#persistence) in
   production.
 
 ## Installation
@@ -47,11 +47,63 @@ end
 For Pulsar, replace `broadway_rabbitmq` with `{:off_broadway_pulsar, "~> 2.0"}`.
 Only the adapter for your chosen transport is required.
 
+## Choosing a transport
+
+| | AMQP | Pulsar |
+| --- | --- | --- |
+| Connects | Directly to Betradar | Through a RabbitMQ source connector into a Pulsar topic |
+| Scales through | Local Broadway concurrency in one instance | Key-Shared content delivery across instances |
+| On restart | Always recovers | Can resume from retained backlog |
+
+Direct AMQP is primarily for single-instance deployments with local Broadway concurrency.
+Its exclusive queues do not divide work across SDK instances. Pulsar adds durable buffering
+and distributes content across instances sharing a subscription. This is a property of
+the SDK's transport setup, not a general limitation of RabbitMQ or Pulsar.
+
+### AMQP
+
+`transport: {:amqp, connection: [...]}` connects directly to Betradar. The
+[quick start](#quick-start) contains a complete integration-environment configuration.
+
+| Environment | AMQP host |
+| --- | --- |
+| Production | `mq.betradar.com` |
+| Integration | `stgmq.betradar.com` |
+| Replay | `replaymq.betradar.com` |
+
+### Pulsar
+
+With the Pulsar adapter installed, replace the [quick start](#quick-start)'s `:uof_sdk`
+configuration with:
+
+```elixir
+config :uof_sdk,
+  handler: UOF.SDK.LogHandler,
+  node_id: 1,
+  transport: {:pulsar,
+    host: "pulsar://localhost:6650",
+    topic: "uof-feed",
+    subscription: "uof-sdk"
+  }
+```
+
+Keep the `:uof_api` configuration: Pulsar still needs API access for producer descriptions
+and recovery. This example assumes a running broker and a RabbitMQ source connector
+configured according to the [connector contract](docs/architecture.md#connector-contract),
+not just a Pulsar topic. Instances that share content delivery use the same topic, base
+subscription, and `node_id`. Additional transport options are passed to
+[`OffBroadway.Pulsar.Producer`](https://hexdocs.pm/off_broadway_pulsar/OffBroadway.Pulsar.Producer.html);
+`:conn_opts` configures the shared client. The SDK owns the two subscription types and the
+system consumer's ownership callback.
+
+See the [architecture guide](docs/architecture.md#pulsar) for the connector contract,
+key-based batching, failover, and node isolation.
+
 ## Quick start
 
 This example connects directly to Betradar over AMQP. You need a UOF access token
 and your assigned virtual host. For distributed consumption, see
-[Pulsar setup](docs/architecture.md#pulsar).
+[Pulsar setup](#pulsar).
 
 Set `UOF_ACCESS_TOKEN` in your environment. In `config/runtime.exs`, configure the
 feed and recovery API for the same environment. Replace `/unifiedfeed/12345` with
@@ -78,9 +130,8 @@ config :uof_api,
   auth_token: System.fetch_env!("UOF_ACCESS_TOKEN")
 ```
 
-These are integration-environment endpoints. See the guide for
-[AMQP hosts](docs/architecture.md#direct-amqp) and
-[configuration options](docs/architecture.md#configuration).
+These are integration-environment endpoints. See
+[AMQP hosts](#amqp) and [configuration options](#configuration).
 
 Add `UOF.SDK` to your application's supervision tree:
 
@@ -135,3 +186,53 @@ idempotent. If you offload work, make the handoff durable before returning.
 
 The [architecture guide](docs/architecture.md) covers the details beyond first
 connection.
+
+## Configuration
+
+Configure `:uof_sdk` through application environment, as shown in the
+[quick start](#quick-start). `UOF.SDK.start_link/1` also accepts keyword
+overrides. Configure one transport; the SDK derives its system and content consumers.
+The `:uof_api` access token and base URL must match the feed environment because startup
+loads producer descriptions and recovery uses the HTTP API.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `:handler` | Required | Module implementing `UOF.SDK.MessageHandler` |
+| `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}`; see [Choosing a transport](#choosing-a-transport) |
+| `:node_id` | `nil` | Positive ID scopes recovery replays and `snapshot_complete`; shared by every instance on one Pulsar subscription, distinct across subscriptions using the same access token |
+| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Session and producer-progress persistence; see [store implementation](docs/architecture.md#implementing-and-configuring-a-store) |
+| `:concurrency` | `10` | Number of content processors in each SDK instance |
+| `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
+| `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound |
+| `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
+| `:max_recovery_time` | `3600` | Wait for recovery completion before reissuing a stalled request |
+| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery |
+
+Public durations are in seconds. Recovery throttling defaults follow the official SDK
+guidance; the overlap setting is SDK-specific and should be tuned for the deployment.
+See [time and recovery controls](docs/architecture.md#time-and-recovery-controls) for the precise semantics.
+
+## Handler reference
+
+Implement `UOF.SDK.MessageHandler` with `use UOF.SDK.MessageHandler`, then set the module
+as `:handler`. The [quick start](#quick-start) shows a minimal handler;
+all callbacks have overridable no-op defaults. Content callbacks receive a decoded
+`UOF.Schemas.Feed.*` struct and a `UOF.SDK.Context` containing `producer_id`, `message_type`,
+`routing_key`, and `event_urn`.
+
+| Callback | Feed message or lifecycle signal |
+| --- | --- |
+| `handle_odds_change/2` | [Odds Change](https://docs.sportradar.com/uof/data-and-features/messages/event/odds-change) |
+| `handle_bet_settlement/2` | [Bet Settlement](https://docs.sportradar.com/uof/data-and-features/messages/event/bet-settlement) |
+| `handle_bet_stop/2` | [Bet Stop](https://docs.sportradar.com/uof/data-and-features/messages/event/bet-stop) |
+| `handle_bet_cancel/2` | [Bet Cancel](https://docs.sportradar.com/uof/data-and-features/messages/event/bet-cancel) |
+| `handle_rollback_bet_cancel/2` | [Rollback Bet Cancel](https://docs.sportradar.com/uof/data-and-features/messages/event/rollback-bet-cancel) |
+| `handle_rollback_bet_settlement/2` | [Rollback Bet Settlements](https://docs.sportradar.com/uof/data-and-features/messages/event/rollback-bet-settlements) |
+| `handle_fixture_change/2` | [Fixture Change](https://docs.sportradar.com/uof/data-and-features/messages/event/fixture-change) |
+| `handle_producer_status/1` | Lifecycle status transition; receives the same producer struct as `UOF.SDK.producer/1` |
+
+Raw `alive` and `snapshot_complete` messages are internal. Status callbacks run only when
+the lifecycle status changes; timestamp and checkpoint updates do not invoke them.
+
+See [message processing](docs/architecture.md#message-processing) for ordering, delivery,
+and failure semantics.

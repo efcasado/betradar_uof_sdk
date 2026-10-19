@@ -8,10 +8,11 @@ Keep new features within that scope unless the task explicitly expands it.
 ## Start here
 
 - Read the [architecture guide](docs/architecture.md) before changing transport,
-  supervision, message processing, or recovery behavior. It describes component
-  responsibilities, process boundaries, and design invariants.
-- Use the [README](README.md) for public configuration, handler contracts,
-  persistence requirements, and integration-test setup.
+  supervision, message processing, recovery, or persistence behavior. It describes
+  how the SDK works: component responsibilities, process boundaries, the monitor
+  store contract, and the design invariants.
+- Use the [README](README.md) for the public surface: installation, transport
+  choice and configuration, configuration options, handler callbacks, and testing.
 - Update those documents when a change alters the behavior they describe.
 
 ## Implementation conventions
@@ -29,6 +30,10 @@ Keep new features within that scope unless the task explicitly expands it.
   Document why private APIs or unusual lifecycle mechanisms are necessary, and
   include compatibility validation when changing those dependencies.
 - Prefer a focused change over speculative abstractions or configuration options.
+- The SDK is unreleased. Do not add backwards-compatibility fallbacks for older
+  connectors, producers, or configuration; change the contract and its callers.
+- Keep each PR to one concern. Split unrelated cleanups, such as an AMQP change
+  found while working on Pulsar, into their own PR.
 
 ## Validate UOF behavior against upstream
 
@@ -64,7 +69,8 @@ mix test
 
 For transport or lifecycle changes, also run `make test-integration`. It uses
 Docker for RabbitMQ and Pulsar and builds the RabbitMQ source connector when
-needed; see the README and Makefile for prerequisites and overrides.
+needed; see the [README](README.md#testing) and Makefile for prerequisites and
+overrides.
 
 Add regression coverage for changed behavior. Lifecycle tests should exercise
 real process exits, ownership, and reconnection where relevant. Use monitors and
@@ -81,6 +87,10 @@ the runtime suites. Report what was tested and any checks that were not run.
   hypotheses. Consult dependency source when a finding depends on its semantics.
 - Check the architecture guide's invariants, particularly shared AMQP ownership,
   active-only Pulsar recovery, persisted recovery intent, and session generations.
+- For Pulsar, check the [connector contract](docs/architecture.md#connector-contract):
+  routing decisions read the `__rabbitmq_routing_key` property, the message key is
+  the ordering scope (event URN or `system`) and relies on key-based batching, and
+  `node_id` identifies a subscription shared by all of its instances.
 - Check recovery completion against the active producer/request and treat stale
   observations explicitly. Feed synchronization, application processing, and
   transport acknowledgement are distinct boundaries.

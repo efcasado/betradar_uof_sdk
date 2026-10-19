@@ -23,8 +23,7 @@ defmodule UOF.SDK.ContentPipeline do
       UOF routing key for AMQP/custom producers (default `:routing_key`).
     * `:connection_token_metadata_key` — the `message.metadata` field carrying
       a reconnect token. With the default AMQP producer, `nil` uses its consumer
-      tag; custom producers without that metadata fall back to the connection
-      PID.
+      tag.
     * `:node_id` — this SDK node's id. Messages addressed to another node
       (recovery replays it requested) are acked without dispatch. `nil`
       accepts every node.

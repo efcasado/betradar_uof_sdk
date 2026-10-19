@@ -218,13 +218,26 @@ Pulsar monitors start passive and wait for the initial broker ownership report
 before issuing recoveries. AMQP monitors start active and do not use ownership
 callbacks.
 
+`:node_id` identifies a subscription, not an instance. Recovery requests carry
+the active instance's `node_id`, and Key-Shared spreads the replay across every
+instance on the subscription, each of which drops messages addressed to
+another node. So:
+
+- All instances on one subscription must share the same `node_id`. With mixed
+  ids, instances drop their share of the active instance's replay, while its
+  `snapshot_complete` still completes the recovery: a silent gap.
+- Distinct subscriptions on the same access token need distinct `node_id`s,
+  or each receives the other's replays and `snapshot_complete`.
+- `nil` disables node scoping; use it only when one subscription consumes the
+  access token.
+
 ### Options
 
 | Option | Default | Notes |
 |--------|---------|-------|
 | `:handler` | Required | Your `UOF.SDK.MessageHandler` module |
 | `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}` |
-| `:node_id` | `nil` | Scopes recovery replays and `snapshot_complete` to this client: AMQP via bindings, both transports by filtering in the pipelines |
+| `:node_id` | `nil` | Scopes recovery replays and `snapshot_complete` to this client: AMQP via bindings, both transports by filtering in the pipelines. One per Pulsar subscription, shared by all its instances (see "Multi-instance control plane") |
 | `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Session and producer-progress persistence |
 | `:concurrency` | `10` | Broadway processor concurrency per feed session |
 | `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |

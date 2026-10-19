@@ -31,20 +31,8 @@ defmodule UOF.SDK.MessageMetadataTest do
       data: "",
       acknowledger: {Broadway.NoopAcknowledger, nil, nil},
       metadata: %{
-        key: "sr:match:12345",
         properties: %{"__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.12345.-"}
       }
-    }
-
-    assert MessageMetadata.routing_key(message, :pulsar_rabbitmq_source, :routing_key) ==
-             "hi.-.live.odds_change.1.sr:match.12345.-"
-  end
-
-  test "falls back to the Pulsar message key for connectors without the routing key property" do
-    message = %Message{
-      data: "",
-      acknowledger: {Broadway.NoopAcknowledger, nil, nil},
-      metadata: %{key: "hi.-.live.odds_change.1.sr:match.12345.-", properties: %{}}
     }
 
     assert MessageMetadata.routing_key(message, :pulsar_rabbitmq_source, :routing_key) ==

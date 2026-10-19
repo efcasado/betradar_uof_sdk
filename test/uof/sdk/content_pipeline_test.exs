@@ -180,35 +180,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert ctx.event_urn == "sr:match:12345"
   end
 
-  test "reads the routing key from the Pulsar RabbitMQ source partition key" do
-    name = Module.concat(__MODULE__, PulsarRabbitMQSource)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             metadata_adapter: :pulsar_rabbitmq_source
-           ]
-         ]}
-    })
-
-    xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
-    metadata = %{key: "hi.-.live.odds_change.1.sr:match.12345.-"}
-
-    Broadway.test_message(name, xml, metadata: metadata)
-
-    assert_receive {:odds_change, %Feed.OddsChange{}, ctx}, 1_000
-    assert ctx.message_type == "odds_change"
-    assert ctx.event_urn == "sr:match:12345"
-  end
-
-  test "reads the routing key from the Pulsar RabbitMQ source property when the key is the event URN" do
+  test "reads the routing key from the Pulsar RabbitMQ source property" do
     name = Module.concat(__MODULE__, PulsarRoutingKeyProperty)
 
     start_link_supervised!(%{
@@ -229,7 +201,6 @@ defmodule UOF.SDK.ContentPipelineTest do
     xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
 
     metadata = %{
-      key: "sr:match:12345",
       properties: %{"__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.12345.-"}
     }
 
@@ -339,8 +310,8 @@ defmodule UOF.SDK.ContentPipelineTest do
 
     Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
       metadata: %{
-        key: "-.-.-.alive.-.-.-.-",
         properties: %{
+          "__rabbitmq_routing_key" => "-.-.-.alive.-.-.-.-",
           "__rabbitmq_queue_name" => "uof-content",
           "__rabbitmq_consumer_tag" => "ctag-1"
         }
@@ -372,8 +343,8 @@ defmodule UOF.SDK.ContentPipelineTest do
 
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
       metadata: %{
-        key: "hi.-.live.odds_change.1.sr:match.1.-",
         properties: %{
+          "__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.1.-",
           "__rabbitmq_queue_name" => "uof-content",
           "__rabbitmq_consumer_tag" => "ctag-1"
         }
@@ -407,7 +378,6 @@ defmodule UOF.SDK.ContentPipelineTest do
     other =
       Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
         metadata: %{
-          key: "sr:match:1",
           properties: %{
             "__rabbitmq_routing_key" => "lo.pre.-.odds_change.1.sr:match.1.8",
             "__rabbitmq_consumer_tag" => "ctag-1"
@@ -422,14 +392,12 @@ defmodule UOF.SDK.ContentPipelineTest do
 
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="2"/>),
       metadata: %{
-        key: "sr:match:1",
         properties: %{"__rabbitmq_routing_key" => "lo.pre.-.odds_change.1.sr:match.1.7"}
       }
     )
 
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="3"/>),
       metadata: %{
-        key: "sr:match:1",
         properties: %{"__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.1.-"}
       }
     )

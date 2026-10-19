@@ -166,9 +166,7 @@ Pulsar support assumes the SDK's RabbitMQ source connector contract:
   across instances and no single instance holds the control plane (producer
   health tracking and recovery triggering).
 - The AMQP routing key is published as the `__rabbitmq_routing_key` message
-  property (apache/pulsar-connectors#140). Older connectors that publish it as
-  the Pulsar message key instead are still read, but see the ordering note
-  below.
+  property (apache/pulsar-connectors#140).
 - The Pulsar message key is the ordering scope: the sport-event URN for event
   messages and `system` for `alive`/`snapshot_complete`. Key-Shared hashes on
   it, so every message type for one event lands on the same instance. Keyed by
@@ -510,8 +508,7 @@ and publishes status callbacks. `UOF.SDK.producers/0` reads its runtime state
 through a `GenServer.call`.
 
 For Pulsar transports, the SDK reads the original AMQP routing key from the
-`__rabbitmq_routing_key` property produced by the RabbitMQ source connector,
-falling back to the Pulsar message key for older connectors.
+`__rabbitmq_routing_key` property produced by the RabbitMQ source connector.
 
 ## Integration testing
 

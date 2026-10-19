@@ -128,7 +128,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     assert_receive {:ack, ^ref, [_successful], []}, 1_000
   end
 
-  test "reads the routing key from the Pulsar RabbitMQ source partition key" do
+  test "reads the routing key from the Pulsar RabbitMQ source property" do
     name = Module.concat(__MODULE__, PulsarRabbitMQSource)
 
     start_link_supervised!(%{
@@ -147,8 +147,8 @@ defmodule UOF.SDK.SystemPipelineTest do
 
     Broadway.test_message(name, ~s(<alive product="1" timestamp="42" subscribed="1"/>),
       metadata: %{
-        key: "-.-.-.alive.-.-.-.-",
         properties: %{
+          "__rabbitmq_routing_key" => "-.-.-.alive.-.-.-.-",
           "__rabbitmq_queue_name" => "uof-system",
           "__rabbitmq_consumer_tag" => "ctag-1"
         }

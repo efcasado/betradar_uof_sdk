@@ -38,8 +38,8 @@ defmodule UOF.SDK.ContentPipeline do
        Dispatch, partitioning and content timestamp observation derive from it
        (`UOF.SDK.RoutingKey`); without it nothing routes. AMQP/custom producers
        read a flat `message.metadata[:routing_key]` by default. The built-in
-       Pulsar adapter reads the Pulsar message key emitted by the SDK's RabbitMQ
-       source connector.
+       Pulsar adapter reads the `__rabbitmq_routing_key` property emitted by the
+       RabbitMQ source connector.
     2. **Raw UOF XML → `message.data`**, byte-for-byte. `UOF.Schemas.XML.decode/1`
        expects the verbatim feed payload; a connector that wraps or re-encodes
        the body breaks decoding.

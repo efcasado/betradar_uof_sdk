@@ -13,20 +13,10 @@ defmodule UOF.SDK.MessageMetadata do
     end
   end
 
-  # The connector publishes the original routing key as a property, leaving the
-  # message key free to carry the Key_Shared ordering scope (event URN or
-  # `system`, via `messageKeyRules`). Connectors predating the property publish
-  # the routing key as the message key.
   def routing_key(%Message{metadata: metadata}, :pulsar_rabbitmq_source, _key) do
     case metadata[:properties] do
-      %{"__rabbitmq_routing_key" => rk} when is_binary(rk) ->
-        rk
-
-      _properties ->
-        case metadata[:key] do
-          rk when is_binary(rk) -> rk
-          _ -> ""
-        end
+      %{"__rabbitmq_routing_key" => rk} when is_binary(rk) -> rk
+      _properties -> ""
     end
   end
 

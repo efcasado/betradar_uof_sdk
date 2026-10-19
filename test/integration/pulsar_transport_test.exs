@@ -70,7 +70,8 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
        concurrency: 1,
        producer: content_producer,
        metadata_adapter: metadata_adapter,
-       monitor: Monitor}
+       monitor: Monitor,
+       node_id: 7}
     )
 
     TestSupport.wait_for_subscription!("#{subscription}-system")
@@ -111,6 +112,60 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     assert_receive {:observed_message, 1, 42}, 10_000
     assert_receive {:observed_message, 1, 43}, 10_000
+  end
+
+  test "keys messages by ordering scope, one key per batch entry", %{channel: channel} do
+    probe = "uof-sdk-key-probe-#{System.unique_integer([:positive])}"
+    TestSupport.create_probe_subscription!(probe)
+    on_exit(fn -> TestSupport.delete_subscription(probe) end)
+
+    messages = [
+      {"hi.-.live.odds_change.1.sr:match.333.-", ~s(<odds_change product="1" event_id="sr:match:333" timestamp="1"/>)},
+      {"hi.-.live.odds_change.1.sr:match.444.-", ~s(<odds_change product="1" event_id="sr:match:444" timestamp="2"/>)},
+      {"hi.-.live.bet_stop.1.sr:match.333.-", ~s(<bet_stop product="1" event_id="sr:match:333" timestamp="3"/>)},
+      {"-.-.-.alive.-.-.-.-", ~s(<alive product="1" timestamp="4" subscribed="1"/>)},
+      {"-.-.-.snapshot_complete.-.-.-.7", ~s(<snapshot_complete product="1" request_id="1" timestamp="5"/>)}
+    ]
+
+    Enum.each(messages, fn {routing_key, xml} ->
+      :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, xml)
+    end)
+
+    # odds_change and bet_stop for the same event share a key, so Key-Shared
+    # delivers both to the same instance. All distinct keys surviving as entry
+    # keys shows the source's KEY_BASED batcher never mixed them in one entry.
+    assert_receive {:odds_change, _, %{routing_key: "hi.-.live.odds_change.1.sr:match.444.-"}}, 10_000
+
+    assert await_entry_keys(probe, MapSet.new(["sr:match:333", "sr:match:444", "system"])) ==
+             MapSet.new(["sr:match:333", "sr:match:444", "system"])
+  end
+
+  # The probe backlog fills asynchronously; settle on the expected keys or
+  # return the last observation for the assertion message.
+  defp await_entry_keys(subscription, expected, attempts \\ 50) do
+    keys = subscription |> TestSupport.peek_entry_keys() |> MapSet.new()
+
+    if keys == expected or attempts == 0 do
+      keys
+    else
+      Process.sleep(100)
+      await_entry_keys(subscription, expected, attempts - 1)
+    end
+  end
+
+  test "drops another node's recovery replay", %{channel: channel} do
+    other = "lo.pre.-.odds_change.1.sr:match.555.8"
+    ours = "lo.pre.-.odds_change.1.sr:match.555.7"
+
+    for routing_key <- [other, ours] do
+      xml = ~s(<odds_change product="1" event_id="sr:match:555" timestamp="1"/>)
+      :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, xml)
+    end
+
+    # Same event key, so both are handled in order by one processor: once ours
+    # arrives, the other node's message has already been dropped.
+    assert_receive {:odds_change, _, %{routing_key: ^ours}}, 10_000
+    refute_received {:odds_change, _, %{routing_key: ^other}}
   end
 
   test "changes the connection token when the source connector restarts", %{channel: channel} do

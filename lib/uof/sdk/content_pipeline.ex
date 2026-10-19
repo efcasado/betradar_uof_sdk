@@ -25,6 +25,9 @@ defmodule UOF.SDK.ContentPipeline do
       a reconnect token. With the default AMQP producer, `nil` uses its consumer
       tag; custom producers without that metadata fall back to the connection
       PID.
+    * `:node_id` — this SDK node's id. Messages addressed to another node
+      (recovery replays it requested) are acked without dispatch. `nil`
+      accepts every node.
 
   ## Producer contract
 
@@ -35,8 +38,8 @@ defmodule UOF.SDK.ContentPipeline do
        Dispatch, partitioning and content timestamp observation derive from it
        (`UOF.SDK.RoutingKey`); without it nothing routes. AMQP/custom producers
        read a flat `message.metadata[:routing_key]` by default. The built-in
-       Pulsar adapter reads the Pulsar message key emitted by the SDK's RabbitMQ
-       source connector.
+       Pulsar adapter reads the `__rabbitmq_routing_key` property emitted by the
+       RabbitMQ source connector.
     2. **Raw UOF XML → `message.data`**, byte-for-byte. `UOF.Schemas.XML.decode/1`
        expects the verbatim feed payload; a connector that wraps or re-encodes
        the body breaks decoding.
@@ -110,6 +113,7 @@ defmodule UOF.SDK.ContentPipeline do
       context: %{
         handler: handler,
         monitor: Keyword.get(opts, :monitor),
+        node_id: Keyword.get(opts, :node_id),
         metadata_adapter: metadata_adapter,
         routing_key_key: routing_key_key,
         connection_token_key: connection_token_key
@@ -121,6 +125,17 @@ defmodule UOF.SDK.ContentPipeline do
   def handle_message(_processor, %Message{} = message, context) do
     rk = message |> routing_key(context) |> RoutingKey.parse()
 
+    if RoutingKey.for_node?(rk, context.node_id) do
+      handle_node_message(message, context, rk)
+    else
+      message
+    end
+  end
+
+  # The AMQP bindings already scope by node; Pulsar's source connector binds
+  # `#`, so another node's recovery replay on a shared access token reaches
+  # every subscriber and must be dropped here.
+  defp handle_node_message(%Message{} = message, context, rk) do
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
         ctx = %Context{

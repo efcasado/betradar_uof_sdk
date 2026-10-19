@@ -51,7 +51,7 @@ For Pulsar:
 def deps do
   [
     {:uof_sdk, "~> 0.1.0"},
-    {:off_broadway_pulsar, "~> 1.5"}
+    {:off_broadway_pulsar, "~> 2.0"}
   ]
 end
 ```
@@ -165,7 +165,33 @@ Pulsar support assumes the SDK's RabbitMQ source connector contract:
   system subscription — `alive` and `snapshot_complete` messages then split
   across instances and no single instance holds the control plane (producer
   health tracking and recovery triggering).
-- The AMQP routing key is published as the Pulsar message key.
+- The AMQP routing key is published as the `__rabbitmq_routing_key` message
+  property (apache/pulsar-connectors#140).
+- The Pulsar message key is the ordering scope: the sport-event URN for event
+  messages and `system` for `alive`/`snapshot_complete`. Key-Shared hashes on
+  it, so every message type for one event lands on the same instance. Keyed by
+  the raw routing key, `odds_change` and `bet_stop` for the same event would
+  hash differently and could be processed out of order on different instances.
+  Configure the connector with these `messageKeyRules` (first full match wins;
+  unmatched keys keep the routing key):
+
+  ```json
+  "messageKeyRules": [
+    {
+      "regex": "^[^.]*\\.[^.]*\\.[^.]*\\.(?:alive|snapshot_complete)(?:\\..*)?$",
+      "replacement": "system"
+    },
+    {
+      "regex": "^(?:[^.:]*\\.)+?([^.:]+:[^.:]+)\\.([^.\\-][^.]*)(?:\\..*)?$",
+      "replacement": "$1:$2"
+    }
+  ]
+  ```
+
+- The source batches by key (`pulsar-admin sources create --batch-builder
+  KEY_BASED`). Key-Shared dispatches a batch as one unit under a single key,
+  so the default batcher folds messages for different events, and system
+  messages, into one entry and defeats the keys above.
 - The original XML body is published as the Pulsar payload.
 - `__rabbitmq_consumer_tag` is published as a message property and is a
   server-generated consumer tag (`amq.ctag-…`), unique per consume session. A
@@ -192,13 +218,26 @@ Pulsar monitors start passive and wait for the initial broker ownership report
 before issuing recoveries. AMQP monitors start active and do not use ownership
 callbacks.
 
+`:node_id` identifies a subscription, not an instance. Recovery requests carry
+the active instance's `node_id`, and Key-Shared spreads the replay across every
+instance on the subscription, each of which drops messages addressed to
+another node. So:
+
+- All instances on one subscription must share the same `node_id`. With mixed
+  ids, instances drop their share of the active instance's replay, while its
+  `snapshot_complete` still completes the recovery: a silent gap.
+- Distinct subscriptions on the same access token need distinct `node_id`s,
+  or each receives the other's replays and `snapshot_complete`.
+- `nil` disables node scoping; use it only when one subscription consumes the
+  access token.
+
 ### Options
 
 | Option | Default | Notes |
 |--------|---------|-------|
 | `:handler` | Required | Your `UOF.SDK.MessageHandler` module |
 | `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}` |
-| `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
+| `:node_id` | `nil` | Scopes recovery replays and `snapshot_complete` to this client: AMQP via bindings, both transports by filtering in the pipelines. One per Pulsar subscription, shared by all its instances (see "Multi-instance control plane") |
 | `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Session and producer-progress persistence |
 | `:concurrency` | `10` | Broadway processor concurrency per feed session |
 | `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |
@@ -482,7 +521,7 @@ and publishes status callbacks. `UOF.SDK.producers/0` reads its runtime state
 through a `GenServer.call`.
 
 For Pulsar transports, the SDK reads the original AMQP routing key from the
-Pulsar partition key produced by the RabbitMQ source connector.
+`__rabbitmq_routing_key` property produced by the RabbitMQ source connector.
 
 ## Integration testing
 

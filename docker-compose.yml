@@ -51,7 +51,8 @@ services:
           --archive /pulsar/connectors/rabbitmq.nar \
           --name uof-rabbitmq \
           --destination-topic-name persistent://public/default/uof-feed \
-          --source-config '{"host":"rabbitmq","port":5672,"virtualHost":"/","username":"guest","password":"guest","queueName":"","exchangeName":"unifiedfeed","routingKey":"#","passive":false,"exclusive":true,"durable":false,"autoDelete":true,"connectionName":"uof-integration"}'
+          --batch-builder KEY_BASED \
+          --source-config '{"host":"rabbitmq","port":5672,"virtualHost":"/","username":"guest","password":"guest","queueName":"","exchangeName":"unifiedfeed","routingKey":"#","passive":false,"exclusive":true,"durable":false,"autoDelete":true,"connectionName":"uof-integration","messageKeyRules":[{"regex":"^[^.]*\\.[^.]*\\.[^.]*\\.(?:alive|snapshot_complete)(?:\\..*)?$$","replacement":"system"},{"regex":"^(?:[^.:]*\\.)+?([^.:]+:[^.:]+)\\.([^.\\-][^.]*)(?:\\..*)?$$","replacement":"$$1:$$2"}]}'
         exec tail -f /dev/null
     healthcheck:
       test:

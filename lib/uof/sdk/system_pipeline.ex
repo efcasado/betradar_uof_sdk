@@ -21,6 +21,9 @@ defmodule UOF.SDK.SystemPipeline do
       per-connection token for reconnect detection. With the default AMQP
       producer, `nil` uses its consumer tag; custom producers without that
       metadata fall back to the AMQP connection PID.
+    * `:node_id` - this SDK node's id. `snapshot_complete` addressed to another
+      node is acked without reaching the monitor, so a colliding `request_id`
+      from another node cannot complete our recovery. `nil` accepts every node.
   """
 
   use Broadway
@@ -56,6 +59,7 @@ defmodule UOF.SDK.SystemPipeline do
       partition_by: &partition(&1, metadata_adapter, routing_key_key),
       context: %{
         monitor: Keyword.get(opts, :monitor),
+        node_id: Keyword.get(opts, :node_id),
         metadata_adapter: metadata_adapter,
         routing_key_key: routing_key_key,
         connection_token_key: connection_token_key
@@ -67,7 +71,7 @@ defmodule UOF.SDK.SystemPipeline do
   def handle_message(_processor, %Message{} = message, context) do
     rk = message |> routing_key(context) |> RoutingKey.parse()
 
-    if rk.message_type in ["alive", "snapshot_complete"] do
+    if rk.message_type in ["alive", "snapshot_complete"] and RoutingKey.for_node?(rk, context.node_id) do
       handle_system_message(message, context, rk)
     else
       message

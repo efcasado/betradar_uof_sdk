@@ -14,9 +14,9 @@ defmodule UOF.SDK.MessageMetadata do
   end
 
   def routing_key(%Message{metadata: metadata}, :pulsar_rabbitmq_source, _key) do
-    case metadata[:key] do
-      rk when is_binary(rk) -> rk
-      _ -> ""
+    case metadata[:properties] do
+      %{"__rabbitmq_routing_key" => rk} when is_binary(rk) -> rk
+      _properties -> ""
     end
   end
 

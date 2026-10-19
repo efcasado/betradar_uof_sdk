@@ -25,4 +25,17 @@ defmodule UOF.SDK.MessageMetadataTest do
 
     assert MessageMetadata.connection_token(message, :amqp, nil) == pid
   end
+
+  test "reads the Pulsar routing key from the connector's routing key property" do
+    message = %Message{
+      data: "",
+      acknowledger: {Broadway.NoopAcknowledger, nil, nil},
+      metadata: %{
+        properties: %{"__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.12345.-"}
+      }
+    }
+
+    assert MessageMetadata.routing_key(message, :pulsar_rabbitmq_source, :routing_key) ==
+             "hi.-.live.odds_change.1.sr:match.12345.-"
+  end
 end

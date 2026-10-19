@@ -4,14 +4,31 @@
 > This is an **unofficial Elixir SDK** for Betradar's Unified Odds Feed (UOF).
 > Betradar offers official Java and .NET SDKs at <https://sdk.sportradar.com>.
 
-Consume Betradar's [Unified Odds Feed](https://docs.betradar.com/) from Elixir.
-The SDK delivers decoded messages to your callbacks and handles producer health,
-reconnects, and recovery. Your application owns business logic, persistence, and
-idempotent handling of replayed messages.
+An Elixir SDK for Betradar's [Unified Odds Feed](https://docs.betradar.com/)
+(UOF). It connects to the feed, decodes XML messages into structs, sends those
+messages to a handler you implement, and keeps each producer in sync with
+automatic recovery.
 
-It uses [Broadway](https://hexdocs.pm/broadway),
-[`uof_api`](https://hex.pm/packages/uof_api), and
-[`uof_schemas`](https://hex.pm/packages/uof_schemas), with AMQP or Pulsar transport.
+The SDK is built on [Broadway](https://hexdocs.pm/broadway) and depends on
+[`uof_api`](https://hex.pm/packages/uof_api) and
+[`uof_schemas`](https://hex.pm/packages/uof_schemas).
+
+The SDK handles:
+
+- AMQP or Pulsar feed consumption.
+- XML decoding into Elixir structs.
+- Message delivery to your application callbacks.
+- Producer health tracking.
+- Recovery after startup, reconnects, or feed gaps.
+
+Your application handles:
+
+- Business logic for odds changes, settlements, bet stops, and other feed
+  messages.
+- Persistence of the data you care about.
+- Idempotency for replayed or duplicated messages.
+- [Persistent checkpoint storage](docs/architecture.md#producermonitorstore) in
+  production.
 
 ## Quick start
 

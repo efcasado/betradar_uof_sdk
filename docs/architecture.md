@@ -156,9 +156,8 @@ messages and `alive` messages used to observe content freshness. Bindings also a
 Each queue is exclusive and auto-deleted. Instances do not divide work through a shared
 queue, so this mode scales processing through local Broadway concurrency. A fresh consume
 session receives a new consumer tag, which the monitor uses to detect a possible feed gap.
-Custom producers sharing a connection must likewise provide `:consumer_tag` metadata or
-an explicit reconnect token via `:connection_token_metadata_key` to detect channel-only
-reconnects. A connection PID alone cannot identify a replaced consume session.
+Custom producers must likewise provide `:consumer_tag` metadata or set
+`:connection_token_metadata_key`; without a token, reconnects go undetected.
 
 Broadway owns reconnect backoff. A channel failure replaces that channel while the shared
 connection remains available. A connection failure causes both consumers to obtain channels
@@ -661,8 +660,9 @@ make test-integration
 The connector repository, revision, and checkout directory can be overridden with
 `RABBITMQ_SOURCE_REPO`, `RABBITMQ_SOURCE_REF`, and `RABBITMQ_SOURCE_DIR`.
 [`Makefile`](../Makefile) pins a connector revision with the required message-key rules
-and routing-key property support. Gradle builds incrementally, and CI uses the same
-command with a persistent Gradle cache. Ordinary `mix test` excludes the Docker-backed test.
+and routing-key property support. The built connector is cached per revision, locally
+under `tmp/` and in CI, so changing `RABBITMQ_SOURCE_REF` triggers a rebuild. Ordinary
+`mix test` excludes the Docker-backed test.
 
 ## Design Invariants
 

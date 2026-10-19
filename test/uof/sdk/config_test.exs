@@ -2,6 +2,8 @@ defmodule UOF.SDK.ConfigTest do
   use ExUnit.Case, async: true
 
   alias OffBroadway.Pulsar.Producer
+  alias UOF.SDK.AMQP.Client
+  alias UOF.SDK.AMQP.Connection
   alias UOF.SDK.Config
 
   test "builds AMQP producer specs from the transport connection" do
@@ -10,15 +12,17 @@ defmodule UOF.SDK.ConfigTest do
 
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
     assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
-    assert content_opts[:connection] == conn
-    assert system_opts[:connection] == conn
+    assert content_opts[:connection] == {:custom_pool, Connection, Connection}
+    assert system_opts[:connection] == content_opts[:connection]
     assert :consumer_tag in content_opts[:metadata]
     assert :consumer_tag in system_opts[:metadata]
     assert config.metadata_adapter == :amqp
     assert config.routing_key_metadata_key == :routing_key
     assert config.connection_token_metadata_key == nil
     assert config.ownership == :always_active
-    assert config.transport_children == []
+    assert config.transport_children == [{Connection, connection: conn}]
+    assert content_opts[:client] == Client
+    assert system_opts[:client] == Client
   end
 
   test "defaults to AMQP transport with empty connection and ETS monitor store" do
@@ -26,7 +30,8 @@ defmodule UOF.SDK.ConfigTest do
 
     assert config.transport == :amqp
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
-    assert content_opts[:connection] == []
+    assert content_opts[:connection] == {:custom_pool, Connection, Connection}
+    assert config.transport_children == [{Connection, connection: []}]
     assert config.monitor_store == UOF.SDK.ProducerMonitor.Store.ETS
   end
 

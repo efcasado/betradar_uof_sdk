@@ -67,6 +67,19 @@ defmodule UOF.SDK.RoutingKey do
   def partition_key(%__MODULE__{event_urn: nil}), do: :system
   def partition_key(%__MODULE__{event_urn: urn}), do: urn
 
+  @doc """
+  Whether a message is addressed to `node_id`: unaddressed (`-`) messages are
+  for everyone, recovery messages only for the node that requested them. A
+  `nil` or non-positive `node_id` accepts every node, as the AMQP bindings do.
+  """
+  @spec for_node?(t(), integer() | nil) :: boolean()
+  def for_node?(%__MODULE__{node_id: nil}, _node_id), do: true
+
+  def for_node?(%__MODULE__{node_id: node}, node_id) when is_integer(node_id) and node_id > 0,
+    do: node == Integer.to_string(node_id)
+
+  def for_node?(%__MODULE__{}, _node_id), do: true
+
   defp event(parts) do
     case Enum.find_index(parts, &String.contains?(&1, ":")) do
       nil ->

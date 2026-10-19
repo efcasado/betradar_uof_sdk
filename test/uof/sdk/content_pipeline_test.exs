@@ -383,4 +383,58 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:odds_change, _, _}
     assert_receive {:connection_sink, {:content, "ctag-1"}}
   end
+
+  test "acks another node's messages without dispatching them" do
+    name = Module.concat(__MODULE__, OtherNode)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             metadata_adapter: :pulsar_rabbitmq_source,
+             monitor: Sink,
+             node_id: 7
+           ]
+         ]}
+    })
+
+    other =
+      Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+        metadata: %{
+          key: "sr:match:1",
+          properties: %{
+            "__rabbitmq_routing_key" => "lo.pre.-.odds_change.1.sr:match.1.8",
+            "__rabbitmq_consumer_tag" => "ctag-1"
+          }
+        }
+      )
+
+    assert_receive {:ack, ^other, [_successful], []}, 1_000
+    refute_received {:odds_change, _, _}
+    refute_received {:message_sink, _, _}
+    refute_received {:connection_sink, _}
+
+    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="2"/>),
+      metadata: %{
+        key: "sr:match:1",
+        properties: %{"__rabbitmq_routing_key" => "lo.pre.-.odds_change.1.sr:match.1.7"}
+      }
+    )
+
+    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="3"/>),
+      metadata: %{
+        key: "sr:match:1",
+        properties: %{"__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.1.-"}
+      }
+    )
+
+    assert_receive {:odds_change, _, %{routing_key: "lo.pre.-.odds_change.1.sr:match.1.7"}}, 1_000
+    assert_receive {:odds_change, _, %{routing_key: "hi.-.live.odds_change.1.sr:match.1.-"}}, 1_000
+  end
 end

@@ -70,7 +70,8 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
        concurrency: 1,
        producer: content_producer,
        metadata_adapter: metadata_adapter,
-       monitor: Monitor}
+       monitor: Monitor,
+       node_id: 7}
     )
 
     TestSupport.wait_for_subscription!("#{subscription}-system")
@@ -150,6 +151,21 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
       Process.sleep(100)
       await_entry_keys(subscription, expected, attempts - 1)
     end
+  end
+
+  test "drops another node's recovery replay", %{channel: channel} do
+    other = "lo.pre.-.odds_change.1.sr:match.555.8"
+    ours = "lo.pre.-.odds_change.1.sr:match.555.7"
+
+    for routing_key <- [other, ours] do
+      xml = ~s(<odds_change product="1" event_id="sr:match:555" timestamp="1"/>)
+      :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, xml)
+    end
+
+    # Same event key, so both are handled in order by one processor: once ours
+    # arrives, the other node's message has already been dropped.
+    assert_receive {:odds_change, _, %{routing_key: ^ours}}, 10_000
+    refute_received {:odds_change, _, %{routing_key: ^other}}
   end
 
   test "changes the connection token when the source connector restarts", %{channel: channel} do

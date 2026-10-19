@@ -84,6 +84,14 @@ defmodule UOF.SDKTest do
     assert content_producer_opts[:connection] == conn
   end
 
+  test "child_specs passes node_id to both pipelines" do
+    config = Config.load(handler: MyApp.Handler, node_id: 7)
+
+    assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
+    assert system_opts[:node_id] == 7
+    assert content_opts[:node_id] == 7
+  end
+
   test "child_specs passes concurrency through to the content pipeline" do
     assert [{SystemPipeline, _system}, {ContentPipeline, default}] =
              UOF.SDK.child_specs(Config.load(handler: MyApp.Handler))

@@ -226,7 +226,7 @@ callbacks.
 |--------|---------|-------|
 | `:handler` | Required | Your `UOF.SDK.MessageHandler` module |
 | `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}` |
-| `:node_id` | `nil` | Scopes AMQP bindings and recovery `snapshot_complete` per client |
+| `:node_id` | `nil` | Scopes recovery replays and `snapshot_complete` to this client: AMQP via bindings, both transports by filtering in the pipelines |
 | `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Session and producer-progress persistence |
 | `:concurrency` | `10` | Broadway processor concurrency per feed session |
 | `:inactivity_seconds` | `20` | Alive-gap threshold before a producer is marked down and recovered |

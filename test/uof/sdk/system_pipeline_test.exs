@@ -207,4 +207,36 @@ defmodule UOF.SDK.SystemPipelineTest do
 
     assert_receive {:connection_sink, {:system, "conn-abc-123"}}
   end
+
+  test "acks another node's snapshot_complete without reaching the monitor" do
+    name = Module.concat(__MODULE__, OtherNode)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {SystemPipeline, :start_link,
+         [
+           [
+             name: name,
+             producer: {Broadway.DummyProducer, []},
+             monitor: Sink,
+             node_id: 7
+           ]
+         ]}
+    })
+
+    other =
+      Broadway.test_message(name, ~s(<snapshot_complete product="3" timestamp="1" request_id="1"/>),
+        metadata: %{routing_key: "-.-.-.snapshot_complete.-.-.-.8"}
+      )
+
+    assert_receive {:ack, ^other, [_successful], []}, 1_000
+    refute_received {:snapshot_sink, _, _}
+
+    Broadway.test_message(name, ~s(<snapshot_complete product="3" timestamp="1" request_id="1"/>),
+      metadata: %{routing_key: "-.-.-.snapshot_complete.-.-.-.7"}
+    )
+
+    assert_receive {:snapshot_sink, 3, 1}
+  end
 end

@@ -33,4 +33,25 @@ defmodule UOF.SDK.RoutingKeyTest do
     assert rk.node_id == "3"
     assert RoutingKey.partition_key(rk) == :system
   end
+
+  test "accepts unaddressed messages on every node" do
+    rk = RoutingKey.parse("hi.-.live.odds_change.1.sr:match.12345.-")
+
+    assert RoutingKey.for_node?(rk, 7)
+    assert RoutingKey.for_node?(rk, nil)
+  end
+
+  test "accepts node-addressed messages only on that node" do
+    rk = RoutingKey.parse("lo.pre.-.odds_change.1.sr:match.12345.7")
+
+    assert RoutingKey.for_node?(rk, 7)
+    refute RoutingKey.for_node?(rk, 8)
+  end
+
+  test "accepts every node when no positive node_id is configured" do
+    rk = RoutingKey.parse("-.-.-.snapshot_complete.-.-.-.7")
+
+    assert RoutingKey.for_node?(rk, nil)
+    assert RoutingKey.for_node?(rk, 0)
+  end
 end

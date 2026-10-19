@@ -1,21 +1,12 @@
 # Architecture
 
-The SDK connects a UOF feed to application callbacks. It owns transport consumption,
-XML decoding, producer health, and recovery orchestration. The host application owns
-business state and the effects of handling each message.
-
-Start with the [README](../README.md#installation) to install the SDK and receive
-your first messages; it also lists the configuration options and handler callbacks. This
-guide explains how the SDK works: process ownership, transport deployment, message
-processing, recovery, persistence, and restarts.
-
 - [Overview](#overview): public boundaries and the supervision tree
 - [Transports](#transports): [AMQP](#amqp) and [Pulsar](#pulsar)
 - [Message processing](#message-processing): ordering, delivery, and failures
 - [Recovery](#recovery): startup, lifecycle states, and time controls
 - [Persistence](#persistence): the monitor store and restart resume
 - [Observability](#observability): health and telemetry signals
-- [Contributing](#contributing): internals, testing, and design invariants
+- [Contributing](#contributing): internals and design invariants
 
 ## Overview
 
@@ -575,23 +566,6 @@ failures, including normal shutdown during a pending AMQP call, use backoff. Per
 failures retain their cause, and unexpected exits and exceptions propagate after channel
 cleanup. Permission rejection raises explicitly because Broadway otherwise retries it.
 The SDK's setup-failure telemetry preserves the original reason and retry classification.
-
-### Testing
-
-Use `make compile` and `make test-unit` for development checks. The Docker-backed
-integration test builds the RabbitMQ source connector, starts the Compose environment,
-verifies synthetic UOF events end to end, and cleans up afterward:
-
-```bash
-make test-integration
-```
-
-The connector repository, revision, and checkout directory can be overridden with
-`RABBITMQ_SOURCE_REPO`, `RABBITMQ_SOURCE_REF`, and `RABBITMQ_SOURCE_DIR`.
-[`Makefile`](../Makefile) pins a connector revision with the required message-key rules
-and routing-key property support. The built connector is cached per revision, locally
-under `tmp/` and in CI, so changing `RABBITMQ_SOURCE_REF` triggers a rebuild. Ordinary
-`mix test` excludes the Docker-backed test.
 
 ### Design Invariants
 

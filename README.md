@@ -236,3 +236,20 @@ the lifecycle status changes; timestamp and checkpoint updates do not invoke the
 
 See [message processing](docs/architecture.md#message-processing) for ordering, delivery,
 and failure semantics.
+
+## Testing
+
+Use `make compile` and `make test-unit` for development checks. The Docker-backed
+integration test builds the RabbitMQ source connector, starts the Compose environment,
+verifies synthetic UOF events end to end, and cleans up afterward:
+
+```bash
+make test-integration
+```
+
+The connector repository, revision, and checkout directory can be overridden with
+`RABBITMQ_SOURCE_REPO`, `RABBITMQ_SOURCE_REF`, and `RABBITMQ_SOURCE_DIR`.
+[`Makefile`](Makefile) pins a connector revision with the required message-key rules
+and routing-key property support. The built connector is cached per revision, locally
+under `tmp/` and in CI, so changing `RABBITMQ_SOURCE_REF` triggers a rebuild. Ordinary
+`mix test` excludes the Docker-backed test.

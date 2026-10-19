@@ -4,7 +4,7 @@ The SDK connects a UOF feed to application callbacks. It owns transport consumpt
 XML decoding, producer health, and recovery orchestration. The host application owns
 business state and the effects of handling each message.
 
-Start with the [README quick start](../README.md#quick-start) to install the SDK and receive
+Start with the [README](../README.md#installation) to install the SDK and receive
 your first messages. This guide is the reference for configuration, transport deployment,
 callbacks, process ownership, recovery, persistence, and restarts.
 
@@ -346,7 +346,7 @@ work from the synchronous callback.
 ### Handler Reference
 
 Implement `UOF.SDK.MessageHandler` with `use UOF.SDK.MessageHandler`, then set the module
-as `:handler`. The [quick start](../README.md#4-handle-messages) shows a minimal handler;
+as `:handler`. The [quick start](../README.md#quick-start) shows a minimal handler;
 all callbacks have overridable no-op defaults. Content callbacks receive a decoded
 `UOF.Schemas.Feed.*` struct and a `UOF.SDK.Context` containing `producer_id`, `message_type`,
 `routing_key`, and `event_urn`.

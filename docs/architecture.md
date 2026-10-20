@@ -337,7 +337,7 @@ The lifecycle states describe the monitor's view:
 
 | State | Meaning |
 | --- | --- |
-| `:down` | Unsynchronized, with no pending recovery job |
+| `:down` | Unsynchronized: no recovery job yet, or one waiting for the producer's alives to resume |
 | `:recovering` | Recovery is pending, being requested, or awaiting completion |
 | `:up` | The monitor considers the producer synchronized |
 | `:delayed` | Processing observations exceed the configured delay threshold |

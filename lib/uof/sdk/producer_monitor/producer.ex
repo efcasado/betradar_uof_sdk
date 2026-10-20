@@ -11,7 +11,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   persistence, and callbacks.
 
   `status` holds health state only. `UOF.SDK.ProducerMonitor` reports a
-  producer with a recovery job as `:recovering` in `UOF.SDK.ProducerStatus`.
+  producer with a recovery job as `:recovering` in `UOF.SDK.ProducerStatus`,
+  or as `:down` while the job awaits the producer's alives.
 
   ## Recovery sequencing
 

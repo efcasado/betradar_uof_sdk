@@ -247,10 +247,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     tick(m)
 
     # Recovery is recorded at once but issued only when alives resume.
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:status, %ProducerStatus{status: :down}}
     refute_received {:recover_called, _product, _opts}
 
+    flush_statuses()
     ProducerMonitor.alive(m, 1, 2_000, true)
+    assert_receive {:status, %ProducerStatus{status: :recovering}}
     rid2 = assert_recovery_triggered()
 
     # A later recovery follows the same status lifecycle.
@@ -265,6 +267,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
       refute synchronized?(1)
       refute_received {:recover_called, _product, _opts}
+      assert {:ok, %ProducerStatus{status: :down}} = ProducerMonitor.producer(m, 1)
       assert {:error, :already_recovering} = ProducerMonitor.recover(m, 1, [])
     end
 
@@ -273,11 +276,13 @@ defmodule UOF.SDK.ProducerMonitorTest do
       time_out_up_producer(m, clock)
 
       ProducerMonitor.alive(m, 1, 2_000, false)
+      assert_receive {:status, %ProducerStatus{status: :recovering}}
       assert_recovery_triggered()
 
       ProducerMonitor.alive(m, 1, 3_000, false)
       sync(m)
       refute_received {:recover_called, _product, _opts}
+      refute_received {:status, _producer}
     end
 
     test "a reconnect while waiting does not issue the request", %{clock: clock} do
@@ -291,13 +296,16 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
       set_clock(clock, 1_000 + @inactivity + 1)
       tick(m)
-      assert_receive {:status, %ProducerStatus{status: :recovering}}
+      assert_receive {:status, %ProducerStatus{status: :down}}
+      flush_statuses()
 
       ProducerMonitor.observe_connection(m, {:content, :content_b})
       sync(m)
       refute_received {:recover_called, _product, _opts}
+      refute_received {:status, _producer}
 
       ProducerMonitor.alive(m, 1, 2_000, true)
+      assert_receive {:status, %ProducerStatus{status: :recovering}}
       assert_recovery_triggered()
     end
 
@@ -314,7 +322,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
       set_clock(clock, 1_000 + @inactivity + 1)
       tick(m)
-      assert_receive {:status, %ProducerStatus{status: :recovering}}
+      assert_receive {:status, %ProducerStatus{status: :down}}
 
       # Alives resume after the checkpoint has left the 60 min window.
       now = 3 * 60 * 60_000
@@ -335,7 +343,18 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     set_clock(clock, 1_000 + @inactivity + 1)
     tick(m)
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:status, %ProducerStatus{status: :down}}
+    flush_statuses()
+  end
+
+  # Drops status notifications already received, so a later assertion cannot
+  # match one left over from an earlier transition.
+  defp flush_statuses do
+    receive do
+      {:status, _producer} -> flush_statuses()
+    after
+      0 -> :ok
+    end
   end
 
   test "processing lag marks down + delayed without recovering", %{clock: clock} do
@@ -806,10 +825,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     set_clock(clock, 1_000 + @inactivity + 1)
     tick(m)
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:status, %ProducerStatus{status: :down}}
     refute_received {:recover_called, _product, _opts}
 
+    flush_statuses()
     ProducerMonitor.alive(m, 1, 2_000, true)
+    assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", _}
   end
 
@@ -1028,10 +1049,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     set_clock(clock, 1_000 + @inactivity + 1)
     tick(m)
 
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:status, %ProducerStatus{status: :down}}
     refute_received {:recover_called, _product, _opts}
 
+    flush_statuses()
     ProducerMonitor.alive(m, 1, 2_000, true)
+    assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 1_000
   end
@@ -1313,10 +1336,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     report_active_state(m, :active)
     tick(m)
 
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:status, %ProducerStatus{status: :down}}
     refute_received {:recover_called, _product, _opts}
 
+    flush_statuses()
     ProducerMonitor.alive(m, 1, 3_000, true)
+    assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 2_000
   end

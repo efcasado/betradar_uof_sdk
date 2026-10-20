@@ -36,7 +36,9 @@ defmodule UOF.SDK.ProducerMonitor do
   `after:` timestamp, clamped to the producer's recovery window. A heartbeat
   timeout records the recovery immediately but issues it only once the
   producer's alives resume: Betradar rejects recovery while a producer is
-  silent, and failed requests count against its rate limit. Issuing emits
+  silent, and failed requests count against its rate limit. Until then the
+  producer is reported `:down`; the alive that releases the request reports
+  it `:recovering`. Issuing emits
   `[:uof_sdk, :recovery, :initiated]` telemetry and starts the stall deadline.
   Failed requests are retried; stalled requests are reissued from the original
   timestamp. A matching `snapshot_complete` moves the producer to `:up`.
@@ -446,7 +448,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
       {:alive_resumed, producer} ->
         producer = Producer.release_recovery(producer, after_from_checkpoint(state, producer))
-        state |> put_producer(producer) |> maybe_initiate(producer)
+        state |> put_producer(producer) |> notify_recovery(producer) |> maybe_initiate(producer)
 
       {:checkpoint, producer, timestamp} ->
         state
@@ -795,16 +797,24 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Helpers ------------------------------------------------------------------
   # Recovery state stays internal; a pending or in-flight job is reported as
-  # `:recovering`.
+  # `:recovering`. A job awaiting the producer's alives is reported as `:down`:
+  # the producer is silent and no recovery can start until it is heard again.
   defp reported_producer(%Producer{} = producer) do
     recovering? = Producer.recovering?(producer)
+
+    status =
+      cond do
+        Producer.awaiting_alive?(producer) -> :down
+        recovering? -> :recovering
+        true -> producer.status
+      end
 
     %ProducerStatus{
       id: producer.id,
       name: producer.name,
       product: producer.product,
       recovery_window_minutes: producer.recovery_window_minutes,
-      status: if(recovering?, do: :recovering, else: producer.status),
+      status: status,
       last_alive_at: producer.last_alive_at,
       last_message_timestamp: producer.last_message_timestamp,
       processing_queue_delay: if(!recovering?, do: producer.processing_queue_delay)

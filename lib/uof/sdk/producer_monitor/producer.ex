@@ -62,6 +62,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           recovery_window_minutes: integer() | nil,
           status: status(),
           last_alive_at: integer() | nil,
+          resuming_since: integer() | nil,
           last_message_timestamp: integer() | nil,
           processing_queue_delay: integer() | nil,
           recovery: recovery_state() | nil
@@ -83,6 +84,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     :name,
     :recovery_window_minutes,
     :last_alive_at,
+    :resuming_since,
     :last_message_timestamp,
     :processing_queue_delay,
     :recovery,
@@ -365,6 +367,11 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   defp mark_up(%__MODULE__{} = producer) do
     %{producer | status: :up, processing_queue_delay: nil}
   end
+
+  # A resuming producer that has not heard a heartbeat since this instance took
+  # control gets one interval, measured from `resuming_since`.
+  defp alive_violation?(%__MODULE__{last_alive_at: nil, status: :resuming, resuming_since: since}, now, ms)
+       when is_integer(since), do: now - since > ms
 
   defp alive_violation?(%__MODULE__{last_alive_at: nil}, _now, _ms), do: false
   defp alive_violation?(%__MODULE__{last_alive_at: timestamp}, now, ms), do: now - timestamp > ms

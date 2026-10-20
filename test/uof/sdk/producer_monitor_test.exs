@@ -911,6 +911,25 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{status: :up}}
   end
 
+  test "resumed producer stays resuming without a current alive even when both connections are ready", %{
+    clock: clock
+  } do
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 1_500)
+    m = start_monitor(clock)
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    tick(m)
+
+    refute_received {:status, %ProducerStatus{status: :up}}
+    assert {:ok, %ProducerStatus{status: :resuming, last_alive_at: nil}} = ProducerMonitor.producer(m, 1)
+
+    ProducerMonitor.alive(m, 1, 1_600, true)
+    tick(m)
+    assert_receive {:status, %ProducerStatus{status: :up, last_alive_at: 1_500}}
+  end
+
   test "resumed producer without a current alive times out through the normal health check", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     m = start_monitor(clock)

@@ -213,24 +213,31 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec complete_recovery(t(), integer(), integer()) :: {:ok, t()} | :stale
-  def complete_recovery(%__MODULE__{recovery: %{job: %{request_id: request_id}} = recovery} = producer, request_id, now)
+  @spec complete_recovery(t(), integer(), integer(), non_neg_integer(), integer() | nil) :: {:ok, t()} | :stale
+  # Completion applies the same content-lag check as a health tick: content
+  # already known to lag (e.g. a stuck handler) completes the recovery as
+  # :delayed rather than reporting :up for one tick.
+  def complete_recovery(
+        %__MODULE__{recovery: %{job: %{request_id: request_id}} = recovery} = producer,
+        request_id,
+        now,
+        max_processing_delay_ms,
+        in_flight_ts
+      )
       when not is_nil(request_id) do
     emit(producer, :completed, %{duration_ms: recovery.monotonic_fun.() - recovery.last_issued_at}, %{
       request_id: request_id
     })
 
-    {:ok,
-     %{
-       producer
-       | recovery: %{recovery | job: nil},
-         status: :up,
-         last_alive_at: now,
-         processing_queue_delay: nil
-     }}
+    producer = %{producer | recovery: %{recovery | job: nil}, last_alive_at: now}
+    freshness = content_freshness(producer, in_flight_ts)
+
+    if processing_violation?(freshness, now, max_processing_delay_ms),
+      do: {:ok, mark_delayed(producer, now - freshness)},
+      else: {:ok, mark_up(producer)}
   end
 
-  def complete_recovery(%__MODULE__{}, _request_id, _now), do: :stale
+  def complete_recovery(%__MODULE__{}, _request_id, _now, _max_processing_delay_ms, _in_flight_ts), do: :stale
 
   @doc false
   @spec park_recovery(t()) :: t()

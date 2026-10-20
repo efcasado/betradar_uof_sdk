@@ -404,6 +404,40 @@ defmodule UOF.SDK.ProducerMonitorTest do
     # Below the heartbeat interval, so lag is checked before an alive timeout.
     @lag 5_000
 
+    test "a recovery completing while content is known to lag reports delayed, not up", %{clock: clock} do
+      m = start_monitor([max_processing_delay_ms: @lag], clock)
+      test_pid = self()
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      rid = assert_recovery_triggered()
+
+      stuck =
+        spawn_link(fn ->
+          ProducerMonitor.track_processing(1, 1_000, fn ->
+            send(test_pid, :handling)
+
+            receive do
+              :finish -> :ok
+            end
+          end)
+        end)
+
+      assert_receive :handling
+      set_clock(clock, 1_000 + @lag + 1)
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+
+      assert_receive {:status, %ProducerStatus{status: :delayed, processing_queue_delay: delay}}
+      assert delay == @lag + 1
+      refute_received {:status, %ProducerStatus{status: :up}}
+
+      # Once fresh content is processed, the producer catches up.
+      send(stuck, :finish)
+      wait_until_idle(stuck)
+      ProducerMonitor.message(m, 1, 1_000 + @lag + 1)
+      tick(m)
+      assert_receive {:status, %ProducerStatus{status: :up}}
+    end
+
     test "a stuck processor is not hidden by fresher completed messages", %{clock: clock} do
       m = start_monitor([max_processing_delay_ms: @lag], clock)
       bring_up(m)

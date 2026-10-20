@@ -111,6 +111,47 @@ defmodule UOF.SDK.ConfigTest do
     assert config.ownership == {:failover, :passive}
   end
 
+  test "Pulsar consumers dead-letter failed messages after a single attempt by default" do
+    config =
+      Config.load(
+        handler: LogHandler,
+        transport: {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
+      )
+
+    for {Producer, opts} <- [config.content_producer, config.system_producer] do
+      consumer_opts = opts[:consumer_opts]
+      assert consumer_opts[:redelivery_interval] == 1_000
+      assert consumer_opts[:dead_letter_policy] == [max_redelivery: 1]
+      assert consumer_opts[:batch_index_ack_enabled] == true
+    end
+  end
+
+  test "user consumer options override the Pulsar failure defaults" do
+    config =
+      Config.load(
+        handler: LogHandler,
+        transport:
+          {:pulsar,
+           host: "pulsar://localhost:6650",
+           topic: "uof-feed",
+           subscription: "uof-sdk",
+           consumer_opts: [
+             redelivery_interval: 5_000,
+             dead_letter_policy: [max_redelivery: 3, topic: "uof-dlq"],
+             subscription_type: :shared
+           ]}
+      )
+
+    {Producer, opts} = config.content_producer
+    consumer_opts = opts[:consumer_opts]
+
+    assert consumer_opts[:redelivery_interval] == 5_000
+    assert consumer_opts[:dead_letter_policy] == [max_redelivery: 3, topic: "uof-dlq"]
+    assert consumer_opts[:batch_index_ack_enabled] == true
+    # The subscription type stays SDK-owned.
+    assert consumer_opts[:subscription_type] == :key_shared
+  end
+
   test "passes Pulsar :conn_opts through to the supervised client" do
     config =
       Config.load(

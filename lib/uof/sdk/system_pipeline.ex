@@ -107,14 +107,15 @@ defmodule UOF.SDK.SystemPipeline do
         %{routing_key: rk.raw, message_type: rk.message_type, reason: message.status}
       )
 
-      Logger.error("UOF system message processing failed: #{inspect(message.status)}",
-        uof_reason: inspect(message.status),
-        uof_routing_key: rk.raw,
-        uof_message_type: rk.message_type,
-        uof_event_urn: rk.event_urn,
-        uof_redelivered: message.metadata[:redelivered],
-        uof_delivery_tag: message.metadata[:delivery_tag],
-        uof_payload: truncate(message.data, 4096)
+      Logger.error(
+        "UOF system message processing failed: #{inspect(message.status)}",
+        [
+          uof_reason: inspect(message.status),
+          uof_routing_key: rk.raw,
+          uof_message_type: rk.message_type,
+          uof_event_urn: rk.event_urn,
+          uof_payload: truncate(message.data, 4096)
+        ] ++ MessageMetadata.delivery_log_metadata(message, context.metadata_adapter)
       )
     end
 

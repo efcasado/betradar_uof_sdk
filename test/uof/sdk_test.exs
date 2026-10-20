@@ -6,8 +6,6 @@ defmodule UOF.SDKTest do
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.LogHandler
   alias UOF.SDK.ProducerMonitor.Store
-  alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
-  alias UOF.SDK.ProducerMonitor.Store.Session
   alias UOF.SDK.SystemPipeline
 
   defmodule CallbackOnlyMonitorStore do
@@ -15,22 +13,10 @@ defmodule UOF.SDKTest do
     @behaviour Store
 
     @impl true
-    def load_session, do: %Session{}
+    def load(_opts), do: nil
 
     @impl true
-    def load_producer_progress, do: %{}
-
-    @impl true
-    def commit_session_change(tokens), do: %Session{tokens: tokens, generation: 1}
-
-    @impl true
-    def advance_checkpoint(_id, timestamp), do: %ProducerProgress{checkpoint: timestamp}
-
-    @impl true
-    def require_recovery(_id), do: %ProducerProgress{}
-
-    @impl true
-    def mark_synchronized(_id, generation), do: %ProducerProgress{synchronized_generation: generation}
+    def save(_snapshot, _opts), do: :ok
   end
 
   defmodule StartableMonitorStore do
@@ -45,30 +31,18 @@ defmodule UOF.SDKTest do
     def init(opts), do: {:ok, opts}
 
     @impl true
-    def load_session, do: %Session{}
+    def load(_opts), do: nil
 
     @impl true
-    def load_producer_progress, do: %{}
-
-    @impl true
-    def commit_session_change(tokens), do: %Session{tokens: tokens, generation: 1}
-
-    @impl true
-    def advance_checkpoint(_id, timestamp), do: %ProducerProgress{checkpoint: timestamp}
-
-    @impl true
-    def require_recovery(_id), do: %ProducerProgress{}
-
-    @impl true
-    def mark_synchronized(_id, generation), do: %ProducerProgress{synchronized_generation: generation}
+    def save(_snapshot, _opts), do: :ok
   end
 
   test "monitor_store_child_specs omits callback-only stores" do
-    assert UOF.SDK.monitor_store_child_specs(CallbackOnlyMonitorStore) == []
+    assert UOF.SDK.monitor_store_child_specs({CallbackOnlyMonitorStore, []}) == []
   end
 
   test "monitor_store_child_specs includes stores with child specs" do
-    assert UOF.SDK.monitor_store_child_specs(StartableMonitorStore) == [StartableMonitorStore]
+    assert UOF.SDK.monitor_store_child_specs({StartableMonitorStore, key: :a}) == [{StartableMonitorStore, key: :a}]
   end
 
   test "child_specs passes normalized producer specs to system and content pipelines" do

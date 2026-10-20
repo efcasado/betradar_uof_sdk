@@ -3,13 +3,39 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerMonitor.Producer
+  alias UOF.SDK.ProducerMonitor.Snapshot
   alias UOF.SDK.ProducerMonitor.Store
-  alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
-  alias UOF.SDK.ProducerMonitor.Store.Session
+  alias UOF.SDK.ProducerMonitor.Store.ETS
   alias UOF.SDK.ProducerStatus
 
   @inactivity 10_000
   @now 1_000_000_000_000
+
+  # Records each saved snapshot so tests can order persistence against HTTP.
+  defmodule RecordingStore do
+    @moduledoc false
+    @behaviour Store
+
+    @impl true
+    def load(_opts), do: ETS.load([])
+
+    @impl true
+    def save(snapshot, opts) do
+      send(Keyword.fetch!(opts, :pid), {:saved, Snapshot.decode!(snapshot)})
+      ETS.save(snapshot, [])
+    end
+  end
+
+  defmodule FailingStore do
+    @moduledoc false
+    @behaviour Store
+
+    @impl true
+    def load(_opts), do: ETS.load([])
+
+    @impl true
+    def save(_snapshot, _opts), do: raise("store unavailable")
+  end
 
   defmodule Handler do
     @moduledoc false
@@ -24,7 +50,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   setup do
     Application.put_env(:uof_sdk_test, :test_pid, self())
-    start_supervised!(Store.ETS)
+    start_supervised!(ETS)
     clock = start_supervised!(%{id: :clock, start: {Agent, :start_link, [fn -> 1_000 end]}})
     %{clock: clock}
   end
@@ -58,40 +84,44 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   defp set_clock(clock, value), do: Agent.update(clock, fn _ -> value end)
 
+  defp stored_snapshot do
+    case ETS.load([]) do
+      nil -> %Snapshot{}
+      binary -> Snapshot.decode!(binary)
+    end
+  end
+
+  defp store_snapshot(snapshot), do: ETS.save(Snapshot.encode(snapshot), [])
+
+  defp update_stored_progress(id, fun) do
+    snapshot = stored_snapshot()
+    store_snapshot(Snapshot.put_progress(snapshot, id, fun.(Snapshot.progress(snapshot, id))))
+  end
+
   defp put_checkpoint(id, timestamp) do
-    Store.ETS.advance_checkpoint(id, timestamp)
+    update_stored_progress(id, &%{&1 | checkpoint: max(&1.checkpoint || timestamp, timestamp)})
   end
 
   defp checkpoint(id) do
-    case Map.get(Store.ETS.load_producer_progress(), id, %ProducerProgress{}).checkpoint do
+    case Snapshot.progress(stored_snapshot(), id).checkpoint do
       nil -> :none
       timestamp -> {:ok, timestamp}
     end
   end
 
   defp save_state(checkpoints, synchronized_producers, session_tokens \\ %{}) do
-    generation =
-      if map_size(session_tokens) == 0 do
-        Store.ETS.load_session().generation
-      else
-        Store.ETS.commit_session_change(session_tokens).generation
-      end
+    if map_size(session_tokens) > 0 do
+      store_snapshot(Snapshot.change_session(stored_snapshot(), session_tokens))
+    end
 
-    Enum.each(checkpoints, fn {id, timestamp} -> Store.ETS.advance_checkpoint(id, timestamp) end)
-    Enum.each(synchronized_producers, fn id -> Store.ETS.mark_synchronized(id, generation) end)
+    ## Health monitoring ---------------------------------------------------------
+    Enum.each(checkpoints, fn {id, timestamp} -> put_checkpoint(id, timestamp) end)
+    Enum.each(synchronized_producers, fn id -> update_stored_progress(id, &%{&1 | synchronized: true}) end)
   end
 
-  defp resumable?(id) do
-    session = Store.ETS.load_session()
-    progress = Map.get(Store.ETS.load_producer_progress(), id, %ProducerProgress{})
-    ProducerProgress.resumable?(progress, session.generation)
-  end
+  defp resumable?(id), do: Snapshot.resumable?(stored_snapshot(), id)
 
-  defp synchronized?(id) do
-    session = Store.ETS.load_session()
-    progress = Map.get(Store.ETS.load_producer_progress(), id, %ProducerProgress{})
-    progress.synchronized_generation == session.generation
-  end
+  defp synchronized?(id), do: Snapshot.progress(stored_snapshot(), id).synchronized
 
   defp tick(monitor) do
     send(monitor, :tick)
@@ -104,8 +134,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, ^product, opts}
     opts[:request_id]
   end
-
-  ## Health monitoring ---------------------------------------------------------
 
   test "loads active producer descriptions when no producer list is injected" do
     descriptions = [
@@ -155,8 +183,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert %ProducerMonitor{
              ownership: {:failover, :active},
              producers: %{1 => %Producer{}},
-             session: %Session{},
-             producer_progress: %{}
+             snapshot: %Snapshot{}
            } = :sys.get_state(monitor)
   end
 
@@ -478,8 +505,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert :error = ProducerMonitor.producer(m, 99)
   end
 
-  ## Recovery orchestration ----------------------------------------------------
-
   test "full recovery (no checkpoint) omits :after", %{clock: clock} do
     m = start_monitor(clock)
     ProducerMonitor.alive(m, 1, 1_000, true)
@@ -489,6 +514,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   test "incremental recovery uses the checkpoint as :after", %{clock: clock} do
     put_checkpoint(1, @now - 60_000)
+    ## Recovery orchestration ----------------------------------------------------
     m = start_monitor([now_fun: fn -> @now end], clock)
     ProducerMonitor.alive(m, 1, 1_000, true)
     assert_receive {:recover_called, "pre", opts}
@@ -934,12 +960,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert opts[:after] == 1_000
   end
 
-  test "a committed session generation invalidates producers before recovery is prepared", %{clock: clock} do
+  test "a session change saved before a restart leaves producers unsynchronized", %{clock: clock} do
     persist_healthy_shutdown(1_000)
 
-    # Simulate a crash after the new connection state is committed but before
-    # the monitor visits producer 1 to prepare its recovery.
-    Store.ETS.commit_session_change(%{system: "ctag-sys", content: "ctag-con-2"})
+    # Simulate a crash after the session change is saved but before the
+    # monitor visits producer 1 to prepare its recovery.
+    store_snapshot(Snapshot.change_session(stored_snapshot(), %{system: "ctag-sys", content: "ctag-con-2"}))
 
     m = start_monitor(clock)
     assert {:ok, %ProducerStatus{status: :down}} = ProducerMonitor.producer(m, 1)
@@ -954,6 +980,58 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 1_000
+  end
+
+  test "recovery intent is saved before the recovery request", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 50_000)
+    m = start_monitor([monitor_store: {RecordingStore, pid: self()}], clock)
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.alive(m, 1, 50_000, false)
+
+    # The monitor sends both messages, so mailbox order is issue order.
+    assert [{:saved, saved}, {:recover_called, "pre", _opts}] = saves_and_requests([])
+    refute Snapshot.resumable?(saved, 1)
+  end
+
+  defp saves_and_requests(acc) do
+    receive do
+      {:saved, _snapshot} = saved -> saves_and_requests([saved | acc])
+      {:recover_called, _product, _opts} = request -> Enum.reverse([request | acc])
+    after
+      1_000 -> flunk("no recovery request after #{inspect(Enum.reverse(acc))}")
+    end
+  end
+
+  test "a failing save crashes the monitor before the recovery request", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 50_000)
+    m = start_monitor([monitor_store: {FailingStore, []}], clock)
+    ref = Process.monitor(m)
+
+    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.alive(m, 1, 50_000, false)
+
+    assert_receive {:DOWN, ^ref, :process, ^m, {%RuntimeError{message: "store unavailable"}, _}}
+    refute_received {:recover_called, _, _}
+    assert resumable?(1)
+  end
+
+  test "an unreadable snapshot fails startup instead of loading as empty" do
+    ETS.save("garbage", [])
+
+    assert_raise ArgumentError, ~r/unreadable producer monitor snapshot/, fn ->
+      ProducerMonitor.init(producers: [%Producer{id: 1, product: "pre"}], tick_ms: 60_000)
+    end
+  end
+
+  test "a missing snapshot starts every producer down", %{clock: clock} do
+    m = start_monitor(clock)
+    assert {:ok, %ProducerStatus{status: :down}} = ProducerMonitor.producer(m, 1)
+    assert ETS.load([]) == nil
   end
 
   test "resumed producer recovers on an unsubscribed alive", %{clock: clock} do
@@ -1020,8 +1098,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:ok, %ProducerStatus{status: :resuming}} = ProducerMonitor.producer(m, 1)
   end
 
-  ## State persistence ----------------------------------------------------------
-
   test "persists whether a producer is synchronized", %{clock: clock} do
     m = start_monitor(clock)
 
@@ -1061,18 +1137,16 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.observe_connection(m, {:system, "ctag-a"})
     sync(m)
-    assert Store.ETS.load_session().tokens == %{}
+    assert stored_snapshot().tokens == %{}
 
     ProducerMonitor.observe_connection(m, {:content, "ctag-b"})
     sync(m)
-    assert Store.ETS.load_session().tokens == %{system: "ctag-a", content: "ctag-b"}
+    assert stored_snapshot().tokens == %{system: "ctag-a", content: "ctag-b"}
 
     ProducerMonitor.observe_connection(m, {:system, "ctag-c"})
     sync(m)
-    assert Store.ETS.load_session().tokens == %{system: "ctag-c", content: "ctag-b"}
+    assert stored_snapshot().tokens == %{system: "ctag-c", content: "ctag-b"}
   end
-
-  ## Control-plane ownership ---------------------------------------------------
 
   defp report_active_state(monitor, active_state) do
     ProducerMonitor.active_state_change(monitor, %{
@@ -1099,6 +1173,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   test "an always-active monitor ignores failover ownership reports", %{clock: clock} do
+    ## State persistence ----------------------------------------------------------
     m = start_monitor([ownership: :always_active], clock)
 
     report_active_state(m, :passive)
@@ -1172,6 +1247,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _opts}
     report_active_state(m, :passive)
 
+    ## Control-plane ownership ---------------------------------------------------
+
     # The API retry becomes due while passive, but only the active owner may
     # issue it.
     refute_receive {:recover_called, "pre", _opts}, 100
@@ -1237,8 +1314,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{status: :up}}
   end
 
-  ## Connection sessions -------------------------------------------------------
-
   defp establish_session(m) do
     ProducerMonitor.observe_connection(m, {:system, "s1"})
     ProducerMonitor.observe_connection(m, {:content, "c1"})
@@ -1261,7 +1336,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(m)
 
     refute_receive {:recover_called, _product, _opts}
-    assert Store.ETS.load_session().tokens == %{system: "s1", content: "c2"}
+    assert stored_snapshot().tokens == %{system: "s1", content: "c2"}
   end
 
   test "persisted tokens arm the restart connection gate before observations arrive", %{clock: clock} do
@@ -1295,7 +1370,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute_receive {:recover_called, _product, _opts}
     refute_receive {:status, _producer}
     assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
-    assert Store.ETS.load_session().tokens == %{system: "s1", content: "c1"}
+    assert stored_snapshot().tokens == %{system: "s1", content: "c1"}
     assert synchronized?(1)
 
     # the stale baseline re-detects the session change once promoted
@@ -1303,10 +1378,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.observe_connection(m, {:content, "c2"})
     assert_recovery_triggered()
     sync(m)
-    assert Store.ETS.load_session().tokens == %{system: "s1", content: "c2"}
+    assert stored_snapshot().tokens == %{system: "s1", content: "c2"}
   end
-
-  ## Timer and checkpoint hygiene ---------------------------------------------
 
   test "a stale retry timer does not issue recovery for a healthy producer", %{clock: clock} do
     m = start_monitor(clock)
@@ -1339,4 +1412,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(m)
     assert checkpoint(1) == {:ok, 2_000}
   end
+
+  ## Connection sessions -------------------------------------------------------
+
+  ## Timer and checkpoint hygiene ---------------------------------------------
 end

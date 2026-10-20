@@ -86,7 +86,7 @@ the runtime suites. Report what was tested and any checks that were not run.
   trigger, affected behavior, and consequence; distinguish verified failures from
   hypotheses. Consult dependency source when a finding depends on its semantics.
 - Check the architecture guide's invariants, particularly shared AMQP ownership,
-  active-only Pulsar recovery, persisted recovery intent, and session generations.
+  active-only Pulsar recovery, persisted recovery intent, and atomic monitor snapshots.
 - For Pulsar, check the [connector contract](docs/architecture.md#connector-contract):
   routing decisions read the `__rabbitmq_routing_key` property, the message key is
   the ordering scope (event URN or `system`) and relies on key-based batching, and

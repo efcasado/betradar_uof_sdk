@@ -8,17 +8,17 @@ defmodule UOF.SDK.ProducerStatus do
     * `:down` — not synchronized and no recovery is pending
     * `:recovering` — waiting to request, requesting, or awaiting recovery
       completion
-    * `:up` — synchronized
-    * `:delayed` — the remote feed is healthy but local processing is behind
+    * `:up` — synchronized: the feed has no known gap. Content, including a
+      recovery replay, may still be awaiting processing; measure processing
+      lag from the feed timestamps your callbacks receive.
     * `:resuming` — draining retained backlog after a restart and awaiting
       current-session confirmation
 
-  Timestamps are epoch milliseconds. `last_alive_at` is when this node last
-  observed a system heartbeat; `last_message_timestamp` is the newest processed
-  feed timestamp. `processing_queue_delay` is set only while `:delayed`.
+  `last_alive_at` is when this node last observed a system heartbeat, in epoch
+  milliseconds.
   """
 
-  @type status :: :down | :recovering | :up | :delayed | :resuming
+  @type status :: :down | :recovering | :up | :resuming
 
   @type t :: %__MODULE__{
           id: integer(),
@@ -26,9 +26,7 @@ defmodule UOF.SDK.ProducerStatus do
           product: String.t() | nil,
           recovery_window_minutes: integer() | nil,
           status: status(),
-          last_alive_at: integer() | nil,
-          last_message_timestamp: integer() | nil,
-          processing_queue_delay: integer() | nil
+          last_alive_at: integer() | nil
         }
 
   @enforce_keys [:id, :status]
@@ -38,8 +36,6 @@ defmodule UOF.SDK.ProducerStatus do
     :product,
     :recovery_window_minutes,
     :status,
-    :last_alive_at,
-    :last_message_timestamp,
-    :processing_queue_delay
+    :last_alive_at
   ]
 end

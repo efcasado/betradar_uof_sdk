@@ -42,7 +42,7 @@ defmodule UOF.SDK.MessageHandler do
   @callback handle_fixture_change(%Feed.FixtureChange{}, Context.t()) :: :ok
 
   @doc """
-  Called whenever a producer's health changes (up/down, delayed, recovery). The
+  Called whenever a producer's status changes (up, down, recovering, resuming). The
   same `UOF.SDK.ProducerStatus` returned by `UOF.SDK.producers/0`.
   """
   @callback handle_producer_status(UOF.SDK.ProducerStatus.t()) :: :ok

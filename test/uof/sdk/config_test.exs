@@ -209,15 +209,12 @@ defmodule UOF.SDK.ConfigTest do
     assert config.node_id == 42
   end
 
-  test "defaults the health thresholds and overrides max_processing_delay_seconds" do
+  test "defaults the health thresholds and overrides inactivity_seconds" do
     defaults = Config.load(handler: LogHandler)
     assert defaults.inactivity_seconds == 20
-    assert defaults.max_processing_delay_seconds == 20
     assert defaults.recovery_overlap_seconds == 300
 
-    tuned = Config.load(handler: LogHandler, max_processing_delay_seconds: 45)
-    assert tuned.max_processing_delay_seconds == 45
-    assert tuned.inactivity_seconds == 20
+    assert Config.load(handler: LogHandler, inactivity_seconds: 45).inactivity_seconds == 45
   end
 
   test "accepts a recovery overlap override" do
@@ -260,14 +257,6 @@ defmodule UOF.SDK.ConfigTest do
     assert_raise NimbleOptions.ValidationError, ~r/IncompleteStore does not implement/, fn ->
       Config.load(handler: LogHandler, monitor_store: IncompleteStore)
     end
-  end
-
-  test "requires the recovery overlap to exceed the processing delay" do
-    assert_raise ArgumentError, ~r/recovery_overlap_seconds \(20\) must exceed max_processing_delay_seconds \(20\)/, fn ->
-      Config.load(handler: LogHandler, recovery_overlap_seconds: 20)
-    end
-
-    assert Config.load(handler: LogHandler, recovery_overlap_seconds: 21).recovery_overlap_seconds == 21
   end
 
   test "normalizes configured fallback producers" do

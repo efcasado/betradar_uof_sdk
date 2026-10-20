@@ -42,11 +42,6 @@ defmodule UOF.SDK.Config do
       default: 20,
       doc: "Heartbeat timeout and session-readiness waiting interval."
     ],
-    max_processing_delay_seconds: [
-      type: :pos_integer,
-      default: 20,
-      doc: "Content-lag threshold and restart-resume freshness bound."
-    ],
     min_interval_between_recoveries: [
       type: :pos_integer,
       default: 30,
@@ -77,8 +72,8 @@ defmodule UOF.SDK.Config do
       type: :pos_integer,
       default: 300,
       doc: """
-      Look-back subtracted from the stored checkpoint for incremental recovery. Must exceed
-      `:max_processing_delay_seconds`.
+      Look-back subtracted from the stored checkpoint for incremental recovery. With AMQP it
+      must exceed the worst-case content processing lag, including a recovery replay.
       """
     ]
   ]
@@ -136,7 +131,6 @@ defmodule UOF.SDK.Config do
           monitor_store: {module(), keyword()},
           concurrency: pos_integer(),
           inactivity_seconds: pos_integer(),
-          max_processing_delay_seconds: pos_integer(),
           min_interval_between_recoveries: pos_integer(),
           max_recovery_time: pos_integer(),
           recovery_overlap_seconds: pos_integer(),
@@ -156,7 +150,6 @@ defmodule UOF.SDK.Config do
     :monitor_store,
     :concurrency,
     :inactivity_seconds,
-    :max_processing_delay_seconds,
     :min_interval_between_recoveries,
     :max_recovery_time,
     :recovery_overlap_seconds,
@@ -173,7 +166,6 @@ defmodule UOF.SDK.Config do
       |> Application.get_all_env()
       |> Keyword.merge(overrides)
       |> NimbleOptions.validate!(@schema)
-      |> validate_recovery_overlap!()
 
     pipelines = Transport.producers(cfg[:transport], cfg[:node_id])
 
@@ -189,22 +181,6 @@ defmodule UOF.SDK.Config do
         routing_key_metadata_key: pipelines.routing_key_metadata_key
       )
     )
-  end
-
-  # Subscribed alives advance the checkpoint while a producer is :up, which
-  # tolerates content lagging by up to the processing delay. Incremental
-  # recovery must look back further than that, or a restart can skip messages
-  # that were delivered but not yet processed.
-  defp validate_recovery_overlap!(cfg) do
-    overlap = Keyword.fetch!(cfg, :recovery_overlap_seconds)
-    delay = Keyword.fetch!(cfg, :max_processing_delay_seconds)
-
-    if overlap <= delay do
-      raise ArgumentError,
-            "recovery_overlap_seconds (#{overlap}) must exceed max_processing_delay_seconds (#{delay})"
-    end
-
-    cfg
   end
 
   @doc false

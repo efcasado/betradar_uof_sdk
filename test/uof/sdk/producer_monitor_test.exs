@@ -70,7 +70,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
       end,
       now_fun: fn -> Agent.get(clock, & &1) end,
       inactivity_ms: @inactivity,
-      max_processing_delay_ms: @inactivity,
       tick_ms: 60_000,
       recovery_overlap_ms: 0,
       # Most unit tests start with control authority. Ownership-specific tests
@@ -371,148 +370,20 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
   end
 
-  test "processing lag marks down + delayed without recovering", %{clock: clock} do
+  test "a healthy feed keeps a producer up without content observations", %{clock: clock} do
     m = start_monitor(clock)
+    bring_up(m)
+    flush_statuses()
 
-    # bring it up first
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    # Local clock jumps to 20_000, but the newest message the content pipeline
-    # processed was generated back at 1_000. A fresh system alive keeps the
-    # alive-interval path quiet, so the processing check is what trips.
-    set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 20_000, true)
-    ProducerMonitor.message(m, 1, 1_000)
-    sync(m)
-
+    # Status reports feed synchronization only: processing lag is the
+    # application's concern, measured from the timestamps its callbacks see.
+    set_clock(clock, 1_000 + @inactivity)
+    ProducerMonitor.alive(m, 1, 1_000 + @inactivity, true)
     tick(m)
-    assert_receive {:status, %ProducerStatus{status: :delayed}}
 
+    refute_received {:status, _producer}
     refute_received {:recover_called, _, _}
-
-    # content progress generated at ~now arrives -> caught up -> stabilized
-    ProducerMonitor.message(m, 1, 20_000)
-    tick(m)
-
-    assert_receive {:status, %ProducerStatus{status: :up}}
-  end
-
-  describe "content lag from in-flight messages" do
-    # Below the heartbeat interval, so lag is checked before an alive timeout.
-    @lag 5_000
-
-    test "a recovery completing while content is known to lag reports delayed, not up", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      test_pid = self()
-
-      ProducerMonitor.alive(m, 1, 1_000, true)
-      rid = assert_recovery_triggered()
-
-      stuck =
-        spawn_link(fn ->
-          ProducerMonitor.track_processing(1, 1_000, fn ->
-            send(test_pid, :handling)
-
-            receive do
-              :finish -> :ok
-            end
-          end)
-        end)
-
-      assert_receive :handling
-      set_clock(clock, 1_000 + @lag + 1)
-      ProducerMonitor.snapshot_complete(m, 1, rid)
-
-      assert_receive {:status, %ProducerStatus{status: :delayed, processing_queue_delay: delay}}
-      assert delay == @lag + 1
-      refute_received {:status, %ProducerStatus{status: :up}}
-
-      # Once fresh content is processed, the producer catches up.
-      send(stuck, :finish)
-      wait_until_idle(stuck)
-      ProducerMonitor.message(m, 1, 1_000 + @lag + 1)
-      tick(m)
-      assert_receive {:status, %ProducerStatus{status: :up}}
-    end
-
-    test "a stuck processor is not hidden by fresher completed messages", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      bring_up(m)
-
-      test_pid = self()
-
-      stuck =
-        spawn_link(fn ->
-          ProducerMonitor.track_processing(1, 1_000, fn ->
-            send(test_pid, :handling)
-
-            receive do
-              :finish -> :ok
-            end
-          end)
-        end)
-
-      assert_receive :handling
-
-      # Another processor completes a fresh message while the first is stuck.
-      set_clock(clock, 1_000 + @lag + 1)
-      ProducerMonitor.message(m, 1, 1_000 + @lag + 1)
-      tick(m)
-
-      assert_receive {:status, %ProducerStatus{status: :delayed, processing_queue_delay: delay}}
-      assert delay == @lag + 1
-
-      send(stuck, :finish)
-      wait_until_idle(stuck)
-      tick(m)
-      assert_receive {:status, %ProducerStatus{status: :up}}
-    end
-
-    test "a completed message records its timestamp", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      bring_up(m)
-
-      ProducerMonitor.track_processing(1, 4_000, fn -> :ok end)
-      sync(m)
-
-      assert {:ok, %ProducerStatus{last_message_timestamp: 4_000}} = ProducerMonitor.producer(m, 1)
-    end
-
-    test "a raising handler's message counts as processed, not in flight", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      bring_up(m)
-
-      assert_raise RuntimeError, fn ->
-        ProducerMonitor.track_processing(1, 1_000, fn -> raise "handler failed" end)
-      end
-
-      # The pipeline has moved past a failed message, so it advances freshness.
-      sync(m)
-      assert {:ok, %ProducerStatus{last_message_timestamp: 1_000}} = ProducerMonitor.producer(m, 1)
-
-      set_clock(clock, 2_000)
-      ProducerMonitor.message(m, 1, 2_000)
-      tick(m)
-      refute_received {:status, %ProducerStatus{status: :delayed}}
-    end
-
-    test "a processor that dies mid-message is not counted", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      bring_up(m)
-
-      pid = spawn(fn -> ProducerMonitor.track_processing(1, 1_000, fn -> Process.sleep(:infinity) end) end)
-      wait_until(fn -> Map.has_key?(:sys.get_state(m).in_flight, pid) end)
-      Process.exit(pid, :kill)
-      wait_until(fn -> not Map.has_key?(:sys.get_state(m).in_flight, pid) end)
-
-      set_clock(clock, 1_000 + @lag + 1)
-      ProducerMonitor.message(m, 1, 1_000 + @lag + 1)
-      tick(m)
-      refute_received {:status, %ProducerStatus{status: :delayed}}
-    end
+    assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
   end
 
   defp bring_up(m) do
@@ -522,81 +393,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{status: :up}}
   end
 
-  defp wait_until_idle(pid) do
-    ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
-  end
-
   defp wait_until(fun, attempts \\ 100) do
     cond do
       fun.() -> :ok
       attempts == 0 -> flunk("condition not met")
       true -> Process.sleep(5) && wait_until(fun, attempts - 1)
     end
-  end
-
-  test "content-session alive freshness prevents quiet producers from being marked delayed", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    set_clock(clock, 20_000)
-
-    # System alive keeps delivery health/checkpointing fresh. The content
-    # session's own alive is queued behind content and therefore proves local
-    # content processing is not lagging, even when there are no event messages.
-    ProducerMonitor.alive(m, 1, 20_000, true)
-    ProducerMonitor.message(m, 1, 20_000)
-    tick(m)
-
-    refute_received {:status, %ProducerStatus{status: :delayed}}
-    refute_received {:recover_called, _, _}
-    assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
-  end
-
-  test "content-session alive freshness does not write checkpoints", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    ProducerMonitor.message(m, 1, 2_000)
-    sync(m)
-
-    assert checkpoint(1) == :none
-  end
-
-  test "alive on a delayed producer does not trigger recovery", %{clock: clock} do
-    m = start_monitor(clock)
-
-    # bring it up
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    # drive it into processing lag: local clock at 20_000 but
-    # content progress is still back at 1_000, with a fresh alive so the
-    # alive-interval path stays quiet and the processing check is what trips.
-    set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 20_000, true)
-    ProducerMonitor.message(m, 1, 1_000)
-    sync(m)
-    tick(m)
-    assert_receive {:status, %ProducerStatus{status: :delayed}}
-
-    # another subscribed alive arrives while still delayed and still behind: the
-    # remote feed is healthy, so this must NOT issue a recovery (the flop bug
-    # re-triggered on every alive).
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    sync(m)
-    refute_received {:recover_called, _, _}
-    assert {:ok, %ProducerStatus{status: :delayed}} = ProducerMonitor.producer(m, 1)
   end
 
   test "startup connection recovery waits for both system and content namespaces", %{clock: clock} do
@@ -1243,7 +1045,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     )
   end
 
-  test "resumed producer skips startup recovery and returns up once caught up", %{clock: clock} do
+  test "resumed producer skips startup recovery and returns up after a current alive", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 50_000)
     m = start_monitor(clock)
@@ -1251,48 +1053,26 @@ defmodule UOF.SDK.ProducerMonitorTest do
     # same consumer tags after restart -> same upstream consume session -> no recovery
     ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
     ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
-    # subscribed alive on the resuming producer -> no recovery either
-    ProducerMonitor.alive(m, 1, 50_000, true)
+    # an alive drained from retained backlog -> no recovery, still resuming
+    ProducerMonitor.alive(m, 1, 2_000, true)
     sync(m)
     refute_received {:recover_called, _, _}
-    assert {:ok, %ProducerStatus{status: :resuming}} = ProducerMonitor.producer(m, 1)
 
-    # still draining: no content processed in this session yet
     tick(m)
     refute_received {:status, %ProducerStatus{status: :up}}
+    assert {:ok, %ProducerStatus{status: :resuming}} = ProducerMonitor.producer(m, 1)
 
-    # backlog catches up -> stabilized -> up, without ever recovering
-    ProducerMonitor.message(m, 1, 50_000)
+    # system delivery reaches the live feed -> up, without ever recovering
+    ProducerMonitor.alive(m, 1, 50_000, true)
     tick(m)
     assert_receive {:status, %ProducerStatus{status: :up}}
     refute_received {:recover_called, _, _}
-  end
-
-  test "a recent checkpoint is not content evidence for a resumed producer", %{clock: clock} do
-    persist_healthy_shutdown(1_000)
-    set_clock(clock, 1_500)
-    m = start_monitor(clock)
-
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
-    ProducerMonitor.alive(m, 1, 1_500, true)
-    tick(m)
-
-    refute_received {:status, %ProducerStatus{status: :up}}
-    assert {:ok, %ProducerStatus{status: :resuming, last_message_timestamp: nil}} = ProducerMonitor.producer(m, 1)
-
-    ProducerMonitor.message(m, 1, 1_500)
-    tick(m)
-    assert_receive {:status, %ProducerStatus{status: :up}}
   end
 
   test "resumed producer stays down until an alive and both connections are observed", %{clock: clock} do
-    # fresh content is already processed, so the heartbeat and connection gates
-    # are what must keep the producer resuming here
     persist_healthy_shutdown(1_000)
     set_clock(clock, 1_500)
     m = start_monitor(clock)
-    ProducerMonitor.message(m, 1, 1_500)
 
     tick(m)
     refute_received {:status, %ProducerStatus{status: :up}}
@@ -1326,7 +1106,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:ok, %ProducerStatus{status: :resuming, last_alive_at: nil}} = ProducerMonitor.producer(m, 1)
 
     ProducerMonitor.alive(m, 1, 1_600, true)
-    ProducerMonitor.message(m, 1, 1_600)
     tick(m)
     assert_receive {:status, %ProducerStatus{status: :up, last_alive_at: 1_500}}
   end
@@ -1670,23 +1449,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     tick(m)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     refute synchronized?(1)
-  end
-
-  test "persists delayed transitions", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 20_000, true)
-    ProducerMonitor.message(m, 1, 1_000)
-    tick(m)
-    assert_receive {:status, %ProducerStatus{status: :delayed}}
-
-    assert synchronized?(1)
   end
 
   test "persists consumer tags as they change", %{clock: clock} do

@@ -28,14 +28,6 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
   defmodule Monitor do
     @moduledoc false
 
-    def message(product, timestamp), do: notify({:observed_message, product, timestamp})
-
-    def track_processing(product, timestamp, fun) do
-      result = fun.()
-      notify({:observed_message, product, timestamp})
-      result
-    end
-
     def observe_connection(tag), do: notify({:observed_connection, tag})
 
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
@@ -116,9 +108,6 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     assert_receive {:observed_connection, {:content, consumer_tag}}, 10_000
     assert is_binary(consumer_tag) and consumer_tag != ""
-
-    assert_receive {:observed_message, 1, 42}, 10_000
-    assert_receive {:observed_message, 1, 43}, 10_000
   end
 
   test "keys messages by ordering scope, one key per batch entry", %{channel: channel} do

@@ -11,7 +11,7 @@ defmodule UOF.SDK.MessageMetadataTest do
       metadata: %{consumer_tag: "amq.ctag-1"}
     }
 
-    assert MessageMetadata.connection_token(message, :amqp, nil) == "amq.ctag-1"
+    assert MessageMetadata.consumer_tag(message, :amqp) == "amq.ctag-1"
   end
 
   test "reads the Pulsar routing key from the connector's routing key property" do

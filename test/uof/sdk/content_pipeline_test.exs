@@ -21,7 +21,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     @moduledoc false
     def message(product, ts), do: emit({:message_sink, product, ts})
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
-    def observe_connection(token), do: emit({:connection_sink, token})
+    def observe_consumer_tag(tag), do: emit({:consumer_tag_sink, tag})
 
     defp emit(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
   end
@@ -234,7 +234,7 @@ defmodule UOF.SDK.ContentPipelineTest do
       metadata: %{routing_key: "-.-.-.alive.-.-.-.-", consumer_tag: "amq.ctag-content-1"}
     )
 
-    assert_receive {:connection_sink, {:content, "amq.ctag-content-1"}}
+    assert_receive {:consumer_tag_sink, {:content, "amq.ctag-content-1"}}
   end
 
   test "does not observe the content AMQP connection on event messages" do
@@ -260,37 +260,11 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:odds_change, _, _}
-    refute_received {:connection_sink, _}
+    refute_received {:consumer_tag_sink, _}
   end
 
-  test "observes a content connection token from a custom metadata field" do
-    name = Module.concat(__MODULE__, CustomToken)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink,
-             connection_token_metadata_key: :conn_id
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", conn_id: "conn-abc-123"}
-    )
-
-    assert_receive {:connection_sink, {:content, "conn-abc-123"}}
-  end
-
-  test "observes a connection token from Pulsar RabbitMQ source properties" do
-    name = Module.concat(__MODULE__, PulsarConnToken)
+  test "observes a consumer tag from Pulsar RabbitMQ source properties" do
+    name = Module.concat(__MODULE__, PulsarConsumerTag)
 
     start_link_supervised!(%{
       id: name,
@@ -319,11 +293,11 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:message_sink, 1, 1}
-    assert_receive {:connection_sink, {:content, "ctag-1"}}
+    assert_receive {:consumer_tag_sink, {:content, "ctag-1"}}
   end
 
-  test "observes a Pulsar RabbitMQ source connection token from event messages" do
-    name = Module.concat(__MODULE__, PulsarEventConnToken)
+  test "observes a Pulsar RabbitMQ source consumer tag from event messages" do
+    name = Module.concat(__MODULE__, PulsarEventConsumerTag)
 
     start_link_supervised!(%{
       id: name,
@@ -352,7 +326,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:odds_change, _, _}
-    assert_receive {:connection_sink, {:content, "ctag-1"}}
+    assert_receive {:consumer_tag_sink, {:content, "ctag-1"}}
   end
 
   test "acks another node's messages without dispatching them" do
@@ -388,7 +362,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:ack, ^other, [_successful], []}, 1_000
     refute_received {:odds_change, _, _}
     refute_received {:message_sink, _, _}
-    refute_received {:connection_sink, _}
+    refute_received {:consumer_tag_sink, _}
 
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="2"/>),
       metadata: %{

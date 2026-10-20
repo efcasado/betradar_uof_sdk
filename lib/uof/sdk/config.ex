@@ -117,7 +117,6 @@ defmodule UOF.SDK.Config do
           ownership: Transport.ownership(),
           metadata_adapter: MessageMetadata.adapter(),
           routing_key_metadata_key: atom(),
-          connection_token_metadata_key: atom() | nil,
           monitor_store: {module(), keyword()},
           concurrency: pos_integer(),
           inactivity_seconds: pos_integer(),
@@ -137,7 +136,6 @@ defmodule UOF.SDK.Config do
     :ownership,
     :metadata_adapter,
     :routing_key_metadata_key,
-    :connection_token_metadata_key,
     :monitor_store,
     :concurrency,
     :inactivity_seconds,
@@ -169,8 +167,7 @@ defmodule UOF.SDK.Config do
         system_producer: producers.system,
         ownership: producers.ownership,
         metadata_adapter: producers.metadata_adapter,
-        routing_key_metadata_key: producers.routing_key_metadata_key,
-        connection_token_metadata_key: producers.connection_token_metadata_key
+        routing_key_metadata_key: producers.routing_key_metadata_key
       )
     )
   end

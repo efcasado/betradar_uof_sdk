@@ -218,15 +218,15 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @doc """
-  Observe a pipeline connection session as `{namespace, token}`.
+  Observe a pipeline's consume session as `{namespace, consumer_tag}`.
 
   Startup recovery waits until both the system and content connection namespaces
   have been observed, so replay starts only after both consumers are ready. After
-  startup, a token change in any namespace recovers every producer to close the
+  startup, a consumer tag change in any namespace recovers every producer to close the
   message-gap a reconnect leaves behind.
   """
-  def observe_connection(server \\ __MODULE__, connection) do
-    GenServer.cast(server, {:observe_connection, connection})
+  def observe_consumer_tag(server \\ __MODULE__, connection) do
+    GenServer.cast(server, {:observe_consumer_tag, connection})
   end
 
   ## Server ------------------------------------------------------------------
@@ -328,10 +328,10 @@ defmodule UOF.SDK.ProducerMonitor do
   # A passive instance ignores session observations entirely: the owner heals
   # the shared feed, and the stale baseline this leaves behind is the
   # self-correction mechanism — on promotion (or a restart into ownership) the
-  # current tokens are re-observed as never-seen and trigger the reconnect
+  # current consumer tags are re-observed as never-seen and trigger the reconnect
   # recovery then, on the instance entitled to act.
-  def handle_cast({:observe_connection, {namespace, token}}, state) do
-    state = if owns_control?(state), do: observe_connection(state, namespace, token), else: state
+  def handle_cast({:observe_consumer_tag, {namespace, tag}}, state) do
+    state = if owns_control?(state), do: observe_consumer_tag(state, namespace, tag), else: state
 
     {:noreply, state}
   end
@@ -650,11 +650,11 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp ensure_connection_readiness!(_state, _now), do: :ok
 
-  defp observe_connection(state, namespace, token) do
+  defp observe_consumer_tag(state, namespace, tag) do
     was_ready? = Connections.ready?(state.connections)
 
     state =
-      case Connections.observe(state.connections, namespace, token) do
+      case Connections.observe(state.connections, namespace, tag) do
         {:recovery_needed, connections} ->
           commit_session_change(state, Connections.commit(connections))
 
@@ -666,7 +666,7 @@ defmodule UOF.SDK.ProducerMonitor do
       end
 
     # A recovery-required alive may have arrived after the first connection.
-    # Readiness itself must release that pending job even when the second token
+    # Readiness itself must release that pending job even when the second tag
     # matches the persisted baseline and therefore reports `:unchanged`.
     if not was_ready? and Connections.ready?(state.connections) do
       state
@@ -684,7 +684,7 @@ defmodule UOF.SDK.ProducerMonitor do
     |> recover_after_connection_change()
   end
 
-  # A token change invalidates an in-flight request: it may have published
+  # A consumer tag change invalidates an in-flight request: it may have published
   # messages while the consumer was disconnected. A recovery already waiting
   # for its cooldown or an API retry needs no replacement because its request
   # will be issued after this reconnect and therefore covers the gap.

@@ -73,15 +73,7 @@ defmodule UOF.SDK.ContentPipeline do
 
   require Logger
 
-  @content_message_types ~w[
-    odds_change
-    bet_settlement
-    bet_stop
-    bet_cancel
-    rollback_bet_cancel
-    rollback_bet_settlement
-    fixture_change
-  ]
+  @content_message_types UOF.SDK.MessageHandler.content_message_types()
 
   @doc false
   def child_spec(opts) do

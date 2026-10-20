@@ -160,7 +160,8 @@ defmodule UOF.SDK.ProducerMonitor do
           producer_opts: keyword(),
           descriptions_refresh_ms: pos_integer(),
           next_refresh_at: integer() | nil,
-          refresh_scheduled?: boolean()
+          refresh_scheduled?: boolean(),
+          refresh_task: reference() | nil
         }
 
   @enforce_keys [
@@ -184,7 +185,8 @@ defmodule UOF.SDK.ProducerMonitor do
                 producer_opts: [],
                 descriptions_refresh_ms: @default_descriptions_refresh_ms,
                 next_refresh_at: nil,
-                refresh_scheduled?: false
+                refresh_scheduled?: false,
+                refresh_task: nil
               ]
 
   ## Client API ---------------------------------------------------------------
@@ -487,11 +489,28 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
+  # The fetch runs in a task linked to the monitor, like recovery requests: an
+  # unavailable API must not block heartbeats and status queries for the
+  # request timeout. An exception from the fetcher still crashes the monitor.
   def handle_info(:refresh_descriptions, state) do
-    state = %{state | refresh_scheduled?: false, next_refresh_at: state.now_fun.() + state.descriptions_refresh_ms}
+    opts = state.producer_opts
+    task = Task.async(fn -> fetch_descriptions(opts) end)
+
+    {:noreply,
+     %{
+       state
+       | refresh_scheduled?: false,
+         refresh_task: task.ref,
+         next_refresh_at: state.now_fun.() + state.descriptions_refresh_ms
+     }}
+  end
+
+  def handle_info({ref, result}, %{refresh_task: ref} = state) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | refresh_task: nil}
 
     state =
-      case fetch_descriptions(state.producer_opts) do
+      case result do
         {:ok, descriptions} ->
           state |> apply_descriptions(descriptions) |> tap(fn _ -> emit_loaded(descriptions, :api) end)
 
@@ -720,8 +739,10 @@ defmodule UOF.SDK.ProducerMonitor do
     save_snapshot(%{state | producers: producers}, %{state.snapshot | descriptions: descriptions})
   end
 
-  # Reloads are rate limited to one per refresh interval.
+  # Reloads are rate limited to one per refresh interval, and one at a time: a
+  # failed reload schedules the next itself.
   defp schedule_refresh(%{refresh_scheduled?: true} = state), do: state
+  defp schedule_refresh(%{refresh_task: ref} = state) when is_reference(ref), do: state
 
   defp schedule_refresh(state) do
     delay = max((state.next_refresh_at || 0) - state.now_fun.(), 0)

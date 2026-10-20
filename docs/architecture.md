@@ -277,8 +277,10 @@ side effects and must account for duplicate or stale deliveries when doing so.
 processor. A slow status callback blocks monitor observations, recovery coordination, and
 state queries; a callback exception fails that monitor process. Keep status callbacks short.
 Store calls also execute in the monitor, so their latency affects when it can process the
-next observation or timer message. Recovery HTTP requests run in tasks linked to the monitor:
-a slow recovery API does not block it, and an exception from the request still fails it.
+next observation or timer message. Recovery requests and producer-description reloads run in
+tasks linked to the monitor: a slow API does not block it, and an exception from the request
+still fails it. The startup description fetch is the exception; it runs before the monitor
+takes any observations.
 
 Handler persistence and transport acknowledgement are separate operations. Applications
 should make their effects idempotent because reconnects and recovery can replay messages.
@@ -573,8 +575,10 @@ and connection gates, persists transitions, and publishes producer-status callba
 `ProducerMonitor.Producer` owns per-producer health transitions, recovery jobs, cooldowns,
 HTTP attempts, and timers. These functions execute in the monitor process, except the HTTP
 request itself, which runs in a linked task whose response returns as a message; a response
-for a job completed, parked, or replaced meanwhile is dropped. Status callbacks run in the
-monitor and should complete promptly.
+for a job completed, parked, or replaced meanwhile is dropped. Such a superseded request is
+left to finish rather than shut down: it has usually reached Betradar already, and a
+duplicate request is harmless beyond quota. Status callbacks run in the monitor and should
+complete promptly.
 
 `ProducerMonitor.Connections` tracks [consumer tags](#consumer-tags) independently of producer state.
 `Transport` derives the two producer specifications and the shared transport child from one

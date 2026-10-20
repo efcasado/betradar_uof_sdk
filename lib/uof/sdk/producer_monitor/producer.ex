@@ -330,6 +330,12 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   # Only called for the job's current task: a response for a completed,
   # parked, or replaced job no longer matches and is dropped by the monitor.
+  #
+  # A superseded request is deliberately left to finish rather than shut down:
+  # by then it has usually reached Betradar, so stopping the task would not
+  # retract it, and a duplicate request is harmless beyond quota. The task
+  # stays linked, so an exception from it still crashes the monitor; the
+  # request function returns errors as values, so an exception is a bug.
   @doc false
   @spec handle_response(t(), :ok | {:error, term()}) :: t()
   def handle_response(%__MODULE__{recovery: %{job: job} = recovery} = producer, result) do

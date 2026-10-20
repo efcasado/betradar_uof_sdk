@@ -1527,6 +1527,37 @@ defmodule UOF.SDK.ProducerMonitorTest do
       assert Map.keys(producers) == [1]
     end
 
+    test "the monitor keeps answering while a reload is pending", %{clock: clock} do
+      test_pid = self()
+      calls = start_supervised!(%{id: :calls, start: {Agent, :start_link, [fn -> 0 end]}})
+
+      fetcher = fn ->
+        if Agent.get_and_update(calls, &{&1, &1 + 1}) > 0 do
+          send(test_pid, {:reloading, self()})
+
+          receive do
+            :respond -> :ok
+          end
+        end
+
+        known = if Agent.get(calls, & &1) == 1, do: [1], else: [1, 2]
+        {:ok, %{producer: Enum.map(known, &api_description(%Producer{id: &1, product: "p#{&1}"}))}}
+      end
+
+      m = start_monitor([producer_fetcher: fetcher], clock)
+
+      ProducerMonitor.alive(m, 2, 1_000, true)
+      assert_receive {:reloading, task}
+
+      # The reload is in flight, yet the monitor answers and records heartbeats.
+      assert :error = ProducerMonitor.producer(m, 2)
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      assert_recovery_triggered("p1")
+
+      send(task, :respond)
+      wait_until(fn -> match?({:ok, _}, ProducerMonitor.producer(m, 2)) end)
+    end
+
     test "an alive from an unknown producer reloads descriptions at most once per interval", %{clock: clock} do
       calls = start_supervised!(%{id: :calls, start: {Agent, :start_link, [fn -> 0 end]}})
 

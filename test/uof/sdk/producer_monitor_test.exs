@@ -433,13 +433,17 @@ defmodule UOF.SDK.ProducerMonitorTest do
       assert {:ok, %ProducerStatus{last_message_timestamp: 4_000}} = ProducerMonitor.producer(m, 1)
     end
 
-    test "a raising handler does not leave its message in flight", %{clock: clock} do
+    test "a raising handler's message counts as processed, not in flight", %{clock: clock} do
       m = start_monitor([max_processing_delay_ms: @lag], clock)
       bring_up(m)
 
       assert_raise RuntimeError, fn ->
         ProducerMonitor.track_processing(1, 1_000, fn -> raise "handler failed" end)
       end
+
+      # The pipeline has moved past a failed message, so it advances freshness.
+      sync(m)
+      assert {:ok, %ProducerStatus{last_message_timestamp: 1_000}} = ProducerMonitor.producer(m, 1)
 
       set_clock(clock, 2_000)
       ProducerMonitor.message(m, 1, 2_000)

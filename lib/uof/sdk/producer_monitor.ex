@@ -455,7 +455,9 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp complete_recovery(state, id, request_id) do
     with_producer(state, id, fn producer ->
-      case Producer.complete_recovery(producer, request_id, state.now_fun.()) do
+      in_flight_ts = Map.get(oldest_in_flight(state), id)
+
+      case Producer.complete_recovery(producer, request_id, state.now_fun.(), state.max_processing_delay_ms, in_flight_ts) do
         {:ok, producer} ->
           Logger.info("UOF.SDK.ProducerMonitor: producer #{id} recovery #{request_id} complete")
           commit_producer_transition(state, producer)

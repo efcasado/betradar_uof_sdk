@@ -109,7 +109,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     refute Producer.recovery_pending?(producer)
     assert %Producer{recovery: %{job: %{request_id: 42}, last_issued_at: 1_000}} = producer
 
-    assert {:ok, producer} = Producer.complete_recovery(producer, 42, 2_000)
+    assert {:ok, producer} = Producer.complete_recovery(producer, 42, 2_000, 20_000, nil)
     refute Producer.recovering?(producer)
     assert producer.status == :up
     assert producer.last_alive_at == 2_000

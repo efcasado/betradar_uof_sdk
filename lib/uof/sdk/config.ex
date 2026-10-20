@@ -1,46 +1,7 @@
 defmodule UOF.SDK.Config do
-  @moduledoc """
-  Resolves the SDK configuration from application env (plus per-call overrides)
-  into a normalized struct. See `load/1` for the options.
-
-  ## Example — AMQP transport
-
-      config :uof_sdk,
-        handler: MyApp.FeedHandler,
-        node_id: 1,
-        transport: {:amqp,
-          connection: [
-            host: "stgmq.betradar.com",
-            username: System.get_env("UOF_ACCESS_TOKEN"),
-            password: "",
-            virtual_host: "/unifiedfeed/12345",
-            ssl_options: []
-          ]
-        }
-
-  ## Example — Pulsar transport
-
-      config :uof_sdk,
-        handler: MyApp.FeedHandler,
-        node_id: 1,
-        transport: {:pulsar,
-          host: "pulsar://localhost:6650",
-          topic: "uof-feed",
-          subscription: "uof-sdk"
-        }
-  """
-
-  alias UOF.SDK.MessageHandler
-  alias UOF.SDK.MessageMetadata
-  alias UOF.SDK.ProducerMonitor.Store
-  alias UOF.SDK.ProducerMonitor.Store.ETS
-  alias UOF.SDK.Transport
-
-  @otp_app :uof_sdk
-
   @schema [
     handler: [
-      type: {:custom, __MODULE__, :validate_module, [MessageHandler]},
+      type: {:custom, __MODULE__, :validate_module, [UOF.SDK.MessageHandler]},
       required: true,
       doc: "Module implementing `UOF.SDK.MessageHandler`."
     ],
@@ -64,8 +25,8 @@ defmodule UOF.SDK.Config do
       """
     ],
     monitor_store: [
-      type: {:custom, __MODULE__, :validate_module, [Store]},
-      default: ETS,
+      type: {:custom, __MODULE__, :validate_module, [UOF.SDK.ProducerMonitor.Store]},
+      default: UOF.SDK.ProducerMonitor.Store.ETS,
       doc: "Module implementing `UOF.SDK.ProducerMonitor.Store`."
     ],
     concurrency: [
@@ -102,6 +63,46 @@ defmodule UOF.SDK.Config do
       """
     ]
   ]
+
+  @moduledoc """
+  Resolves the SDK configuration from application env (plus per-call overrides)
+  into a normalized struct.
+
+  ## Options
+
+  #{NimbleOptions.docs(@schema)}
+
+  ## Example — AMQP transport
+
+      config :uof_sdk,
+        handler: MyApp.FeedHandler,
+        node_id: 1,
+        transport: {:amqp,
+          connection: [
+            host: "stgmq.betradar.com",
+            username: System.get_env("UOF_ACCESS_TOKEN"),
+            password: "",
+            virtual_host: "/unifiedfeed/12345",
+            ssl_options: []
+          ]
+        }
+
+  ## Example — Pulsar transport
+
+      config :uof_sdk,
+        handler: MyApp.FeedHandler,
+        node_id: 1,
+        transport: {:pulsar,
+          host: "pulsar://localhost:6650",
+          topic: "uof-feed",
+          subscription: "uof-sdk"
+        }
+  """
+
+  alias UOF.SDK.MessageMetadata
+  alias UOF.SDK.Transport
+
+  @otp_app :uof_sdk
 
   @type t :: %__MODULE__{
           handler: module(),
@@ -145,10 +146,6 @@ defmodule UOF.SDK.Config do
 
   @doc """
   Load config from application env, merging `overrides` on top, and validate it.
-
-  ## Options
-
-  #{NimbleOptions.docs(@schema)}
   """
   @spec load(keyword()) :: t()
   def load(overrides \\ []) do

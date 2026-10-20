@@ -276,8 +276,9 @@ side effects and must account for duplicate or stale deliveries when doing so.
 `handle_producer_status/1` runs synchronously in `ProducerMonitor`, rather than a content
 processor. A slow status callback blocks monitor observations, recovery coordination, and
 state queries; a callback exception fails that monitor process. Keep status callbacks short.
-Store calls and recovery HTTP requests also execute in the monitor, so their latency affects
-when it can process the next observation or timer message.
+Store calls also execute in the monitor, so their latency affects when it can process the
+next observation or timer message. Recovery HTTP requests run in tasks linked to the monitor:
+a slow recovery API does not block it, and an exception from the request still fails it.
 
 Handler persistence and transport acknowledgement are separate operations. Applications
 should make their effects idempotent because reconnects and recovery can replay messages.
@@ -566,8 +567,10 @@ log alone does not establish readiness or prove that handlers have completed the
 `ProducerMonitor` is the coordination GenServer. It routes observations, applies ownership
 and connection gates, persists transitions, and publishes producer-status callbacks.
 `ProducerMonitor.Producer` owns per-producer health transitions, recovery jobs, cooldowns,
-HTTP attempts, and timers. These functions execute in the monitor process; status callbacks
-also run there and should complete promptly.
+HTTP attempts, and timers. These functions execute in the monitor process, except the HTTP
+request itself, which runs in a linked task whose response returns as a message; a response
+for a job completed, parked, or replaced meanwhile is dropped. Status callbacks run in the
+monitor and should complete promptly.
 
 `ProducerMonitor.Connections` tracks [consumer tags](#consumer-tags) independently of producer state.
 `Transport` derives the two producer specifications and the shared transport child from one

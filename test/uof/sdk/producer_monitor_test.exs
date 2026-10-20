@@ -993,6 +993,61 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{id: 1, status: :up}}
   end
 
+  describe "recovery requests run outside the monitor" do
+    # Each request reports itself and waits for the test to answer it.
+    defp held_recover_fun(test_pid) do
+      fn product, opts ->
+        send(test_pid, {:held_request, product, opts, self()})
+
+        receive do
+          {:respond, result} -> result
+        end
+      end
+    end
+
+    test "the monitor keeps answering while a request is pending", %{clock: clock} do
+      m = start_monitor([recover_fun: held_recover_fun(self())], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      assert_receive {:held_request, "pre", _opts, task}
+
+      assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
+
+      send(task, {:respond, {:ok, :accepted}})
+      sync(m)
+    end
+
+    test "a response arriving after the recovery completed is ignored", %{clock: clock} do
+      m = start_monitor([recover_fun: held_recover_fun(self()), max_recovery_ms: 20], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      assert_receive {:held_request, "pre", opts, task}
+
+      ProducerMonitor.snapshot_complete(m, 1, opts[:request_id])
+      assert_receive {:status, %ProducerStatus{status: :up}}
+
+      # Neither a stall timer nor a retry follows the late response.
+      send(task, {:respond, {:ok, :accepted}})
+      refute_receive {:held_request, _product, _opts, _task}, 100
+      assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
+    end
+
+    test "a failed response for a parked recovery is not retried", %{clock: clock} do
+      m = start_monitor([recover_fun: held_recover_fun(self()), min_interval_ms: 20], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      assert_receive {:held_request, "pre", _opts, task}
+
+      report_active_state(m, :passive)
+      send(task, {:respond, {:error, :boom}})
+      refute_receive {:held_request, _product, _opts, _task}, 100
+
+      # Promotion reissues the parked recovery once.
+      report_active_state(m, :active)
+      assert_receive {:held_request, "pre", _opts, _task}
+    end
+  end
+
   test "an exception from the recovery request crashes the monitor", %{clock: clock} do
     broken = fn _product, _opts -> raise ArgumentError, "bad recovery request" end
 

@@ -501,6 +501,20 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
+  # A recovery request finished. A response for a job that was completed,
+  # parked, or replaced meanwhile matches no producer and is dropped.
+  def handle_info({ref, result}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+
+    state =
+      case Enum.find(state.producers, fn {_id, producer} -> Producer.awaiting_response?(producer, ref) end) do
+        {_id, producer} -> put_producer(state, Producer.handle_response(producer, result))
+        nil -> state
+      end
+
+    {:noreply, state}
+  end
+
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     {:noreply, %{state | in_flight: Map.delete(state.in_flight, pid)}}
   end

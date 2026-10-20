@@ -6,7 +6,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   complete recovery state together: static request configuration, cooldown
   history, and an optional pending or in-flight job. `UOF.SDK.ProducerMonitor`
   supplies global inputs such as connection readiness and control-plane
-  ownership. This module executes per-producer recovery HTTP calls, timers,
+  ownership. This module starts per-producer recovery HTTP requests in tasks
+  linked to the monitor and handles their responses, and owns timers,
   logging, and telemetry; the monitor retains event routing, durable
   persistence, and callbacks.
 
@@ -48,7 +49,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           after_ts: integer() | nil,
           request_id: integer() | nil,
           generation: reference(),
-          awaiting_alive: boolean()
+          awaiting_alive: boolean(),
+          task: reference() | nil
         }
 
   @type recovery_state :: %{
@@ -179,7 +181,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @doc false
   @spec prepare_recovery(t(), integer() | nil, boolean()) :: t()
   def prepare_recovery(%__MODULE__{recovery: recovery} = producer, after_ts, awaiting_alive \\ false) do
-    job = %{after_ts: after_ts, request_id: nil, generation: make_ref(), awaiting_alive: awaiting_alive}
+    job = %{after_ts: after_ts, request_id: nil, generation: make_ref(), awaiting_alive: awaiting_alive, task: nil}
     %{producer | recovery: %{recovery | job: job}}
   end
 
@@ -196,7 +198,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @doc false
   @spec restart_recovery(t(), integer() | nil) :: t()
   def restart_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
-    job = %{recovery.job | after_ts: after_ts, request_id: nil, generation: make_ref()}
+    job = %{recovery.job | after_ts: after_ts, request_id: nil, generation: make_ref(), task: nil}
     producer = %{producer | recovery: %{recovery | job: job}}
     initiate_recovery(producer)
   end
@@ -206,7 +208,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   # promotion.
   @spec mark_recovery_pending(t()) :: t()
   defp mark_recovery_pending(%__MODULE__{recovery: recovery} = producer) do
-    job = %{recovery.job | request_id: nil, generation: make_ref()}
+    job = %{recovery.job | request_id: nil, generation: make_ref(), task: nil}
     %{producer | recovery: %{recovery | job: job}}
   end
 
@@ -306,14 +308,34 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
         }
     }
 
-    case send_recovery_request(recovery.request, producer.product, opts) do
+    # The request runs in a task linked to the monitor, so a slow API cannot
+    # block it, while an exception still crashes it as before. The response
+    # returns as a message for handle_response/2.
+    product = producer.product
+    task = Task.async(fn -> send_recovery_request(recovery.request, product, opts) end)
+    put_in(producer.recovery.job.task, task.ref)
+  end
+
+  @doc false
+  @spec awaiting_response?(t(), reference()) :: boolean()
+  def awaiting_response?(%__MODULE__{recovery: %{job: %{task: ref}}}, ref) when is_reference(ref), do: true
+  def awaiting_response?(%__MODULE__{}, _ref), do: false
+
+  # Only called for the job's current task: a response for a completed,
+  # parked, or replaced job no longer matches and is dropped by the monitor.
+  @doc false
+  @spec handle_response(t(), :ok | {:error, term()}) :: t()
+  def handle_response(%__MODULE__{recovery: %{job: job} = recovery} = producer, result) do
+    producer = put_in(producer.recovery.job.task, nil)
+
+    case result do
       :ok ->
-        emit_initiated(producer, request_id, after_ts)
-        schedule({:stall, producer.id, request_id}, recovery.max_recovery_ms)
+        emit_initiated(producer, job.request_id, job.after_ts)
+        schedule({:stall, producer.id, job.request_id}, recovery.max_recovery_ms)
         producer
 
       {:error, reason} ->
-        emit(producer, :failed, %{}, %{request_id: request_id, reason: reason, retry_in_ms: recovery.min_interval_ms})
+        emit(producer, :failed, %{}, %{request_id: job.request_id, reason: reason, retry_in_ms: recovery.min_interval_ms})
 
         Logger.warning(
           "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery request failed; " <>

@@ -7,7 +7,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     @moduledoc false
     def alive(product, ts, subscribed?), do: emit({:alive_sink, product, ts, subscribed?})
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
-    def observe_consumer_tag(conn_pid), do: emit({:consumer_tag_sink, conn_pid})
+    def observe_connection(conn_pid), do: emit({:connection_sink, conn_pid})
 
     defp emit(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
   end
@@ -101,7 +101,7 @@ defmodule UOF.SDK.SystemPipelineTest do
       metadata: %{routing_key: "-.-.-.alive.-.-.-.-", consumer_tag: "amq.ctag-system-1"}
     )
 
-    assert_receive {:consumer_tag_sink, {:system, "amq.ctag-system-1"}}
+    assert_receive {:connection_sink, {:system, "amq.ctag-system-1"}}
   end
 
   test "reads the routing key from a custom AMQP metadata field" do
@@ -156,7 +156,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     )
 
     assert_receive {:alive_sink, 1, 42, true}
-    assert_receive {:consumer_tag_sink, {:system, "ctag-1"}}
+    assert_receive {:connection_sink, {:system, "ctag-1"}}
   end
 
   test "acks non-system messages without decoding them" do
@@ -181,7 +181,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     assert_receive {:ack, ^ref, [_successful], []}, 1_000
     refute_received {:alive_sink, _, _, _}
     refute_received {:snapshot_sink, _, _}
-    refute_received {:consumer_tag_sink, _}
+    refute_received {:connection_sink, _}
   end
 
   test "acks another node's snapshot_complete without reaching the monitor" do

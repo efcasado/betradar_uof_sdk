@@ -29,7 +29,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     @moduledoc false
 
     def message(product, timestamp), do: notify({:observed_message, product, timestamp})
-    def observe_consumer_tag(tag), do: notify({:observed_consumer_tag, tag})
+    def observe_connection(tag), do: notify({:observed_connection, tag})
 
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
   end
@@ -107,7 +107,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     assert fixture_context.routing_key == "hi.-.pre.fixture_change.1.sr:match.67890.-"
     assert fixture_context.event_urn == "sr:match:67890"
 
-    assert_receive {:observed_consumer_tag, {:content, consumer_tag}}, 10_000
+    assert_receive {:observed_connection, {:content, consumer_tag}}, 10_000
     assert is_binary(consumer_tag) and consumer_tag != ""
 
     assert_receive {:observed_message, 1, 42}, 10_000
@@ -172,7 +172,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     publish_odds_change(channel, "111", 100)
 
     assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
-    assert_receive {:observed_consumer_tag, {:content, old_consumer_tag}}, 10_000
+    assert_receive {:observed_connection, {:content, old_consumer_tag}}, 10_000
 
     {:ok, old_queue} = TestSupport.source_queue()
     TestSupport.restart_source!()
@@ -181,7 +181,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     publish_odds_change(channel, "222", 101)
 
     assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
-    assert_receive {:observed_consumer_tag, {:content, new_consumer_tag}}, 10_000
+    assert_receive {:observed_connection, {:content, new_consumer_tag}}, 10_000
 
     refute new_consumer_tag == old_consumer_tag
   end

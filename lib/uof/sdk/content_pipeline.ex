@@ -132,7 +132,7 @@ defmodule UOF.SDK.ContentPipeline do
         }
 
         deliver(context.handler, rk.message_type, decoded, ctx)
-        maybe_track_consumer_tag(context, rk.message_type, message)
+        maybe_track_connection(context, rk.message_type, message)
         observe(context, rk, decoded)
         message
 
@@ -194,22 +194,22 @@ defmodule UOF.SDK.ContentPipeline do
 
   defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
 
-  defp maybe_track_consumer_tag(%{monitor: nil}, _type, _message), do: :ok
+  defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
-  defp maybe_track_consumer_tag(%{metadata_adapter: :amqp} = context, "alive", message) do
-    notify_consumer_tag(context, message)
+  defp maybe_track_connection(%{metadata_adapter: :amqp} = context, "alive", message) do
+    notify_connection(context, message)
   end
 
-  defp maybe_track_consumer_tag(%{metadata_adapter: :pulsar_rabbitmq_source} = context, _type, message) do
-    notify_consumer_tag(context, message)
+  defp maybe_track_connection(%{metadata_adapter: :pulsar_rabbitmq_source} = context, _type, message) do
+    notify_connection(context, message)
   end
 
-  defp maybe_track_consumer_tag(_context, _type, _message), do: :ok
+  defp maybe_track_connection(_context, _type, _message), do: :ok
 
-  defp notify_consumer_tag(%{monitor: monitor} = context, message) do
+  defp notify_connection(%{monitor: monitor} = context, message) do
     case MessageMetadata.consumer_tag(message, context.metadata_adapter) do
       nil -> :ok
-      tag -> monitor.observe_consumer_tag({:content, tag})
+      tag -> monitor.observe_connection({:content, tag})
     end
   end
 

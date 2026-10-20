@@ -218,15 +218,15 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @doc """
-  Observe a pipeline's consume session as `{namespace, consumer_tag}`.
+  Observe a pipeline connection as `{namespace, consumer_tag}`.
 
   Startup recovery waits until both the system and content connection namespaces
   have been observed, so replay starts only after both consumers are ready. After
   startup, a consumer tag change in any namespace recovers every producer to close the
   message-gap a reconnect leaves behind.
   """
-  def observe_consumer_tag(server \\ __MODULE__, connection) do
-    GenServer.cast(server, {:observe_consumer_tag, connection})
+  def observe_connection(server \\ __MODULE__, connection) do
+    GenServer.cast(server, {:observe_connection, connection})
   end
 
   ## Server ------------------------------------------------------------------
@@ -330,8 +330,8 @@ defmodule UOF.SDK.ProducerMonitor do
   # self-correction mechanism — on promotion (or a restart into ownership) the
   # current consumer tags are re-observed as never-seen and trigger the reconnect
   # recovery then, on the instance entitled to act.
-  def handle_cast({:observe_consumer_tag, {namespace, tag}}, state) do
-    state = if owns_control?(state), do: observe_consumer_tag(state, namespace, tag), else: state
+  def handle_cast({:observe_connection, {namespace, tag}}, state) do
+    state = if owns_control?(state), do: observe_connection(state, namespace, tag), else: state
 
     {:noreply, state}
   end
@@ -650,7 +650,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp ensure_connection_readiness!(_state, _now), do: :ok
 
-  defp observe_consumer_tag(state, namespace, tag) do
+  defp observe_connection(state, namespace, tag) do
     was_ready? = Connections.ready?(state.connections)
 
     state =

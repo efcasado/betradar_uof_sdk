@@ -717,6 +717,47 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert Agent.get(attempts, & &1) >= 2
   end
 
+  test "an HTTP error from the UOF API schedules a retry", %{clock: clock} do
+    test_pid = self()
+    attempts = start_supervised!(%{id: :attempts, start: {Agent, :start_link, [fn -> 0 end]}})
+
+    throttled = fn product, opts ->
+      n = Agent.get_and_update(attempts, fn n -> {n, n + 1} end)
+      send(test_pid, {:recover_called, product, opts})
+
+      if n == 0 do
+        {:error, %UOF.API.Error{type: :http, status: 429, message: "UOF API returned HTTP 429"}}
+      else
+        {:ok, nil}
+      end
+    end
+
+    m = start_monitor([recover_fun: throttled, min_interval_ms: 10], clock)
+    ProducerMonitor.alive(m, 1, 1_000, true)
+
+    assert_receive {:recover_called, "pre", first}, 200
+    assert_receive {:recover_called, "pre", second}, 500
+    assert second[:request_id] != first[:request_id]
+
+    ProducerMonitor.snapshot_complete(m, 1, second[:request_id])
+    assert_receive {:status, %Producer{id: 1, status: :up}}
+  end
+
+  test "an exception from the recovery request crashes the monitor", %{clock: clock} do
+    broken = fn _product, _opts -> raise ArgumentError, "bad recovery request" end
+
+    m = start_monitor([recover_fun: broken], clock)
+    ref = Process.monitor(m)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        ProducerMonitor.alive(m, 1, 1_000, true)
+        assert_receive {:DOWN, ^ref, :process, ^m, {%ArgumentError{message: "bad recovery request"}, _}}
+      end)
+
+    assert log =~ "bad recovery request"
+  end
+
   test "API failure retry preserves the original :after timestamp", %{clock: clock} do
     put_checkpoint(1, @now - 60_000)
 

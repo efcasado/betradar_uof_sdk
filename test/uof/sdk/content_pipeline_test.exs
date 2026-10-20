@@ -442,4 +442,46 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:odds_change, _, _}
     refute_received {:tracking_sink, 1, 1}
   end
+
+  test "reports an unchanged Pulsar consumer tag at most once per interval" do
+    name = Module.concat(__MODULE__, TagThrottle)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [
+           [
+             name: name,
+             handler: Handler,
+             concurrency: 1,
+             producer: {Broadway.DummyProducer, []},
+             metadata_adapter: :pulsar_rabbitmq_source,
+             monitor: Sink
+           ]
+         ]}
+    })
+
+    send_with_tag = fn tag ->
+      ref =
+        Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+          metadata: %{
+            properties: %{
+              "__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.1.-",
+              "__rabbitmq_consumer_tag" => tag
+            }
+          }
+        )
+
+      assert_receive {:ack, ^ref, [_successful], []}, 1_000
+    end
+
+    send_with_tag.("ctag-1")
+    send_with_tag.("ctag-1")
+    send_with_tag.("ctag-2")
+
+    assert_received {:connection_sink, {:content, "ctag-1"}}
+    refute_received {:connection_sink, {:content, "ctag-1"}}
+    assert_received {:connection_sink, {:content, "ctag-2"}}
+  end
 end

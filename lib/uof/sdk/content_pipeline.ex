@@ -226,7 +226,27 @@ defmodule UOF.SDK.ContentPipeline do
   defp notify_connection(%{monitor: monitor} = context, message) do
     case MessageMetadata.consumer_tag(message, context.metadata_adapter) do
       nil -> :ok
-      tag -> monitor.observe_connection({:content, tag})
+      tag -> if report_tag?(tag), do: monitor.observe_connection({:content, tag})
+    end
+  end
+
+  # Pulsar carries the consumer tag on every message. Each processor reports a
+  # tag when it changes and otherwise at most once per interval: the repeats
+  # matter, because a monitor promoted to active learns the current tags from
+  # them, but one per interval is enough. Broadway processors have no state of
+  # their own, so the last report is kept in the processor's dictionary.
+  @tag_report_interval_ms 1_000
+
+  defp report_tag?(tag) do
+    now = System.monotonic_time(:millisecond)
+
+    case Process.get(:uof_sdk_reported_tag) do
+      {^tag, reported_at} when now - reported_at < @tag_report_interval_ms ->
+        false
+
+      _other ->
+        Process.put(:uof_sdk_reported_tag, {tag, now})
+        true
     end
   end
 

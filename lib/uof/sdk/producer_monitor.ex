@@ -603,9 +603,9 @@ defmodule UOF.SDK.ProducerMonitor do
     end)
   end
 
-  # A resumable producer is trusted only for one normal alive interval after
-  # this instance acquires control. Seeding the existing alive anchor lets the
-  # normal health check recover it if no current-session heartbeat arrives.
+  # A resumable producer must hear a current heartbeat within one normal alive
+  # interval after this instance acquires control, or the health check recovers
+  # it. `resuming_since` starts that interval without counting as a heartbeat.
   # Connection readiness gets the same interval; failure is process-fatal so
   # :rest_for_one restarts both pipelines instead of waiting forever.
   defp start_active_monitoring(state) do
@@ -614,8 +614,8 @@ defmodule UOF.SDK.ProducerMonitor do
     producers =
       Map.new(state.producers, fn {id, producer} ->
         producer =
-          if producer.status == :resuming and is_nil(producer.last_alive_at) do
-            %{producer | last_alive_at: now}
+          if producer.status == :resuming and is_nil(producer.resuming_since) do
+            %{producer | resuming_since: now}
           else
             producer
           end

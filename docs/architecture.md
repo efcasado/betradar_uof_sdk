@@ -500,9 +500,9 @@ The [ETS store tests](../test/uof/sdk/producer_monitor/store/ets_test.exs) show 
 ### Restart Resume
 
 At startup, a synchronized producer with a checkpoint enters `:resuming`. It becomes `:up`
-once both pipelines report unchanged [consumer tags](#consumer-tags) and processing has
-caught up. Without a heartbeat within `inactivity_seconds` it recovers, and a readiness
-deadline prevents an incomplete restart from waiting indefinitely.
+once both pipelines report unchanged [consumer tags](#consumer-tags), a current heartbeat
+arrives, and processing has caught up. Without a heartbeat within `inactivity_seconds` it
+recovers, and a readiness deadline prevents an incomplete restart from waiting indefinitely.
 
 Direct AMQP reconnects create new consume sessions and require recovery. Pulsar can resume
 retained backlog when its upstream connector session remains unchanged. An upstream session

@@ -40,7 +40,7 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   defstruct consumer_tags: %{}, producers: %{}, descriptions: []
 
   @format :uof_sdk_monitor_snapshot
-  @version 2
+  @version 1
   @namespaces [:system, :content]
 
   @doc "Whether the producer may resume retained backlog without recovery."
@@ -92,6 +92,9 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
           producers: Map.new(producers, &decode_progress!/1),
           descriptions: Enum.map(descriptions, &validate_description!/1)
         }
+
+      {@format, @version, data} ->
+        raise ArgumentError, "invalid producer monitor snapshot: #{inspect(data, limit: 5)}"
 
       {@format, version, _data} ->
         raise ArgumentError, "unsupported producer monitor snapshot version: #{inspect(version)}"

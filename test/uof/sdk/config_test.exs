@@ -228,4 +228,16 @@ defmodule UOF.SDK.ConfigTest do
 
     assert Config.load(handler: LogHandler, recovery_overlap_seconds: 21).recovery_overlap_seconds == 21
   end
+
+  test "normalizes configured fallback producers" do
+    config = Config.load(handler: LogHandler, producers: [[id: 1, product: "liveodds"]])
+
+    assert config.producers == [%{id: 1, product: "liveodds", name: nil, recovery_window_minutes: nil}]
+  end
+
+  test "requires an id and product for configured producers" do
+    assert_raise NimbleOptions.ValidationError, ~r/required :product option not found/, fn ->
+      Config.load(handler: LogHandler, producers: [[id: 1]])
+    end
+  end
 end

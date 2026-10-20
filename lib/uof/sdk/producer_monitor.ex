@@ -6,8 +6,13 @@ defmodule UOF.SDK.ProducerMonitor do
   At startup the monitor loads active producer descriptions from
   `UOF.API.Descriptions.producers/0`. It derives the recovery product from the
   description's `api_url` and keeps the advertised stateful recovery window.
-  Startup fails if descriptions cannot be loaded; running without known
-  producers would silently disable health tracking and recovery.
+  Loaded descriptions are stored in the snapshot. If the API fails, the
+  monitor starts from the stored descriptions, or else from the configured
+  `:producers`, and keeps retrying the API in the background. Startup fails
+  only when no source has any: running without known producers would silently
+  disable health tracking and recovery. An `alive` from a producer the monitor
+  does not know also triggers a rate-limited reload, so producers activated
+  after startup are picked up.
 
   ## Health monitoring
 
@@ -134,6 +139,7 @@ defmodule UOF.SDK.ProducerMonitor do
   @default_max_processing_delay_ms 20_000
   @default_tick_ms 1_000
   @default_recovery_overlap_ms 5 * 60_000
+  @default_descriptions_refresh_ms 60_000
 
   @type ownership :: :always_active | {:failover, :active | :passive}
 
@@ -150,7 +156,11 @@ defmodule UOF.SDK.ProducerMonitor do
           max_processing_delay_ms: non_neg_integer(),
           tick_ms: pos_integer(),
           recovery_overlap_ms: non_neg_integer(),
-          in_flight: %{optional(pid()) => {integer(), integer()} | nil}
+          in_flight: %{optional(pid()) => {integer(), integer()} | nil},
+          producer_opts: keyword(),
+          descriptions_refresh_ms: pos_integer(),
+          next_refresh_at: integer() | nil,
+          refresh_scheduled?: boolean()
         }
 
   @enforce_keys [
@@ -168,7 +178,14 @@ defmodule UOF.SDK.ProducerMonitor do
     :recovery_overlap_ms
   ]
 
-  defstruct @enforce_keys ++ [in_flight: %{}]
+  defstruct @enforce_keys ++
+              [
+                in_flight: %{},
+                producer_opts: [],
+                descriptions_refresh_ms: @default_descriptions_refresh_ms,
+                next_refresh_at: nil,
+                refresh_scheduled?: false
+              ]
 
   ## Client API ---------------------------------------------------------------
 
@@ -273,14 +290,11 @@ defmodule UOF.SDK.ProducerMonitor do
   def init(opts) do
     monitor_store = Keyword.get(opts, :monitor_store, {UOF.SDK.ProducerMonitor.Store.ETS, []})
     snapshot = load_snapshot(monitor_store)
+    {descriptions, source} = load_descriptions(opts, snapshot)
 
     producers =
-      Map.new(load_producers(opts), fn producer ->
-        producer =
-          producer
-          |> restore_producer(snapshot)
-          |> Producer.configure_recovery(opts)
-
+      Map.new(descriptions, fn description ->
+        producer = description |> new_producer(opts) |> restore_producer(snapshot)
         {producer.id, producer}
       end)
 
@@ -296,8 +310,19 @@ defmodule UOF.SDK.ProducerMonitor do
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
       max_processing_delay_ms: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
-      recovery_overlap_ms: Keyword.get(opts, :recovery_overlap_ms, @default_recovery_overlap_ms)
+      recovery_overlap_ms: Keyword.get(opts, :recovery_overlap_ms, @default_recovery_overlap_ms),
+      producer_opts: opts,
+      descriptions_refresh_ms: Keyword.get(opts, :descriptions_refresh_ms, @default_descriptions_refresh_ms)
     }
+
+    state =
+      case source do
+        :api ->
+          save_snapshot(state, %{snapshot | descriptions: descriptions})
+
+        _fallback ->
+          schedule_refresh(%{state | next_refresh_at: state.now_fun.() + state.descriptions_refresh_ms})
+      end
 
     state = if owns_control?(state), do: start_active_monitoring(state), else: state
 
@@ -349,8 +374,15 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @impl true
+  # An alive from an unknown producer means it was activated after the
+  # descriptions were loaded; it is picked up by the next reload.
   def handle_cast({:alive, id, gen_ts, subscribed?}, state) do
-    state = with_producer(state, id, fn p -> on_alive(state, p, gen_ts, subscribed?) end)
+    state =
+      case Map.fetch(state.producers, id) do
+        {:ok, producer} -> on_alive(state, producer, gen_ts, subscribed?)
+        :error -> schedule_refresh(state)
+      end
+
     {:noreply, state}
   end
 
@@ -450,6 +482,22 @@ defmodule UOF.SDK.ProducerMonitor do
       end
 
     schedule_tick(state)
+    {:noreply, state}
+  end
+
+  def handle_info(:refresh_descriptions, state) do
+    state = %{state | refresh_scheduled?: false, next_refresh_at: state.now_fun.() + state.descriptions_refresh_ms}
+
+    state =
+      case fetch_descriptions(state.producer_opts) do
+        {:ok, descriptions} ->
+          state |> apply_descriptions(descriptions) |> tap(fn _ -> emit_loaded(descriptions, :api) end)
+
+        {:error, reason} ->
+          Logger.warning("UOF.SDK.ProducerMonitor: reloading producer descriptions failed: #{inspect(reason)}")
+          schedule_refresh(state)
+      end
+
     {:noreply, state}
   end
 
@@ -580,42 +628,93 @@ defmodule UOF.SDK.ProducerMonitor do
     if Snapshot.resumable?(snapshot, producer.id), do: %{producer | status: :resuming}, else: producer
   end
 
-  defp load_producers(opts) do
-    case Keyword.fetch(opts, :producers) do
-      {:ok, producers} -> producers
-      :error -> fetch_producers(opts)
+  # The API is authoritative. When it fails, the descriptions stored by a
+  # previous run, or else the configured ones, let the monitor start; it keeps
+  # retrying the API. With no source at all, startup fails: running without
+  # known producers would silently disable health tracking and recovery.
+  defp load_descriptions(opts, snapshot) do
+    case fetch_descriptions(opts) do
+      {:ok, descriptions} ->
+        emit_loaded(descriptions, :api)
+        {descriptions, :api}
+
+      {:error, reason} ->
+        fall_back(reason, snapshot.descriptions, Keyword.get(opts, :producers, []))
     end
   end
 
-  defp fetch_producers(opts) do
+  defp fall_back(reason, [_ | _] = stored, _configured), do: degraded(reason, stored, :snapshot)
+  defp fall_back(reason, [], [_ | _] = configured), do: degraded(reason, configured, :config)
+
+  defp fall_back(reason, [], []) do
+    raise RuntimeError,
+          "could not load UOF producers: #{inspect(reason)}; no stored or configured producer descriptions"
+  end
+
+  defp degraded(reason, descriptions, source) do
+    Logger.warning(
+      "UOF.SDK.ProducerMonitor: could not load producer descriptions from the UOF API (#{inspect(reason)}); " <>
+        "starting from #{source} descriptions and retrying"
+    )
+
+    emit_loaded(descriptions, source)
+    {descriptions, source}
+  end
+
+  defp fetch_descriptions(opts) do
     fetcher = Keyword.get(opts, :producer_fetcher, &UOF.API.Descriptions.producers/0)
 
-    response =
-      try do
-        fetcher.()
-      rescue
-        exception ->
-          raise RuntimeError, "could not load UOF producers: #{Exception.message(exception)}"
-      end
-
-    case response do
+    case fetcher.() do
       {:ok, %{producer: descriptions}} when is_list(descriptions) ->
-        descriptions
-        |> Enum.filter(& &1.active)
-        |> Enum.map(&producer_from_description/1)
+        {:ok, descriptions |> Enum.filter(& &1.active) |> Enum.map(&description/1)}
+
+      {:error, reason} ->
+        {:error, reason}
 
       other ->
-        raise RuntimeError, "could not load UOF producers: #{inspect(other)}"
+        {:error, {:unexpected_response, other}}
     end
   end
 
-  defp producer_from_description(description) do
-    %Producer{
-      id: description.id,
-      name: description.name,
-      product: product_segment(description.api_url),
-      recovery_window_minutes: description.stateful_recovery_window_in_minutes
+  defp description(api_description) do
+    %{
+      id: api_description.id,
+      name: api_description.name,
+      product: product_segment(api_description.api_url),
+      recovery_window_minutes: api_description.stateful_recovery_window_in_minutes
     }
+  end
+
+  defp new_producer(description, opts) do
+    Producer |> struct(description) |> Producer.configure_recovery(opts)
+  end
+
+  # Reloaded descriptions update known producers and add new ones. A producer
+  # added at runtime starts :down and recovers on its first alive. Producers no
+  # longer listed keep their state.
+  defp apply_descriptions(state, descriptions) do
+    producers =
+      Enum.reduce(descriptions, state.producers, fn description, producers ->
+        case Map.fetch(producers, description.id) do
+          {:ok, producer} -> Map.put(producers, description.id, struct(producer, description))
+          :error -> Map.put(producers, description.id, new_producer(description, state.producer_opts))
+        end
+      end)
+
+    save_snapshot(%{state | producers: producers}, %{state.snapshot | descriptions: descriptions})
+  end
+
+  # Reloads are rate limited to one per refresh interval.
+  defp schedule_refresh(%{refresh_scheduled?: true} = state), do: state
+
+  defp schedule_refresh(state) do
+    delay = max((state.next_refresh_at || 0) - state.now_fun.(), 0)
+    Process.send_after(self(), :refresh_descriptions, delay)
+    %{state | refresh_scheduled?: true}
+  end
+
+  defp emit_loaded(descriptions, source) do
+    :telemetry.execute([:uof_sdk, :producers, :loaded], %{count: length(descriptions)}, %{source: source})
   end
 
   defp product_segment(nil), do: nil

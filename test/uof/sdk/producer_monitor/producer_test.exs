@@ -36,23 +36,31 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert observed.last_alive_at == 1_000
   end
 
-  test "health checks distinguish delivery gaps from local processing lag" do
-    stale_alive = %Producer{id: 1, status: :up, last_alive_at: 100, last_message_timestamp: 1_000}
+  test "a health check recovers after a heartbeat gap" do
+    stale_alive = %Producer{id: 1, status: :up, last_alive_at: 100}
 
-    assert {:recovery_needed, ^stale_alive, :alive_timeout} =
-             Producer.check(stale_alive, 1_001, 900, 900, true, nil)
-
-    delayed = %Producer{id: 1, status: :up, last_alive_at: 1_000, last_message_timestamp: 100}
-
-    assert {:transition, %Producer{status: :delayed, processing_queue_delay: 901}} =
-             Producer.check(delayed, 1_001, 900, 900, true, nil)
+    assert {:recovery_needed, ^stale_alive, :alive_timeout} = Producer.check(stale_alive, 1_001, 900, true)
+    assert :unchanged = Producer.check(%{stale_alive | last_alive_at: 1_000}, 1_001, 900, true)
   end
 
-  test "a resuming producer becomes up only after heartbeat, connection, and catch-up gates" do
-    producer = %Producer{id: 1, status: :resuming, last_alive_at: 1_000, last_message_timestamp: 1_000}
+  test "an alive records its generation timestamp" do
+    assert {:ok, %Producer{alive_timestamp: 900}} =
+             Producer.observe_alive(%Producer{id: 1, status: :resuming}, 900, true, 1_000)
+  end
 
-    assert :unchanged = Producer.check(producer, 1_001, 900, 900, false, nil)
-    assert {:transition, %Producer{status: :up}} = Producer.check(producer, 1_001, 900, 900, true, nil)
+  test "a resuming producer becomes up only after connection and current-heartbeat gates" do
+    producer = %Producer{id: 1, status: :resuming, last_alive_at: 1_000, alive_timestamp: 1_000}
+
+    assert :unchanged = Producer.check(producer, 1_001, 900, false)
+    assert {:transition, %Producer{status: :up}} = Producer.check(producer, 1_001, 900, true)
+  end
+
+  test "a heartbeat drained from backlog does not end resuming" do
+    backlog = %Producer{id: 1, status: :resuming, last_alive_at: 5_000, alive_timestamp: 1_000}
+
+    assert :unchanged = Producer.check(backlog, 5_000, 900, true)
+    assert :unchanged = Producer.check(%{backlog | alive_timestamp: nil}, 5_000, 900, true)
+    assert {:transition, %Producer{status: :up}} = Producer.check(%{backlog | alive_timestamp: 4_100}, 5_000, 900, true)
   end
 
   @tag :capture_log
@@ -109,7 +117,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     refute Producer.recovery_pending?(producer)
     assert %Producer{recovery: %{job: %{request_id: 42}, last_issued_at: 1_000}} = producer
 
-    assert {:ok, producer} = Producer.complete_recovery(producer, 42, 2_000, 20_000, nil)
+    assert {:ok, producer} = Producer.complete_recovery(producer, 42, 2_000)
     refute Producer.recovering?(producer)
     assert producer.status == :up
     assert producer.last_alive_at == 2_000

@@ -43,7 +43,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @default_max_recovery_ms 60 * 60_000
   @max_request_id 1_000_000
 
-  @type status :: :down | :up | :delayed | :resuming
+  @type status :: :down | :up | :resuming
 
   @type recovery_job :: %{
           after_ts: integer() | nil,
@@ -71,9 +71,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           recovery_window_minutes: integer() | nil,
           status: status(),
           last_alive_at: integer() | nil,
+          alive_timestamp: integer() | nil,
           resuming_since: integer() | nil,
-          last_message_timestamp: integer() | nil,
-          processing_queue_delay: integer() | nil,
           recovery: recovery_state() | nil
         }
 
@@ -94,9 +93,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     :name,
     :recovery_window_minutes,
     :last_alive_at,
+    :alive_timestamp,
     :resuming_since,
-    :last_message_timestamp,
-    :processing_queue_delay,
     :recovery,
     status: :down
   ]
@@ -121,7 +119,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @doc false
   @spec observe_alive(t(), integer() | nil, boolean(), integer()) :: alive_result()
   def observe_alive(%__MODULE__{} = producer, gen_timestamp, subscribed?, now) do
-    observed = %{producer | last_alive_at: now}
+    observed = %{producer | last_alive_at: now, alive_timestamp: gen_timestamp}
 
     cond do
       awaiting_alive?(producer) ->
@@ -144,17 +142,13 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     end
   end
 
+  # A resuming producer may have been heard only through retained backlog. It
+  # becomes :up once a heartbeat generated within the inactivity interval shows
+  # that system delivery has reached the live feed, so a session change or
+  # recovery request still in the backlog has been seen first.
   @doc false
-  @spec observe_message(t(), integer() | nil) :: t()
-  def observe_message(%__MODULE__{} = producer, timestamp) do
-    %{producer | last_message_timestamp: max_timestamp(producer.last_message_timestamp, timestamp)}
-  end
-
-  @doc false
-  @spec check(t(), integer(), non_neg_integer(), non_neg_integer(), boolean(), integer() | nil) :: check_result()
-  def check(producer, now, inactivity_ms, max_processing_delay_ms, connections_ready?, in_flight_ts) do
-    freshness = content_freshness(producer, in_flight_ts)
-
+  @spec check(t(), integer(), non_neg_integer(), boolean()) :: check_result()
+  def check(producer, now, inactivity_ms, connections_ready?) do
     cond do
       recovering?(producer) ->
         :unchanged
@@ -162,15 +156,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       alive_violation?(producer, now, inactivity_ms) ->
         {:recovery_needed, producer, :alive_timeout}
 
-      producer.status == :up and processing_violation?(freshness, now, max_processing_delay_ms) ->
-        {:transition, mark_delayed(producer, now - freshness)}
-
-      producer.status == :delayed and
-          not processing_violation?(freshness, now, max_processing_delay_ms) ->
-        {:transition, mark_up(producer)}
-
-      producer.status == :resuming and producer.last_alive_at != nil and connections_ready? and
-        freshness != nil and not processing_violation?(freshness, now, max_processing_delay_ms) ->
+      producer.status == :resuming and connections_ready? and current_alive?(producer, now, inactivity_ms) ->
         {:transition, mark_up(producer)}
 
       true ->
@@ -213,31 +199,17 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec complete_recovery(t(), integer(), integer(), non_neg_integer(), integer() | nil) :: {:ok, t()} | :stale
-  # Completion applies the same content-lag check as a health tick: content
-  # already known to lag (e.g. a stuck handler) completes the recovery as
-  # :delayed rather than reporting :up for one tick.
-  def complete_recovery(
-        %__MODULE__{recovery: %{job: %{request_id: request_id}} = recovery} = producer,
-        request_id,
-        now,
-        max_processing_delay_ms,
-        in_flight_ts
-      )
+  @spec complete_recovery(t(), integer(), integer()) :: {:ok, t()} | :stale
+  def complete_recovery(%__MODULE__{recovery: %{job: %{request_id: request_id}} = recovery} = producer, request_id, now)
       when not is_nil(request_id) do
     emit(producer, :completed, %{duration_ms: recovery.monotonic_fun.() - recovery.last_issued_at}, %{
       request_id: request_id
     })
 
-    producer = %{producer | recovery: %{recovery | job: nil}, last_alive_at: now}
-    freshness = content_freshness(producer, in_flight_ts)
-
-    if processing_violation?(freshness, now, max_processing_delay_ms),
-      do: {:ok, mark_delayed(producer, now - freshness)},
-      else: {:ok, mark_up(producer)}
+    {:ok, mark_up(%{producer | recovery: %{recovery | job: nil}, last_alive_at: now})}
   end
 
-  def complete_recovery(%__MODULE__{}, _request_id, _now, _max_processing_delay_ms, _in_flight_ts), do: :stale
+  def complete_recovery(%__MODULE__{}, _request_id, _now), do: :stale
 
   @doc false
   @spec park_recovery(t()) :: t()
@@ -427,13 +399,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   # producer.
   defp schedule(message, timeout), do: Process.send_after(self(), message, timeout)
 
-  defp mark_delayed(%__MODULE__{} = producer, delay) do
-    %{producer | status: :delayed, processing_queue_delay: delay}
-  end
-
-  defp mark_up(%__MODULE__{} = producer) do
-    %{producer | status: :up, processing_queue_delay: nil}
-  end
+  defp mark_up(%__MODULE__{} = producer), do: %{producer | status: :up}
 
   # A resuming producer that has not heard a heartbeat since this instance took
   # control gets one interval, measured from `resuming_since`.
@@ -443,19 +409,12 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   defp alive_violation?(%__MODULE__{last_alive_at: nil}, _now, _ms), do: false
   defp alive_violation?(%__MODULE__{last_alive_at: timestamp}, now, ms), do: now - timestamp > ms
 
-  # Content timestamps include event messages and content-session alives. A
-  # fresh system alive is intentionally not evidence that content caught up.
-  # The oldest message still being handled bounds how far processing lags;
-  # without one, the newest completed message does.
-  defp content_freshness(_producer, in_flight_ts) when is_integer(in_flight_ts), do: in_flight_ts
-  defp content_freshness(%__MODULE__{last_message_timestamp: timestamp}, nil), do: timestamp
+  # Compares the feed's generation time with local time, so clock skew beyond
+  # the inactivity interval keeps a resuming producer waiting.
+  defp current_alive?(%__MODULE__{alive_timestamp: timestamp}, now, ms) when is_integer(timestamp),
+    do: now - timestamp <= ms
 
-  defp processing_violation?(nil, _now, _ms), do: false
-  defp processing_violation?(freshness, now, ms), do: now - freshness > ms
-
-  defp max_timestamp(nil, timestamp), do: timestamp
-  defp max_timestamp(timestamp, nil), do: timestamp
-  defp max_timestamp(a, b), do: max(a, b)
+  defp current_alive?(%__MODULE__{}, _now, _ms), do: false
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

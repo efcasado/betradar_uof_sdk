@@ -93,7 +93,8 @@ Betradar unifiedfeed exchange
 ```
 
 The system queue receives `alive` and `snapshot_complete`. The content queue receives event
-messages and `alive` messages used to observe content freshness. Bindings also account for
+messages and `alive` messages, whose consumer tag identifies the content consume session.
+Bindings also account for
 `node_id`, which scopes recovery traffic to the intended feed session.
 
 Each queue is exclusive and auto-deleted. Instances do not divide work through a shared
@@ -237,7 +238,6 @@ transport delivery
     → node filtering
     → XML decoding
     → application callback
-    → content timestamp observation
     → transport acknowledgement
 ```
 
@@ -294,7 +294,7 @@ messages of its batch. Override `:consumer_opts` (`:redelivery_interval`,
 A message failure emits diagnostics but does not directly request producer recovery.
 
 Content delivery is not gated on producer health. Live and replayed content can reach handlers
-while a producer is `:down`, `:recovering`, or `:delayed`. The SDK reports synchronization and
+while a producer is `:down`, `:recovering`, or `:resuming`. The SDK reports synchronization and
 health; applications decide how those reports affect their business operations. A producer
 becoming `:up` is not a barrier proving that all application side effects have completed.
 
@@ -302,6 +302,19 @@ Raw system messages are internal inputs. `alive` observations update producer he
 recovery progress, and `snapshot_complete` correlates recovery completion. Applications
 receive lifecycle changes through `handle_producer_status/1` and can query state through
 `UOF.SDK.producer/1` or `UOF.SDK.producers/0`.
+
+### Processing Lag
+
+The SDK does not measure how far content processing lags behind the feed; producer status
+reports feed synchronization only. Each content callback receives the feed struct with its
+generation `timestamp`, so the application can compare it with the current time where it acts
+on the message, per event or per instance. With several instances on one Pulsar subscription,
+each instance handles only its share of content and can judge only its own lag. Applications
+that must not act on stale odds, or until a recovery replay has been handled, enforce that
+themselves.
+
+This is an intentional difference from the official SDKs, which also mark a producer down when
+their processing queue falls behind (`ProcessingQueueDelayViolation`).
 
 ## Recovery
 
@@ -343,17 +356,8 @@ messages are ignored using recovery-job generations.
 
 `snapshot_complete` marks the feed's completion of a recovery replay. Content callbacks run
 on their own processors, so this system observation is separate from application processing
-completion. A producer is `:up` when the feed has confirmed synchronization and content
-processing is within `max_processing_delay_seconds`: a replay still being processed shows
-as `:delayed` once it lags beyond that threshold. Applications that must not act until every
-replayed message is handled should treat the threshold as their tolerance.
-
-Content lag is measured from the oldest content message still being handled, falling back to
-the newest one completed. Each content processor reports the message it is handling to the monitor, so one
-processor stuck on an old message is not hidden by fresher messages completing elsewhere.
-After a restart, a resuming producer needs content processed in the current session; its
-stored checkpoint does not count. With several instances on one Pulsar subscription, each
-monitor measures only its own share of content.
+completion. A producer is `:up` when the feed has confirmed synchronization: no known gap
+remains. Replayed content may still be awaiting processing; see [processing lag](#processing-lag).
 
 The lifecycle states describe the monitor's view:
 
@@ -362,8 +366,7 @@ The lifecycle states describe the monitor's view:
 | `:down` | Unsynchronized: no recovery job yet, or one waiting for the producer's alives to resume |
 | `:recovering` | Recovery is pending, being requested, or awaiting completion |
 | `:up` | The monitor considers the producer synchronized |
-| `:delayed` | Processing observations exceed the configured delay threshold |
-| `:resuming` | Restored progress is eligible for resume, pending continuity and freshness checks |
+| `:resuming` | Restored progress is eligible for resume, pending continuity and a current heartbeat |
 
 A pending or in-flight recovery job is reported as `:recovering` in `UOF.SDK.ProducerStatus`.
 Recovery jobs, timers, and request correlation are not part of it.
@@ -383,6 +386,20 @@ Automatic recovery normally needs no application intervention. For a manual requ
 This uses the same monitor coordination, lifecycle reporting, and stall guard as automatic
 recovery. On a passive Pulsar instance it returns `{:error, :passive}`; issue the request
 on the active owner instead.
+
+### Checkpoints
+
+A producer's checkpoint is the feed timestamp of its latest subscribed system `alive` observed
+while it is `:up` and not recovering. Incremental recovery replays from the checkpoint, less
+`recovery_overlap_seconds`, so content delivered but not yet processed is requested again and
+arrives as duplicates. The checkpoint does not wait for content processing:
+
+- Pulsar: unprocessed content stays in the durable content subscription and is redelivered, so
+  the overlap only needs to cover the gap itself.
+- AMQP: a reconnect discards the exclusive content queue and everything still in it. Recovery
+  restores that content only if the overlap exceeds how far processing lagged at the time.
+  Size `recovery_overlap_seconds` above the worst-case content lag, including working through
+  a large recovery replay, which the producer reports as `:up` before it has been processed.
 
 ### Consumer Tags
 
@@ -409,22 +426,22 @@ Direct AMQP opens new consume sessions on every restart, so its tags always diff
 
 Public duration settings are in seconds and converted to milliseconds internally. Feed
 timestamps and stored checkpoints are epoch milliseconds. Heartbeat inactivity uses local
-observation time; content lag compares local wall-clock time with processed feed timestamps.
-Clock skew can therefore affect lag observations. Recovery cooldown uses monotonic time.
+observation time. Restart resume compares a heartbeat's feed timestamp with local wall-clock
+time, so clock skew beyond `inactivity_seconds` keeps a resuming producer waiting. Recovery
+cooldown uses monotonic time.
 
 | Setting | What it measures or controls | Effect |
 | --- | --- | --- |
-| `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Records recovery on an observed heartbeat timeout and requests it once the producer's alives resume; also bounds session-readiness waiting |
-| `max_processing_delay_seconds` | Age of the oldest content message still being handled, or else of the newest one completed, including content-session heartbeats | Moves synchronized producers between `:up` and `:delayed`; freshness also gates restart resume |
+| `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Records recovery on an observed heartbeat timeout and requests it once the producer's alives resume; also bounds session-readiness waiting and how old a heartbeat may be to end restart resume |
 | `min_interval_between_recoveries` | Per-producer recovery-request cooldown and delay after a failed request | Defers requests or retries while recovery remains pending |
 | `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp |
-| `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window; must exceed `max_processing_delay_seconds` |
+| `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window; on AMQP it must exceed the worst-case content processing lag |
 
-These controls have distinct purposes. Content lag alone is not a heartbeat failure, and
-recovery overlap is not a timeout. Health checks and timer messages are handled by the
-monitor, subject to control-plane ownership and its current recovery state; durations are
-not hard real-time deadlines. See [configuration](../README.md#configuration) for defaults and
-[startup and recovery](#recovery) for the recovery sequence and manual requests.
+These controls have distinct purposes: recovery overlap is not a timeout. Health checks and
+timer messages are handled by the monitor, subject to control-plane ownership and its current
+recovery state; durations are not hard real-time deadlines. See
+[configuration](../README.md#configuration) for defaults and [startup and recovery](#recovery)
+for the recovery sequence and manual requests.
 
 ## Persistence
 
@@ -448,8 +465,8 @@ A producer may resume at startup only when it is synchronized and has a checkpoi
 consumer tag change saves the new tags with every producer unsynchronized, in one write. Recovery preparation saves the producer as unsynchronized before its HTTP request,
 so a crash at any point cannot resume from stale state. Checkpoints only move forward.
 
-The monitor saves only when the snapshot changes: on a session change, a checkpoint advance
-from a subscribed system heartbeat while `:up`, and a producer's synchronization change.
+The monitor saves only when the snapshot changes: on a session change, a
+[checkpoint](#checkpoints) advance, and a producer's synchronization change.
 
 `load/1` returns `nil` only when nothing has been saved, and the monitor then starts every
 producer `:down`. A stored binary that cannot be decoded fails startup: discarding it would
@@ -525,8 +542,10 @@ The [ETS store tests](../test/uof/sdk/producer_monitor/store/ets_test.exs) show 
 ### Restart Resume
 
 At startup, a synchronized producer with a checkpoint enters `:resuming`. It becomes `:up`
-once both pipelines report unchanged [consumer tags](#consumer-tags), a current heartbeat
-arrives, and processing has caught up. Without a heartbeat within `inactivity_seconds` it
+once both pipelines report unchanged [consumer tags](#consumer-tags) and it hears a heartbeat
+generated within `inactivity_seconds`. Heartbeats drained from retained backlog keep it
+resuming, so a session change or recovery request still in the backlog is seen first. Content
+may still be draining when it becomes `:up`. Without a heartbeat within `inactivity_seconds` it
 recovers, and a readiness deadline prevents an incomplete restart from waiting indefinitely.
 
 Direct AMQP reconnects create new consume sessions and require recovery. Pulsar can resume
@@ -543,8 +562,9 @@ for the transport side of restart continuity.
 ## Observability
 
 A running supervisor, an established transport connection, and a synchronized producer are
-separate states. Use producer status to understand feed synchronization and processing lag;
-use transport and message diagnostics to investigate why progress has stopped.
+separate states. Use producer status to understand feed synchronization, feed timestamps in
+your callbacks to measure [processing lag](#processing-lag), and transport and message
+diagnostics to investigate why progress has stopped.
 
 | Signal | What it tells the application |
 | --- | --- |

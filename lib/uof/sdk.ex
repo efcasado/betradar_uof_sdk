@@ -69,7 +69,6 @@ defmodule UOF.SDK do
           {ProducerMonitor,
            handler: config.handler,
            inactivity_ms: config.inactivity_seconds * 1_000,
-           max_processing_delay_ms: config.max_processing_delay_seconds * 1_000,
            ownership: config.ownership,
            node_id: config.node_id,
            monitor_store: config.monitor_store,

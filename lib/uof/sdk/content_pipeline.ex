@@ -15,8 +15,8 @@ defmodule UOF.SDK.ContentPipeline do
     * `:handler` (required) — module implementing `UOF.SDK.MessageHandler`.
     * `:concurrency` — processor concurrency (default `10`).
     * `:producer` — Broadway producer spec for event content.
-    * `:monitor` — module that receives content timestamp side-effects.
-      Default `nil`, in which case messages are only delivered to the handler.
+    * `:monitor` — module that receives consumer tags. Default `nil`, in which
+      case messages are only delivered to the handler.
     * `:metadata_adapter` — message metadata shape (`:amqp` or
       `:pulsar_rabbitmq_source`; default `:amqp`).
     * `:routing_key_metadata_key` — the `message.metadata` field carrying the
@@ -31,7 +31,7 @@ defmodule UOF.SDK.ContentPipeline do
   The producer must honour this contract:
 
     1. **Routing key available through the configured metadata adapter**.
-       Dispatch, partitioning and content timestamp observation derive from it
+       Dispatch, partitioning and consumer-tag observation derive from it
        (`UOF.SDK.RoutingKey`); without it nothing routes. AMQP/custom producers
        read a flat `message.metadata[:routing_key]` by default. The built-in
        Pulsar adapter reads the `__rabbitmq_routing_key` property emitted by the
@@ -75,8 +75,6 @@ defmodule UOF.SDK.ContentPipeline do
   alias UOF.SDK.RoutingKey
 
   require Logger
-
-  @content_message_types UOF.SDK.MessageHandler.content_message_types()
 
   @doc false
   def child_spec(opts) do
@@ -149,9 +147,8 @@ defmodule UOF.SDK.ContentPipeline do
           event_urn: rk.event_urn
         }
 
-        track_processing(context, rk, decoded, fn -> deliver(context.handler, rk.message_type, decoded, ctx) end)
+        deliver(context.handler, rk.message_type, decoded, ctx)
         maybe_track_connection(context, rk.message_type, message)
-        observe(context, rk, decoded)
         message
 
       {:error, reason} ->
@@ -193,31 +190,6 @@ defmodule UOF.SDK.ContentPipeline do
 
   ## lifecycle side-effects --------------------------------------------------
 
-  defp observe(ctx, %RoutingKey{message_type: "alive"}, msg) do
-    product = Map.get(msg, :product)
-    timestamp = Map.get(msg, :timestamp)
-
-    if product && timestamp do
-      notify(ctx.monitor, :message, [product, timestamp])
-    end
-  end
-
-  defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
-
-  # The monitor measures content lag from the oldest message still being
-  # handled, so a slow handler on one processor is visible even while other
-  # processors complete fresher messages. Completion also records the content
-  # timestamp; only content-session alives go through `message/3`.
-  defp track_processing(%{monitor: monitor}, %RoutingKey{message_type: type}, msg, fun)
-       when not is_nil(monitor) and type in @content_message_types do
-    product = Map.get(msg, :product)
-    timestamp = Map.get(msg, :timestamp)
-
-    if product && timestamp, do: monitor.track_processing(product, timestamp, fun), else: fun.()
-  end
-
-  defp track_processing(_context, _rk, _msg, fun), do: fun.()
-
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
   defp maybe_track_connection(%{metadata_adapter: :amqp} = context, "alive", message) do
@@ -236,9 +208,6 @@ defmodule UOF.SDK.ContentPipeline do
       tag -> monitor.observe_connection({:content, tag})
     end
   end
-
-  defp notify(nil, _fun, _args), do: :ok
-  defp notify(mod, fun, args), do: apply(mod, fun, args)
 
   ## delivery to the user handler --------------------------------------------
 

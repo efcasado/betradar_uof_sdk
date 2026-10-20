@@ -19,12 +19,6 @@ defmodule UOF.SDK.ContentPipelineTest do
   # One module standing in for monitor/recovery lifecycle notifications.
   defmodule Sink do
     @moduledoc false
-    def message(product, ts), do: emit({:message_sink, product, ts})
-
-    def track_processing(product, ts, fun) do
-      emit({:tracking_sink, product, ts})
-      fun.()
-    end
 
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
     def observe_connection(tag), do: emit({:connection_sink, tag})
@@ -79,7 +73,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:ack, ^ref, [], [_failed]}, 1_000
   end
 
-  test "routes content timestamps to the monitor" do
+  test "delivers content and alives without reporting them to the monitor" do
     name = Module.concat(__MODULE__, Sinks)
 
     start_link_supervised!(%{
@@ -97,43 +91,23 @@ defmodule UOF.SDK.ContentPipelineTest do
          ]}
     })
 
-    Broadway.test_message(name, ~s(<odds_change product="3" event_id="sr:match:1" timestamp="99"/>),
-      metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-"}
-    )
+    # The sink has no function for content or alive reports, so making one would fail the message.
+    content =
+      Broadway.test_message(name, ~s(<odds_change product="3" event_id="sr:match:1" timestamp="99"/>),
+        metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-"}
+      )
 
-    # Content timestamps reach the monitor through processing tracking, which
-    # records them on completion; message/2 is only for content-session alives.
-    assert_receive {:tracking_sink, 3, 99}
-    refute_received {:message_sink, 3, 99}
+    alive =
+      Broadway.test_message(name, ~s(<alive product="3" timestamp="123" subscribed="1"/>),
+        metadata: %{routing_key: "-.-.-.alive.-.-.-.-"}
+      )
+
+    assert_receive {:ack, ^content, [_successful], []}, 1_000
+    assert_receive {:ack, ^alive, [_successful], []}, 1_000
+    assert_receive {:odds_change, _, _}
   end
 
-  test "routes content-session alive timestamps to the monitor" do
-    name = Module.concat(__MODULE__, ContentAlive)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<alive product="3" timestamp="123" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-"}
-    )
-
-    assert_receive {:message_sink, 3, 123}
-    refute_received {:odds_change, _, _}
-  end
-
-  test "does not notify lifecycle side-effects when handler delivery fails" do
+  test "fails a message whose handler raises" do
     name = Module.concat(__MODULE__, HandlerFailure)
 
     start_link_supervised!(%{
@@ -157,7 +131,6 @@ defmodule UOF.SDK.ContentPipelineTest do
       )
 
     assert_receive {:ack, ^ref, [], [_failed]}, 1_000
-    refute_received {:message_sink, 3, 99}
   end
 
   test "reads the routing key from a custom AMQP metadata field" do
@@ -301,7 +274,6 @@ defmodule UOF.SDK.ContentPipelineTest do
       }
     )
 
-    assert_receive {:message_sink, 1, 1}
     assert_receive {:connection_sink, {:content, "ctag-1"}}
   end
 
@@ -370,8 +342,6 @@ defmodule UOF.SDK.ContentPipelineTest do
 
     assert_receive {:ack, ^other, [_successful], []}, 1_000
     refute_received {:odds_change, _, _}
-    refute_received {:message_sink, _, _}
-    refute_received {:tracking_sink, _, _}
     refute_received {:connection_sink, _}
 
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="2"/>),
@@ -418,28 +388,5 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:other_node, %{count: 1}, %{node_id: "8", message_type: "odds_change"}}, 1_000
-  end
-
-  test "tracks content messages, not alives, while their handler runs" do
-    name = Module.concat(__MODULE__, Tracking)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [[name: name, handler: Handler, concurrency: 1, producer: {Broadway.DummyProducer, []}, monitor: Sink]]}
-    })
-
-    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-"}
-    )
-
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="42"/>),
-      metadata: %{routing_key: "hi.-.live.odds_change.1.sr:match.1.-"}
-    )
-
-    assert_receive {:tracking_sink, 1, 42}
-    assert_receive {:odds_change, _, _}
-    refute_received {:tracking_sink, 1, 1}
   end
 end

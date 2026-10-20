@@ -19,35 +19,26 @@ defmodule UOF.SDK.ProducerMonitor do
   `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
   health observations, lifecycle transitions, its canonical recovery job, and
   the recovery cooldown. Delivery gaps move a producer from `:down` or `:up`
-  to `:recovering`, and a matching recovery completion moves it to `:up`.
-  Local processing lag moves `:up` to `:delayed` without recovery. A restart
-  that can safely drain retained backlog starts at `:resuming` and becomes
-  `:up` after current-session continuity is confirmed and processing catches
-  up.
+  to `:recovering`, and a matching recovery completion moves it to `:up`. A
+  restart that can safely drain retained backlog starts at `:resuming` and
+  becomes `:up` after current-session continuity is confirmed and system
+  delivery reaches the live feed.
 
-  The processing threshold is independent of `inactivity_ms` so consumer-lag
-  tolerance can be tuned separately from the alive-gap/recovery trigger.
-
-  Content lag is measured from the oldest content message still being
-  handled, falling back to the newest one completed. Content processors report
-  each message they start and finish (see `track_processing/4`), and this
-  process keeps the in-flight message of every processor, so one processor
-  stuck on an old message is not hidden by fresher messages completing
-  elsewhere. Processors are monitored so one that dies mid-message is dropped.
-
-  `:up` therefore means the feed confirmed synchronization (`snapshot_complete`
-  or continuing heartbeats) and content processing is within
-  `max_processing_delay_ms`. A recovery replay still being processed shows
-  as `:delayed` once it lags beyond that threshold. With several instances on
-  one Pulsar subscription, each monitor sees only its own share of content.
+  `:up` means the feed confirmed synchronization (`snapshot_complete` or
+  continuing heartbeats): no known gap remains. It says nothing about how far
+  the application's content processing lags; replayed content can still be in
+  progress. Processing lag is the application's concern, measured from the
+  feed timestamps its callbacks receive.
 
   ## Recovery orchestration
 
   Recovery checkpoints are owned here, not by the Broadway pipeline. Subscribed
-  `alive` heartbeats advance the checkpoint only after the producer is already
-  up. Incremental recovery subtracts `recovery_overlap_ms` from the stored
-  checkpoint, intentionally replaying a bounded window to cover concurrent
-  processing and distributed-consumer skew.
+  system `alive` heartbeats advance the checkpoint only after the producer is
+  already up. Incremental recovery subtracts `recovery_overlap_ms` from the
+  stored checkpoint, intentionally replaying a bounded window to cover content
+  that was delivered but not yet processed. With AMQP a reconnect discards the
+  exclusive content queue, so the overlap must exceed the worst-case content
+  lag, including working through a recovery replay.
 
   A delivery gap marks the producer `:recovering`. The request is issued after
   the per-producer cooldown with a fresh `request_id` and a checkpoint-derived
@@ -80,8 +71,10 @@ defmodule UOF.SDK.ProducerMonitor do
   restored:
 
     * A resumable producer with a checkpoint starts as `:resuming`. It becomes
-      `:up` after processing catches up, an `alive` is heard, and both pipeline
-      connections are observed in the current process.
+      `:up` once both pipeline connections are observed in the current process
+      and it hears an `alive` generated within one alive-inactivity interval:
+      alives drained from retained backlog do not count, so anything still in
+      the backlog is seen first.
     * Persisted consumer tags are comparison baselines, not evidence that
       the current pipelines are ready. Recovery HTTP waits until both pipelines
       are observed. If that does not happen within one alive-inactivity
@@ -106,8 +99,7 @@ defmodule UOF.SDK.ProducerMonitor do
   cannot observe the `snapshot_complete` for a request it issued, so issuing
   from standby burns recovery quota in a stall-reissue loop. An explicit
   recovery-required alive racing demotion is nevertheless persisted and
-  remains pending for promotion. Content progress observations continue while
-  passive.
+  remains pending for promotion.
 
   Demotion drops in-flight recovery correlation (the completion will go to the
   new owner); affected producers stay `:recovering` and are reissued on
@@ -136,7 +128,6 @@ defmodule UOF.SDK.ProducerMonitor do
   require Logger
 
   @default_inactivity_ms 20_000
-  @default_max_processing_delay_ms 20_000
   @default_tick_ms 1_000
   @default_recovery_overlap_ms 5 * 60_000
   @default_descriptions_refresh_ms 60_000
@@ -153,10 +144,8 @@ defmodule UOF.SDK.ProducerMonitor do
           monitor_store: {module(), keyword()},
           readiness_deadline_at: integer() | nil,
           inactivity_ms: non_neg_integer(),
-          max_processing_delay_ms: non_neg_integer(),
           tick_ms: pos_integer(),
           recovery_overlap_ms: non_neg_integer(),
-          in_flight: %{optional(pid()) => {integer(), integer()} | nil},
           producer_opts: keyword(),
           descriptions_refresh_ms: pos_integer(),
           next_refresh_at: integer() | nil,
@@ -174,14 +163,12 @@ defmodule UOF.SDK.ProducerMonitor do
     :monitor_store,
     :readiness_deadline_at,
     :inactivity_ms,
-    :max_processing_delay_ms,
     :tick_ms,
     :recovery_overlap_ms
   ]
 
   defstruct @enforce_keys ++
               [
-                in_flight: %{},
                 producer_opts: [],
                 descriptions_refresh_ms: @default_descriptions_refresh_ms,
                 next_refresh_at: nil,
@@ -208,30 +195,6 @@ defmodule UOF.SDK.ProducerMonitor do
   @doc "Record an `alive` heartbeat. `subscribed?` false means recovery is needed."
   def alive(server \\ __MODULE__, producer_id, gen_timestamp, subscribed?) do
     GenServer.cast(server, {:alive, producer_id, gen_timestamp, subscribed?})
-  end
-
-  @doc "Record a generation timestamp processed by the content pipeline."
-  def message(server \\ __MODULE__, producer_id, gen_timestamp) do
-    GenServer.cast(server, {:message, producer_id, gen_timestamp})
-  end
-
-  @doc """
-  Run `fun` while the calling content processor is reported as handling a
-  message generated at `gen_timestamp` for `producer_id`.
-
-  Called by the content pipeline around the handler callback. Completion is
-  reported when `fun` returns or raises, and records `gen_timestamp` as
-  processed: a failed message no longer holds processing back.
-  """
-  @spec track_processing(GenServer.server(), integer(), integer(), (-> result)) :: result when result: term()
-  def track_processing(server \\ __MODULE__, producer_id, gen_timestamp, fun) do
-    GenServer.cast(server, {:processing, self(), producer_id, gen_timestamp})
-
-    try do
-      fun.()
-    after
-      GenServer.cast(server, {:processed, self()})
-    end
   end
 
   @doc """
@@ -310,7 +273,6 @@ defmodule UOF.SDK.ProducerMonitor do
       monitor_store: monitor_store,
       readiness_deadline_at: nil,
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
-      max_processing_delay_ms: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       recovery_overlap_ms: Keyword.get(opts, :recovery_overlap_ms, @default_recovery_overlap_ms),
       producer_opts: opts,
@@ -388,28 +350,6 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
-  def handle_cast({:message, id, gen_ts}, state) do
-    {:noreply, observe_message(state, id, gen_ts)}
-  end
-
-  # A processor is monitored the first time it reports, so an entry cannot
-  # outlive it. Between messages its entry is nil rather than removed.
-  def handle_cast({:processing, pid, id, gen_ts}, state) do
-    if not Map.has_key?(state.in_flight, pid), do: Process.monitor(pid)
-    {:noreply, %{state | in_flight: Map.put(state.in_flight, pid, {id, gen_ts})}}
-  end
-
-  def handle_cast({:processed, pid}, state) do
-    case Map.get(state.in_flight, pid) do
-      {id, gen_ts} ->
-        state = %{state | in_flight: Map.put(state.in_flight, pid, nil)}
-        {:noreply, observe_message(state, id, gen_ts)}
-
-      nil ->
-        {:noreply, state}
-    end
-  end
-
   # A passive instance ignores session observations entirely: the owner heals
   # the shared feed, and the stale baseline this leaves behind is the
   # self-correction mechanism — on promotion (or a restart into ownership) the
@@ -457,9 +397,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp complete_recovery(state, id, request_id) do
     with_producer(state, id, fn producer ->
-      in_flight_ts = Map.get(oldest_in_flight(state), id)
-
-      case Producer.complete_recovery(producer, request_id, state.now_fun.(), state.max_processing_delay_ms, in_flight_ts) do
+      case Producer.complete_recovery(producer, request_id, state.now_fun.()) do
         {:ok, producer} ->
           Logger.info("UOF.SDK.ProducerMonitor: producer #{id} recovery #{request_id} complete")
           commit_producer_transition(state, producer)
@@ -476,12 +414,11 @@ defmodule UOF.SDK.ProducerMonitor do
       if owns_control?(state) do
         now = state.now_fun.()
         ensure_connection_readiness!(state, now)
-        in_flight = oldest_in_flight(state)
-        Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now, Map.get(in_flight, &1.id)))
+        Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now))
       else
-        # A passive instance sees no system alives and only a partial content
-        # view, so status transitions here would be noise; healing happens on
-        # promotion when the checks resume against the then-stale timestamps.
+        # A passive instance sees no system alives, so status transitions here
+        # would be noise; healing happens on promotion when the checks resume
+        # against the then-stale timestamps.
         state
       end
 
@@ -534,10 +471,6 @@ defmodule UOF.SDK.ProducerMonitor do
       end
 
     {:noreply, state}
-  end
-
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    {:noreply, %{state | in_flight: Map.delete(state.in_flight, pid)}}
   end
 
   def handle_info({:stall, id, request_id}, state) do
@@ -594,15 +527,8 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  defp check(state, producer, now, in_flight_ts) do
-    case Producer.check(
-           producer,
-           now,
-           state.inactivity_ms,
-           state.max_processing_delay_ms,
-           Connections.ready?(state.connections),
-           in_flight_ts
-         ) do
+  defp check(state, producer, now) do
+    case Producer.check(producer, now, state.inactivity_ms, Connections.ready?(state.connections)) do
       {:recovery_needed, producer, :alive_timeout} ->
         {state, _producer} = prepare_recovery(state, producer, after_from_checkpoint(state, producer), true)
         state
@@ -918,7 +844,7 @@ defmodule UOF.SDK.ProducerMonitor do
   # Runtime status is not stored. `:resuming` is reconstructed at startup from
   # the producer checkpoint and its synchronization flag.
   defp persist_producer_progress(state, after_) do
-    synchronized? = after_.status in [:up, :delayed]
+    synchronized? = after_.status == :up
     update_progress(state, after_.id, &%{&1 | synchronized: synchronized?})
   end
 
@@ -996,12 +922,10 @@ defmodule UOF.SDK.ProducerMonitor do
   # `:recovering`. A job awaiting the producer's alives is reported as `:down`:
   # the producer is silent and no recovery can start until it is heard again.
   defp reported_producer(%Producer{} = producer) do
-    recovering? = Producer.recovering?(producer)
-
     status =
       cond do
         Producer.awaiting_alive?(producer) -> :down
-        recovering? -> :recovering
+        Producer.recovering?(producer) -> :recovering
         true -> producer.status
       end
 
@@ -1011,9 +935,7 @@ defmodule UOF.SDK.ProducerMonitor do
       product: producer.product,
       recovery_window_minutes: producer.recovery_window_minutes,
       status: status,
-      last_alive_at: producer.last_alive_at,
-      last_message_timestamp: producer.last_message_timestamp,
-      processing_queue_delay: if(!recovering?, do: producer.processing_queue_delay)
+      last_alive_at: producer.last_alive_at
     }
   end
 
@@ -1031,18 +953,6 @@ defmodule UOF.SDK.ProducerMonitor do
   defp owns_control?(%{ownership: :always_active}), do: true
   defp owns_control?(%{ownership: {:failover, :active}}), do: true
   defp owns_control?(%{ownership: {:failover, :passive}}), do: false
-
-  # Oldest in-flight content timestamp per producer.
-  defp oldest_in_flight(state) do
-    Enum.reduce(state.in_flight, %{}, fn
-      {_pid, {id, timestamp}}, oldest -> Map.update(oldest, id, timestamp, &min(&1, timestamp))
-      {_pid, nil}, oldest -> oldest
-    end)
-  end
-
-  defp observe_message(state, id, gen_ts) do
-    with_producer(state, id, fn p -> put_producer(state, Producer.observe_message(p, gen_ts)) end)
-  end
 
   defp schedule_tick(state), do: Process.send_after(self(), :tick, state.tick_ms)
 

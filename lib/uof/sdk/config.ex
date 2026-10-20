@@ -25,9 +25,12 @@ defmodule UOF.SDK.Config do
       """
     ],
     monitor_store: [
-      type: {:custom, __MODULE__, :validate_module, [UOF.SDK.ProducerMonitor.Store]},
+      type: {:custom, __MODULE__, :validate_store, []},
       default: UOF.SDK.ProducerMonitor.Store.ETS,
-      doc: "Module implementing `UOF.SDK.ProducerMonitor.Store`."
+      doc: """
+      `module` or `{module, opts}` implementing `UOF.SDK.ProducerMonitor.Store`. `opts` is
+      passed to its callbacks, for example to select a key per monitor.
+      """
     ],
     concurrency: [
       type: :pos_integer,
@@ -115,7 +118,7 @@ defmodule UOF.SDK.Config do
           metadata_adapter: MessageMetadata.adapter(),
           routing_key_metadata_key: atom(),
           connection_token_metadata_key: atom() | nil,
-          monitor_store: module(),
+          monitor_store: {module(), keyword()},
           concurrency: pos_integer(),
           inactivity_seconds: pos_integer(),
           max_processing_delay_seconds: pos_integer(),
@@ -205,4 +208,15 @@ defmodule UOF.SDK.Config do
   def validate_module(other, behaviour) do
     {:error, "expected a module implementing #{inspect(behaviour)}, got: #{inspect(other)}"}
   end
+
+  @doc false
+  def validate_store({module, opts}) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      with {:ok, module} <- validate_module(module, UOF.SDK.ProducerMonitor.Store), do: {:ok, {module, opts}}
+    else
+      {:error, "expected store options to be a keyword list, got: #{inspect(opts)}"}
+    end
+  end
+
+  def validate_store(module), do: validate_store({module, []})
 end

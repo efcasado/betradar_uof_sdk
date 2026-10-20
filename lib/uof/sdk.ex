@@ -117,8 +117,8 @@ defmodule UOF.SDK do
   end
 
   @doc false
-  @spec monitor_store_child_specs(module()) :: [module()]
-  def monitor_store_child_specs(store) do
-    if Code.ensure_loaded?(store) and function_exported?(store, :child_spec, 1), do: [store], else: []
+  @spec monitor_store_child_specs({module(), keyword()}) :: [{module(), keyword()}]
+  def monitor_store_child_specs({store, opts}) do
+    if function_exported?(store, :child_spec, 1), do: [{store, opts}], else: []
   end
 end

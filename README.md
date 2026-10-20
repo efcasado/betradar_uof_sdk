@@ -200,7 +200,7 @@ loads producer descriptions and recovery uses the HTTP API.
 | `:handler` | Required | Module implementing `UOF.SDK.MessageHandler` |
 | `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}`; see [Choosing a transport](#choosing-a-transport) |
 | `:node_id` | `nil` | Positive ID scopes recovery replays and `snapshot_complete`; shared by every instance on one Pulsar subscription, distinct across subscriptions using the same access token |
-| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | Session and producer-progress persistence; see [store implementation](docs/architecture.md#implementing-and-configuring-a-store) |
+| `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | `module` or `{module, opts}` persisting restart state; see [implementing a store](docs/architecture.md#implementing-a-store) |
 | `:concurrency` | `10` | Number of content processors in each SDK instance |
 | `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
 | `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound |

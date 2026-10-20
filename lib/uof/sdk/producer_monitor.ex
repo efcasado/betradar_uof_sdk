@@ -50,27 +50,28 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Restart resume
 
-  The state store holds a session generation with committed tokens and one
-  durable progress record per producer. A producer may resume only when its
-  synchronized generation matches the current session generation and it has a
-  checkpoint. At startup that state is restored:
+  The monitor saves its state as one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`):
+  the committed consumer tags of both pipelines and, per producer, a checkpoint and
+  whether it is synchronized with those sessions. A producer may resume only
+  when it is synchronized and has a checkpoint. At startup that state is
+  restored:
 
     * A resumable producer with a checkpoint starts as `:resuming`. It becomes
       `:up` after processing catches up, an `alive` is heard, and both pipeline
       connections are observed in the current process.
-    * Persisted session tokens are comparison baselines, not evidence that
+    * Persisted consumer tags are comparison baselines, not evidence that
       the current pipelines are ready. Recovery HTTP waits until both pipelines
       are observed. If that does not happen within one alive-inactivity
       interval, the monitor crashes so supervision restarts both pipelines.
-      Once ready, a changed token advances the session generation, which
-      invalidates every previously synchronized producer, and starts recovery.
+      Once ready, a changed consumer tag is saved together with every producer marked
+      unsynchronized, and recovery starts.
     * A resumable producer gets one alive-inactivity interval to provide a
       current heartbeat; silence then follows the normal recovery path instead
       of leaving it in `:resuming` forever.
     * `subscribed=0` records recovery immediately, even if it races demotion or
       connection startup; only the HTTP request waits. Producers not
-      synchronized in the current session generation start `:down` and
-      recover on their first subscribed `alive`.
+      synchronized start `:down` and recover on their first subscribed
+      `alive`.
 
   ## Control-plane ownership (multi-instance Pulsar)
 
@@ -106,8 +107,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   alias UOF.SDK.ProducerMonitor.Connections
   alias UOF.SDK.ProducerMonitor.Producer
-  alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
-  alias UOF.SDK.ProducerMonitor.Store.Session
+  alias UOF.SDK.ProducerMonitor.Snapshot
   alias UOF.SDK.ProducerStatus
 
   require Logger
@@ -121,13 +121,12 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @type state :: %__MODULE__{
           producers: %{optional(integer()) => Producer.t()},
-          session: Session.t(),
-          producer_progress: %{optional(integer()) => ProducerProgress.t()},
+          snapshot: Snapshot.t(),
           connections: Connections.t(),
           ownership: ownership(),
           handler: module() | nil,
           now_fun: (-> integer()),
-          monitor_store: module(),
+          monitor_store: {module(), keyword()},
           readiness_deadline_at: integer() | nil,
           inactivity_ms: non_neg_integer(),
           max_processing_delay_ms: non_neg_integer(),
@@ -137,8 +136,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @enforce_keys [
     :producers,
-    :session,
-    :producer_progress,
+    :snapshot,
     :connections,
     :ownership,
     :handler,
@@ -235,17 +233,14 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @impl true
   def init(opts) do
-    monitor_store = Keyword.get(opts, :monitor_store, UOF.SDK.ProducerMonitor.Store.ETS)
-    session = monitor_store.load_session()
-    producer_progress = monitor_store.load_producer_progress()
+    monitor_store = Keyword.get(opts, :monitor_store, {UOF.SDK.ProducerMonitor.Store.ETS, []})
+    snapshot = load_snapshot(monitor_store)
 
     producers =
       Map.new(load_producers(opts), fn producer ->
-        progress = Map.get(producer_progress, producer.id, %ProducerProgress{})
-
         producer =
           producer
-          |> restore_producer(progress, session.generation)
+          |> restore_producer(snapshot)
           |> Producer.configure_recovery(opts)
 
         {producer.id, producer}
@@ -253,9 +248,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
     state = %__MODULE__{
       producers: producers,
-      session: session,
-      producer_progress: producer_progress,
-      connections: Connections.new(session.tokens),
+      snapshot: snapshot,
+      connections: Connections.new(snapshot.consumer_tags),
       ownership: Keyword.get(opts, :ownership, {:failover, :passive}),
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
@@ -507,11 +501,20 @@ defmodule UOF.SDK.ProducerMonitor do
     state
   end
 
+  # Only a missing snapshot starts empty. One that cannot be decoded raises:
+  # discarding it would lose the checkpoints that bound incremental recovery.
+  defp load_snapshot({store, store_opts}) do
+    case store.load(store_opts) do
+      nil -> %Snapshot{}
+      binary when is_binary(binary) -> Snapshot.decode!(binary)
+    end
+  end
+
   # Resuming safely requires both durable eligibility and a checkpoint. The
   # current-session heartbeat, connection, and catch-up gates live in check/3.
-  defp restore_producer(producer, progress, session_generation) do
-    if ProducerProgress.resumable?(progress, session_generation) do
-      %{producer | status: :resuming, last_message_timestamp: progress.checkpoint}
+  defp restore_producer(producer, snapshot) do
+    if Snapshot.resumable?(snapshot, producer.id) do
+      %{producer | status: :resuming, last_message_timestamp: Snapshot.progress(snapshot, producer.id).checkpoint}
     else
       producer
     end
@@ -675,11 +678,9 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp commit_session_change(state, connections) do
-    session = state.monitor_store.commit_session_change(connections.persisted)
-
     state
+    |> save_snapshot(Snapshot.change_session(state.snapshot, connections.persisted))
     |> Map.put(:connections, connections)
-    |> Map.put(:session, session)
     |> recover_after_connection_change()
   end
 
@@ -706,38 +707,14 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   # Runtime status is not stored. `:resuming` is reconstructed at startup from
-  # the producer checkpoint and its synchronized session generation.
+  # the producer checkpoint and its synchronization flag.
   defp persist_producer_progress(state, after_) do
-    resumable? = after_.status in [:up, :delayed]
-
-    if resumable? do
-      mark_synchronized(state, after_.id)
-    else
-      require_recovery(state, after_.id)
-    end
+    synchronized? = after_.status in [:up, :delayed]
+    update_progress(state, after_.id, &%{&1 | synchronized: synchronized?})
   end
 
   defp require_recovery(state, id) do
-    progress = Map.get(state.producer_progress, id, %ProducerProgress{})
-
-    if is_nil(progress.synchronized_generation) do
-      state
-    else
-      progress = state.monitor_store.require_recovery(id)
-      put_producer_progress(state, id, progress)
-    end
-  end
-
-  defp mark_synchronized(state, id) do
-    generation = state.session.generation
-    progress = Map.get(state.producer_progress, id, %ProducerProgress{})
-
-    if progress.synchronized_generation == generation do
-      state
-    else
-      progress = state.monitor_store.mark_synchronized(id, generation)
-      put_producer_progress(state, id, progress)
-    end
+    update_progress(state, id, &%{&1 | synchronized: false})
   end
 
   ## Recovery -----------------------------------------------------------------
@@ -755,7 +732,7 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp after_from_checkpoint(state, producer) do
-    case Map.get(state.producer_progress, producer.id, %ProducerProgress{}).checkpoint do
+    case Snapshot.progress(state.snapshot, producer.id).checkpoint do
       timestamp when is_integer(timestamp) ->
         timestamp
         |> checkpoint_after_overlap(state.recovery_overlap_ms)
@@ -772,19 +749,30 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp checkpoint_after_overlap(timestamp, overlap_ms), do: max(timestamp - overlap_ms, 0)
 
+  # Checkpoints only move forward.
   defp put_checkpoint(state, id, timestamp) do
-    progress = Map.get(state.producer_progress, id, %ProducerProgress{})
+    update_progress(state, id, fn
+      %{checkpoint: checkpoint} = progress when is_integer(checkpoint) and checkpoint >= timestamp -> progress
+      progress -> %{progress | checkpoint: timestamp}
+    end)
+  end
 
-    if is_integer(progress.checkpoint) and progress.checkpoint >= timestamp do
-      state
-    else
-      progress = state.monitor_store.advance_checkpoint(id, timestamp)
-      put_producer_progress(state, id, progress)
+  # Writes are skipped when nothing changed; otherwise the snapshot is durable
+  # before the monitor acts on it.
+  defp update_progress(state, id, fun) do
+    progress = Snapshot.progress(state.snapshot, id)
+
+    case fun.(progress) do
+      ^progress -> state
+      updated -> save_snapshot(state, Snapshot.put_progress(state.snapshot, id, updated))
     end
   end
 
-  defp put_producer_progress(state, id, progress) do
-    %{state | producer_progress: Map.put(state.producer_progress, id, progress)}
+  defp save_snapshot(%{snapshot: snapshot} = state, snapshot), do: state
+
+  defp save_snapshot(%{monitor_store: {store, store_opts}} = state, snapshot) do
+    :ok = store.save(Snapshot.encode(snapshot), store_opts)
+    %{state | snapshot: snapshot}
   end
 
   defp clamp_to_window(timestamp, %Producer{recovery_window_minutes: nil}, _now), do: timestamp

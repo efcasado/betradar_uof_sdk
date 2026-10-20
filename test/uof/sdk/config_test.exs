@@ -11,26 +11,15 @@ defmodule UOF.SDK.ConfigTest do
     @moduledoc false
     @behaviour UOF.SDK.ProducerMonitor.Store
 
-    alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
-    alias UOF.SDK.ProducerMonitor.Store.Session
-
     @impl true
-    def load_session, do: %Session{}
+    def load(_opts), do: nil
     @impl true
-    def load_producer_progress, do: %{}
-    @impl true
-    def commit_session_change(tokens), do: %Session{tokens: tokens, generation: 1}
-    @impl true
-    def advance_checkpoint(_id, timestamp), do: %ProducerProgress{checkpoint: timestamp}
-    @impl true
-    def require_recovery(_id), do: %ProducerProgress{}
-    @impl true
-    def mark_synchronized(_id, generation), do: %ProducerProgress{synchronized_generation: generation}
+    def save(_snapshot, _opts), do: :ok
   end
 
   defmodule IncompleteStore do
     @moduledoc false
-    def load_session, do: nil
+    def load(_opts), do: nil
   end
 
   test "builds AMQP producer specs from the transport connection" do
@@ -59,7 +48,7 @@ defmodule UOF.SDK.ConfigTest do
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
     assert content_opts[:connection] == {:custom_pool, Connection, Connection}
     assert config.transport_children == [{Connection, connection: []}]
-    assert config.monitor_store == UOF.SDK.ProducerMonitor.Store.ETS
+    assert config.monitor_store == {UOF.SDK.ProducerMonitor.Store.ETS, []}
   end
 
   test "scopes AMQP bindings by node_id" do
@@ -73,8 +62,10 @@ defmodule UOF.SDK.ConfigTest do
   end
 
   test "accepts a custom monitor store" do
-    config = Config.load(handler: LogHandler, monitor_store: CustomStore)
-    assert config.monitor_store == CustomStore
+    assert Config.load(handler: LogHandler, monitor_store: CustomStore).monitor_store == {CustomStore, []}
+
+    assert Config.load(handler: LogHandler, monitor_store: {CustomStore, key: "node-a"}).monitor_store ==
+             {CustomStore, key: "node-a"}
   end
 
   test "builds Pulsar producer specs from one topic and subscription" do

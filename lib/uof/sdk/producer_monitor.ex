@@ -33,7 +33,10 @@ defmodule UOF.SDK.ProducerMonitor do
 
   A delivery gap marks the producer `:recovering`. The request is issued after
   the per-producer cooldown with a fresh `request_id` and a checkpoint-derived
-  `after:` timestamp, clamped to the producer's recovery window. Issuing emits
+  `after:` timestamp, clamped to the producer's recovery window. A heartbeat
+  timeout records the recovery immediately but issues it only once the
+  producer's alives resume: Betradar rejects recovery while a producer is
+  silent, and failed requests count against its rate limit. Issuing emits
   `[:uof_sdk, :recovery, :initiated]` telemetry and starts the stall deadline.
   Failed requests are retried; stalled requests are reissued from the original
   timestamp. A matching `snapshot_complete` moves the producer to `:up`.
@@ -441,6 +444,10 @@ defmodule UOF.SDK.ProducerMonitor do
         # readiness; the durable requirement itself must never be discarded.
         request_recovery(state, producer)
 
+      {:alive_resumed, producer} ->
+        producer = Producer.release_recovery(producer, after_from_checkpoint(state, producer))
+        state |> put_producer(producer) |> maybe_initiate(producer)
+
       {:checkpoint, producer, timestamp} ->
         state
         |> put_checkpoint(producer.id, timestamp)
@@ -459,8 +466,9 @@ defmodule UOF.SDK.ProducerMonitor do
            state.max_processing_delay_ms,
            Connections.ready?(state.connections)
          ) do
-      {:recovery_needed, producer, _cause} ->
-        request_recovery(state, producer)
+      {:recovery_needed, producer, :alive_timeout} ->
+        {state, _producer} = prepare_recovery(state, producer, after_from_checkpoint(state, producer), true)
+        state
 
       {:transition, producer} ->
         commit_producer_transition(state, producer)
@@ -479,8 +487,8 @@ defmodule UOF.SDK.ProducerMonitor do
     maybe_initiate(state, producer)
   end
 
-  defp prepare_recovery(state, before, after_ts) do
-    producer = Producer.prepare_recovery(before, after_ts)
+  defp prepare_recovery(state, before, after_ts, awaiting_alive \\ false) do
+    producer = Producer.prepare_recovery(before, after_ts, awaiting_alive)
 
     # The durable safety transition must precede HTTP issuance. If the monitor
     # crashes after the request, restart will require another recovery instead
@@ -597,9 +605,12 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
+  # A job awaiting an alive stays parked: the producer's next alive releases it.
   defp resume_pending_recoveries(state) do
     Enum.reduce(state.producers, state, fn {_id, producer}, state ->
-      if Producer.recovery_pending?(producer), do: maybe_initiate(state, producer), else: state
+      if Producer.recovery_pending?(producer) and not Producer.awaiting_alive?(producer),
+        do: maybe_initiate(state, producer),
+        else: state
     end)
   end
 

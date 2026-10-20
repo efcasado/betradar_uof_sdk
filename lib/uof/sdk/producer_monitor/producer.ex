@@ -21,6 +21,11 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   Only then does it call `initiate_recovery/1`. This ordering guarantees that a
   crash after issuing the request cannot restart from stale synchronized state.
 
+  A heartbeat timeout prepares its job awaiting an alive. Recovery requests
+  issued while the producer is silent fail and count against Betradar's rate
+  limit, so `observe_alive/4` reports the next alive and the monitor releases
+  the job then, recomputing its replay timestamp.
+
   A reconnect is different: the session change is saved before
   the producers are visited, so `restart_recovery/2` can replace an in-flight
   job and initiate it immediately. Failed requests, stalls, and ownership
@@ -41,7 +46,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @type recovery_job :: %{
           after_ts: integer() | nil,
           request_id: integer() | nil,
-          generation: reference()
+          generation: reference(),
+          awaiting_alive: boolean()
         }
 
   @type recovery_state :: %{
@@ -70,6 +76,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   @type alive_result ::
           {:ok, t()}
+          | {:alive_resumed, t()}
           | {:checkpoint, t(), integer()}
           | {:recovery_needed, t(), :initial_sync | :unsubscribed}
 
@@ -114,6 +121,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     observed = %{producer | last_alive_at: now}
 
     cond do
+      awaiting_alive?(producer) ->
+        {:alive_resumed, observed}
+
       recovering?(producer) ->
         {:ok, observed}
 
@@ -164,10 +174,18 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec prepare_recovery(t(), integer() | nil) :: t()
-  def prepare_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
-    job = %{after_ts: after_ts, request_id: nil, generation: make_ref()}
+  @spec prepare_recovery(t(), integer() | nil, boolean()) :: t()
+  def prepare_recovery(%__MODULE__{recovery: recovery} = producer, after_ts, awaiting_alive \\ false) do
+    job = %{after_ts: after_ts, request_id: nil, generation: make_ref(), awaiting_alive: awaiting_alive}
     %{producer | recovery: %{recovery | job: job}}
+  end
+
+  # The checkpoint is frozen while recovering, but the recovery window moves:
+  # the caller recomputes the replay timestamp for the moment of issue.
+  @doc false
+  @spec release_recovery(t(), integer() | nil) :: t()
+  def release_recovery(%__MODULE__{recovery: %{job: job} = recovery} = producer, after_ts) do
+    %{producer | recovery: %{recovery | job: %{job | after_ts: after_ts, awaiting_alive: false}}}
   end
 
   # Connection invalidation is already durable when this is called, so the
@@ -215,6 +233,11 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @spec recovering?(t()) :: boolean()
   def recovering?(%__MODULE__{recovery: %{job: job}}) when not is_nil(job), do: true
   def recovering?(%__MODULE__{}), do: false
+
+  @doc false
+  @spec awaiting_alive?(t()) :: boolean()
+  def awaiting_alive?(%__MODULE__{recovery: %{job: %{awaiting_alive: true}}}), do: true
+  def awaiting_alive?(%__MODULE__{}), do: false
 
   @doc false
   @spec recovery_pending?(t()) :: boolean()

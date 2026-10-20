@@ -282,7 +282,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
         }
     }
 
-    case safe_recover(recovery.request, producer.product, opts) do
+    case send_recovery_request(recovery.request, producer.product, opts) do
       :ok ->
         emit_initiated(producer, request_id, after_ts)
         schedule({:stall, producer.id, request_id}, recovery.max_recovery_ms)
@@ -300,11 +300,13 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     end
   end
 
-  # The HTTP layer decodes any parseable body — including rejection envelopes
-  # (throttling, 403) — into `{:ok, %Response{}}` without surfacing the status
-  # code. A rejected request must stay pending because no `snapshot_complete`
-  # will be published for it.
-  defp safe_recover(recover_fun, product, opts) do
+  # The UOF API returns non-2xx statuses and transport failures as
+  # `{:error, %UOF.API.Error{}}`; a 2xx acknowledgement can still carry a
+  # non-ACCEPTED response code. A rejected request must stay pending because
+  # no `snapshot_complete` will be published for it. An exception is not a
+  # rejected request: it crashes the monitor after recovery intent is already
+  # durable, so supervision restarts with recovery still required.
+  defp send_recovery_request(recover_fun, product, opts) do
     case recover_fun.(product, opts) do
       {:ok, %Response{response_code: code} = response} when code != "ACCEPTED" ->
         log_failure("#{code}: #{response.message || response.errors || "(no message)"}")
@@ -312,11 +314,12 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       {:ok, _response} ->
         :ok
 
+      {:error, %UOF.API.Error{} = error} ->
+        log_failure(Exception.message(error))
+
       {:error, reason} ->
         log_failure(inspect(reason))
     end
-  rescue
-    exception -> log_failure(Exception.message(exception))
   end
 
   defp log_failure(detail) do

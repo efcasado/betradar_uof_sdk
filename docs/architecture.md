@@ -319,7 +319,10 @@ Each producer draws request IDs from its own sequence, which starts at a random 
 completion for a request issued before a VM restart or by a previous Pulsar owner is
 unlikely to match a newer request. Request IDs are correlation values, not fencing tokens.
 
-Failed HTTP requests are retried after the recovery interval. A stall timer reissues a request
+Rejected or failed HTTP requests (an API error, a transport error, or a non-`ACCEPTED`
+response) are retried after the recovery interval. An exception raised while issuing the
+request is not treated as a rejection: it fails the monitor, and the persisted recovery
+intent makes the restarted monitor recover again. A stall timer reissues a request
 whose completion has not arrived, retaining its original recovery timestamp. Superseded retry
 messages are ignored using recovery-job generations.
 

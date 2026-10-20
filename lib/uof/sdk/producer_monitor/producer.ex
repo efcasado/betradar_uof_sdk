@@ -10,9 +10,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   logging, and telemetry; the monitor retains event routing, durable
   persistence, and callbacks.
 
-  `status` is the public lifecycle state. `:recovering` is projected from the
-  canonical recovery job by `UOF.SDK.ProducerMonitor` when reporting the
-  producer; it is not duplicated in the underlying health state.
+  `status` holds health state only. `UOF.SDK.ProducerMonitor` reports a
+  producer with a recovery job as `:recovering` in `UOF.SDK.ProducerStatus`.
 
   ## Recovery sequencing
 
@@ -27,14 +26,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   job and initiate it immediately. Failed requests, stalls, and ownership
   demotion all return a job to pending state, but their callers intentionally
   choose different reissue times.
-
-    * `:down` — not synchronized and no recovery is pending
-    * `:recovering` — waiting to request, requesting, or awaiting recovery
-      completion
-    * `:up` — synchronized and safe
-    * `:delayed` — the remote feed is healthy but local processing is behind
-    * `:resuming` — draining retained backlog after a restart and awaiting
-      current-session confirmation
   """
 
   alias UOF.Schemas.Common.Response
@@ -45,7 +36,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @default_max_recovery_ms 60 * 60_000
   @max_request_id 1_000_000
 
-  @type status :: :down | :recovering | :up | :delayed | :resuming
+  @type status :: :down | :up | :delayed | :resuming
 
   @type recovery_job :: %{
           after_ts: integer() | nil,

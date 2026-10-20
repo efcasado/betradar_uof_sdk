@@ -206,7 +206,7 @@ loads producer descriptions and recovery uses the HTTP API.
 | `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound |
 | `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
 | `:max_recovery_time` | `3600` | Wait for recovery completion before reissuing a stalled request |
-| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery |
+| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery; must exceed `:max_processing_delay_seconds` |
 
 Public durations are in seconds. Recovery throttling defaults follow the official SDK
 guidance; the overlap setting is SDK-specific and should be tuned for the deployment.

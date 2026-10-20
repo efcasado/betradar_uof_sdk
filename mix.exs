@@ -25,6 +25,7 @@ defmodule UofSdk.MixProject do
       {:uof_api, "~> 3.0"},
       {:uof_schemas, "~> 0.3.0"},
       {:broadway, "~> 1.3"},
+      {:nimble_options, "~> 1.1"},
       {:broadway_rabbitmq, "~> 0.8.2", optional: true},
       {:off_broadway_pulsar, "~> 2.0", optional: true},
       # dev / test

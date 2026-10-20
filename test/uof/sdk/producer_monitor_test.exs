@@ -16,13 +16,13 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     @impl true
     def handle_producer_status(producer) do
-      send(Application.fetch_env!(:uof_sdk, :test_pid), {:status, producer})
+      send(Application.fetch_env!(:uof_sdk_test, :test_pid), {:status, producer})
       :ok
     end
   end
 
   setup do
-    Application.put_env(:uof_sdk, :test_pid, self())
+    Application.put_env(:uof_sdk_test, :test_pid, self())
     start_supervised!(Store.ETS)
     clock = start_supervised!(%{id: :clock, start: {Agent, :start_link, [fn -> 1_000 end]}})
     %{clock: clock}

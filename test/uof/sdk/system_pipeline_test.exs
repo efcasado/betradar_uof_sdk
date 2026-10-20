@@ -9,11 +9,11 @@ defmodule UOF.SDK.SystemPipelineTest do
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
     def observe_connection(conn_pid), do: emit({:connection_sink, conn_pid})
 
-    defp emit(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
+    defp emit(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
   end
 
   setup context do
-    Application.put_env(:uof_sdk, :test_pid, self())
+    Application.put_env(:uof_sdk_test, :test_pid, self())
     name = Module.concat(__MODULE__, context.test)
 
     start_link_supervised!(%{

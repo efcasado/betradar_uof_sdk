@@ -22,7 +22,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     @impl true
     def handle_fixture_change(message, context), do: notify({:fixture_change, message, context})
 
-    defp notify(message), do: send(Application.fetch_env!(:uof_sdk, :integration_test_pid), message)
+    defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
   end
 
   defmodule Monitor do
@@ -31,14 +31,14 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     def message(product, timestamp), do: notify({:observed_message, product, timestamp})
     def observe_connection(token), do: notify({:observed_connection, token})
 
-    defp notify(message), do: send(Application.fetch_env!(:uof_sdk, :integration_test_pid), message)
+    defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
   end
 
   setup do
-    Application.put_env(:uof_sdk, :integration_test_pid, self())
+    Application.put_env(:uof_sdk_test, :integration_test_pid, self())
     TestSupport.start_http_client!()
 
-    on_exit(fn -> Application.delete_env(:uof_sdk, :integration_test_pid) end)
+    on_exit(fn -> Application.delete_env(:uof_sdk_test, :integration_test_pid) end)
 
     subscription = "uof-sdk-integration-#{System.unique_integer([:positive])}"
 

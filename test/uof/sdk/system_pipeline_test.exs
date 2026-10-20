@@ -215,4 +215,33 @@ defmodule UOF.SDK.SystemPipelineTest do
 
     assert_receive {:snapshot_sink, 3, 1}
   end
+
+  test "reports messages addressed to another node" do
+    name = Module.concat(__MODULE__, OtherNodeTelemetry)
+    test_pid = self()
+    id = make_ref()
+
+    :telemetry.attach(
+      id,
+      [:uof_sdk, :message, :other_node],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:other_node, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {SystemPipeline, :start_link, [[name: name, producer: {Broadway.DummyProducer, []}, monitor: Sink, node_id: 7]]}
+    })
+
+    Broadway.test_message(name, ~s(<snapshot_complete product="3" timestamp="1" request_id="1"/>),
+      metadata: %{routing_key: "-.-.-.snapshot_complete.-.-.-.8"}
+    )
+
+    assert_receive {:other_node, %{count: 1}, %{node_id: "8", message_type: "snapshot_complete"}}, 1_000
+  end
 end

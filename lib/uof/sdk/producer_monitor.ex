@@ -564,13 +564,23 @@ defmodule UOF.SDK.ProducerMonitor do
     api_url |> to_string() |> String.trim_trailing("/") |> String.split("/") |> List.last()
   end
 
-  defp notify(%{handler: nil}, _producer), do: :ok
+  defp notify(state, %ProducerStatus{} = producer) do
+    :telemetry.execute([:uof_sdk, :producer, :status], %{system_time: System.system_time()}, %{
+      producer_id: producer.id,
+      product: producer.product,
+      status: producer.status
+    })
+
+    notify_handler(state, producer)
+  end
+
+  defp notify_handler(%{handler: nil}, _producer), do: :ok
 
   # Runs inside this GenServer: a raising handler crashes the monitor and is
   # healed by supervision — :rest_for_one restarts the pipelines with it, so
   # the re-subscribing consumers re-report failover ownership and
   # ownership converges (see the supervisor comment in UOF.SDK).
-  defp notify(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
+  defp notify_handler(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
 
   defp notify_recovery(state, producer) do
     notify(state, reported_producer(producer))

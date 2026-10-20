@@ -193,6 +193,10 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @spec complete_recovery(t(), integer(), integer()) :: {:ok, t()} | :stale
   def complete_recovery(%__MODULE__{recovery: %{job: %{request_id: request_id}} = recovery} = producer, request_id, now)
       when not is_nil(request_id) do
+    emit(producer, :completed, %{duration_ms: recovery.monotonic_fun.() - recovery.last_issued_at}, %{
+      request_id: request_id
+    })
+
     {:ok,
      %{
        producer
@@ -248,6 +252,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def handle_stall(%__MODULE__{recovery: %{job: %{request_id: request_id}}} = producer, request_id)
       when not is_nil(request_id) do
     Logger.warning("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} stalled; reissuing")
+    emit(producer, :stalled, %{}, %{request_id: request_id})
     producer |> mark_recovery_pending() |> issue_recovery()
   end
 
@@ -281,7 +286,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
         schedule({:stall, producer.id, request_id}, recovery.max_recovery_ms)
         producer
 
-      :error ->
+      {:error, reason} ->
+        emit(producer, :failed, %{}, %{request_id: request_id, reason: reason, retry_in_ms: recovery.min_interval_ms})
+
         Logger.warning(
           "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery request failed; " <>
             "retrying in #{recovery.min_interval_ms}ms"
@@ -315,7 +322,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   defp log_failure(detail) do
     Logger.warning("UOF.SDK.ProducerMonitor: recover request failed: #{detail}")
-    :error
+    {:error, detail}
   end
 
   # `snapshot_complete` correlation trusts request ids, so sequences from
@@ -338,20 +345,19 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp emit_initiated(producer, request_id, after_ts) do
-    :telemetry.execute(
-      [:uof_sdk, :recovery, :initiated],
-      %{system_time: System.system_time()},
-      %{
-        producer_id: producer.id,
-        product: producer.product,
-        request_id: request_id,
-        recovery_from: after_ts
-      }
-    )
+    emit(producer, :initiated, %{}, %{request_id: request_id, recovery_from: after_ts})
 
     Logger.info(
       "UOF.SDK.ProducerMonitor: producer #{producer.id} (#{producer.product}) recovery initiated " <>
         "request_id=#{request_id} after=#{inspect(after_ts)}"
+    )
+  end
+
+  defp emit(producer, event, measurements, metadata) do
+    :telemetry.execute(
+      [:uof_sdk, :recovery, event],
+      Map.put(measurements, :system_time, System.system_time()),
+      Map.merge(%{producer_id: producer.id, product: producer.product}, metadata)
     )
   end
 

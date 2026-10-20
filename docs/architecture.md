@@ -315,6 +315,10 @@ Recovery is a coordinated sequence:
 4. Replayed content arrives through the normal feed and application callbacks.
 5. A matching `snapshot_complete` ends the recovery job and updates producer state.
 
+Each monitor draws request IDs from one sequence that starts at a random offset, so a
+completion for a request issued before a VM restart or by a previous Pulsar owner is
+unlikely to match a newer request. Request IDs are correlation values, not fencing tokens.
+
 Failed HTTP requests are retried after the recovery interval. A stall timer reissues a request
 whose completion has not arrived, retaining its original recovery timestamp. Superseded retry
 messages are ignored using recovery-job generations.

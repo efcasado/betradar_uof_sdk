@@ -43,6 +43,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   @default_min_interval_ms 30_000
   @default_max_recovery_ms 60 * 60_000
+  @max_request_id 1_000_000
 
   @type status :: :down | :recovering | :up | :delayed | :resuming
 
@@ -104,10 +105,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       job: nil,
       last_issued_at: nil,
       request: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
-      gen_request_id:
-        Keyword.get(opts, :gen_request_id, fn ->
-          System.unique_integer([:positive, :monotonic])
-        end),
+      gen_request_id: Keyword.get_lazy(opts, :gen_request_id, &request_id_generator/0),
       monotonic_fun: Keyword.get(opts, :monotonic_fun, &monotonic_ms/0),
       node_id: Keyword.get(opts, :node_id),
       min_interval_ms: Keyword.get(opts, :min_interval_ms, @default_min_interval_ms),
@@ -115,6 +113,25 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     }
 
     %{producer | recovery: recovery}
+  end
+
+  # `snapshot_complete` correlation trusts request ids, so sequences from
+  # different VM boots and Pulsar control-plane owners must not overlap: a
+  # completion left in a retained backlog, or one for the previous owner's
+  # request, would otherwise complete a newer request before its replay
+  # arrives. A per-VM counter restarts near 1 on every boot, so each sequence
+  # starts at a random offset, as the official SDKs do, and wraps within the
+  # Java SDK's range.
+  @doc false
+  @spec request_id_generator(pos_integer()) :: (-> pos_integer())
+  def request_id_generator(start \\ :rand.uniform(@max_request_id))
+      when is_integer(start) and start in 1..@max_request_id do
+    counter = :atomics.new(1, signed: false)
+
+    fn ->
+      issued = :atomics.add_get(counter, 1, 1) - 1
+      rem(start - 1 + issued, @max_request_id) + 1
+    end
   end
 
   @doc false

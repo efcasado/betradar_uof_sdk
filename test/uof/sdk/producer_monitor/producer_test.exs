@@ -55,6 +55,19 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert {:transition, %Producer{status: :up}} = Producer.check(producer, 1_001, 900, 900, true)
   end
 
+  test "request ids continue from their start and wrap within the request-id range" do
+    next_id = Producer.request_id_generator(999_999)
+
+    assert [999_999, 1_000_000, 1, 2] == Enum.map(1..4, fn _ -> next_id.() end)
+  end
+
+  test "default request-id sequences start at a random offset" do
+    starts = Enum.map(1..5, fn _ -> Producer.request_id_generator().() end)
+
+    assert Enum.all?(starts, &(&1 in 1..1_000_000))
+    assert length(Enum.uniq(starts)) > 1
+  end
+
   test "the producer owns recovery HTTP attempts, state, and cooldown" do
     test_pid = self()
 

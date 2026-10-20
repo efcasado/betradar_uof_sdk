@@ -237,6 +237,8 @@ defmodule UOF.SDK.ProducerMonitor do
     monitor_store = Keyword.get(opts, :monitor_store, UOF.SDK.ProducerMonitor.Store.ETS)
     session = monitor_store.load_session()
     producer_progress = monitor_store.load_producer_progress()
+    # One sequence per monitor keeps request ids distinct across its producers.
+    opts = Keyword.put_new_lazy(opts, :gen_request_id, &Producer.request_id_generator/0)
 
     producers =
       Map.new(load_producers(opts), fn producer ->

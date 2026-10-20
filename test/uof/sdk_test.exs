@@ -4,6 +4,7 @@ defmodule UOF.SDKTest do
   alias UOF.SDK.AMQP.Connection
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
+  alias UOF.SDK.LogHandler
   alias UOF.SDK.ProducerMonitor.Store
   alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
   alias UOF.SDK.ProducerMonitor.Store.Session
@@ -72,7 +73,7 @@ defmodule UOF.SDKTest do
 
   test "child_specs passes normalized producer specs to system and content pipelines" do
     conn = [host: "stgmq.betradar.com", username: "tok", password: "", ssl_options: []]
-    config = Config.load(handler: MyApp.Handler, transport: {:amqp, connection: conn})
+    config = Config.load(handler: LogHandler, transport: {:amqp, connection: conn})
 
     assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
     assert system_opts[:name] == SystemPipeline
@@ -80,13 +81,13 @@ defmodule UOF.SDKTest do
     assert system_producer_opts[:connection] == {:custom_pool, Connection, Connection}
 
     assert content_opts[:name] == ContentPipeline
-    assert content_opts[:handler] == MyApp.Handler
+    assert content_opts[:handler] == LogHandler
     assert {BroadwayRabbitMQ.Producer, content_producer_opts} = content_opts[:producer]
     assert content_producer_opts[:connection] == system_producer_opts[:connection]
   end
 
   test "child_specs passes node_id to both pipelines" do
-    config = Config.load(handler: MyApp.Handler, node_id: 7)
+    config = Config.load(handler: LogHandler, node_id: 7)
 
     assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
     assert system_opts[:node_id] == 7
@@ -95,22 +96,22 @@ defmodule UOF.SDKTest do
 
   test "child_specs passes concurrency through to the content pipeline" do
     assert [{SystemPipeline, _system}, {ContentPipeline, default}] =
-             UOF.SDK.child_specs(Config.load(handler: MyApp.Handler))
+             UOF.SDK.child_specs(Config.load(handler: LogHandler))
 
     assert default[:concurrency] == 10
 
-    config = Config.load(handler: MyApp.Handler, concurrency: 50)
+    config = Config.load(handler: LogHandler, concurrency: 50)
     [{SystemPipeline, _system}, {ContentPipeline, opts}] = UOF.SDK.child_specs(config)
     assert opts[:concurrency] == 50
   end
 
   test "supervises a Pulsar client only for the Pulsar transport" do
-    assert {:ok, {_flags, amqp_children}} = UOF.SDK.init(handler: MyApp.Handler)
+    assert {:ok, {_flags, amqp_children}} = UOF.SDK.init(handler: LogHandler)
     refute Enum.any?(amqp_children, &(&1.id == :uof_sdk_pulsar))
 
     assert {:ok, {_flags, pulsar_children}} =
              UOF.SDK.init(
-               handler: MyApp.Handler,
+               handler: LogHandler,
                transport: {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
              )
 
@@ -122,7 +123,7 @@ defmodule UOF.SDKTest do
   end
 
   test "supervises the shared AMQP connection after the monitor and before both pipelines" do
-    assert {:ok, {flags, children}} = UOF.SDK.init(handler: MyApp.Handler)
+    assert {:ok, {flags, children}} = UOF.SDK.init(handler: LogHandler)
     assert flags.strategy == :rest_for_one
 
     assert Enum.map(children, & &1.id) == [

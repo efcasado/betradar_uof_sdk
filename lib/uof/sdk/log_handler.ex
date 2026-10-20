@@ -5,7 +5,7 @@ defmodule UOF.SDK.LogHandler do
   Handy for smoke tests and first connections — point the SDK at it instead of
   writing your own handler:
 
-      UOF.SDK.start_link(handler: UOF.SDK.LogHandler, access_token: "...", ...)
+      UOF.SDK.start_link(handler: UOF.SDK.LogHandler)
   """
 
   use UOF.SDK.MessageHandler

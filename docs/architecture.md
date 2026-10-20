@@ -372,7 +372,7 @@ Clock skew can therefore affect lag observations. Recovery cooldown uses monoton
 | `max_processing_delay_seconds` | Age of the latest observed content timestamp, including content-session heartbeats | Moves synchronized producers between `:up` and `:delayed`; freshness also gates restart resume |
 | `min_interval_between_recoveries` | Per-producer recovery-request cooldown and delay after a failed request | Defers requests or retries while recovery remains pending |
 | `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp |
-| `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window |
+| `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window; must exceed `max_processing_delay_seconds`, because checkpoints advance while content lags by up to that delay |
 
 These controls have distinct purposes. Content lag alone is not a heartbeat failure, and
 recovery overlap is not a timeout. Health checks and timer messages are handled by the

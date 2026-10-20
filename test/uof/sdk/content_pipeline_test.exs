@@ -13,7 +13,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     @impl true
     def handle_odds_change(msg, ctx), do: notify({:odds_change, msg, ctx})
 
-    defp notify(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
+    defp notify(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
   end
 
   # One module standing in for monitor/recovery lifecycle notifications.
@@ -23,7 +23,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
     def observe_connection(token), do: emit({:connection_sink, token})
 
-    defp emit(event), do: send(Application.fetch_env!(:uof_sdk, :test_pid), event)
+    defp emit(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
   end
 
   defmodule RaisingHandler do
@@ -35,7 +35,7 @@ defmodule UOF.SDK.ContentPipelineTest do
   end
 
   setup context do
-    Application.put_env(:uof_sdk, :test_pid, self())
+    Application.put_env(:uof_sdk_test, :test_pid, self())
     name = Module.concat(__MODULE__, context.test)
 
     start_link_supervised!(%{

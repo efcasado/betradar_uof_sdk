@@ -5,10 +5,37 @@ defmodule UOF.SDK.ConfigTest do
   alias UOF.SDK.AMQP.Client
   alias UOF.SDK.AMQP.Connection
   alias UOF.SDK.Config
+  alias UOF.SDK.LogHandler
+
+  defmodule CustomStore do
+    @moduledoc false
+    @behaviour UOF.SDK.ProducerMonitor.Store
+
+    alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
+    alias UOF.SDK.ProducerMonitor.Store.Session
+
+    @impl true
+    def load_session, do: %Session{}
+    @impl true
+    def load_producer_progress, do: %{}
+    @impl true
+    def commit_session_change(tokens), do: %Session{tokens: tokens, generation: 1}
+    @impl true
+    def advance_checkpoint(_id, timestamp), do: %ProducerProgress{checkpoint: timestamp}
+    @impl true
+    def require_recovery(_id), do: %ProducerProgress{}
+    @impl true
+    def mark_synchronized(_id, generation), do: %ProducerProgress{synchronized_generation: generation}
+  end
+
+  defmodule IncompleteStore do
+    @moduledoc false
+    def load_session, do: nil
+  end
 
   test "builds AMQP producer specs from the transport connection" do
     conn = [host: "stgmq.betradar.com", username: "tok", password: "", ssl_options: []]
-    config = Config.load(handler: MyApp.Handler, transport: {:amqp, connection: conn})
+    config = Config.load(handler: LogHandler, transport: {:amqp, connection: conn})
 
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
     assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
@@ -26,7 +53,7 @@ defmodule UOF.SDK.ConfigTest do
   end
 
   test "defaults to AMQP transport with empty connection and ETS monitor store" do
-    config = Config.load(handler: MyApp.Handler)
+    config = Config.load(handler: LogHandler)
 
     assert config.transport == :amqp
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
@@ -36,7 +63,7 @@ defmodule UOF.SDK.ConfigTest do
   end
 
   test "scopes AMQP bindings by node_id" do
-    config = Config.load(handler: MyApp.Handler, node_id: 42)
+    config = Config.load(handler: LogHandler, node_id: 42)
 
     assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
     assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
@@ -46,14 +73,14 @@ defmodule UOF.SDK.ConfigTest do
   end
 
   test "accepts a custom monitor store" do
-    config = Config.load(handler: MyApp.Handler, monitor_store: MyApp.PgStore)
-    assert config.monitor_store == MyApp.PgStore
+    config = Config.load(handler: LogHandler, monitor_store: CustomStore)
+    assert config.monitor_store == CustomStore
   end
 
   test "builds Pulsar producer specs from one topic and subscription" do
     config =
       Config.load(
-        handler: MyApp.Handler,
+        handler: LogHandler,
         transport:
           {:pulsar,
            host: "pulsar://localhost:6650",
@@ -98,7 +125,7 @@ defmodule UOF.SDK.ConfigTest do
   test "passes Pulsar :conn_opts through to the supervised client" do
     config =
       Config.load(
-        handler: MyApp.Handler,
+        handler: LogHandler,
         transport:
           {:pulsar,
            host: "pulsar://localhost:6650",
@@ -122,14 +149,14 @@ defmodule UOF.SDK.ConfigTest do
 
   test "requires a Pulsar subscription" do
     assert_raise KeyError, fn ->
-      Config.load(handler: MyApp.Handler, transport: {:pulsar, topic: "uof-feed"})
+      Config.load(handler: LogHandler, transport: {:pulsar, topic: "uof-feed"})
     end
   end
 
   test "requires a Pulsar host for its supervised client" do
     assert_raise KeyError, fn ->
       Config.load(
-        handler: MyApp.Handler,
+        handler: LogHandler,
         transport: {:pulsar, topic: "uof-feed", subscription: "uof-sdk"}
       )
     end
@@ -137,43 +164,79 @@ defmodule UOF.SDK.ConfigTest do
 
   test "requires a Pulsar topic" do
     assert_raise KeyError, fn ->
-      Config.load(handler: MyApp.Handler, transport: {:pulsar, subscription: "uof-sdk"})
+      Config.load(handler: LogHandler, transport: {:pulsar, subscription: "uof-sdk"})
     end
   end
 
   test "rejects unsupported transports" do
-    assert_raise ArgumentError, ~r/unsupported UOF.SDK transport/, fn ->
-      Config.load(handler: MyApp.Handler, transport: {:kafka, []})
+    assert_raise NimbleOptions.ValidationError, ~r/:transport/, fn ->
+      Config.load(handler: LogHandler, transport: {:kafka, []})
     end
   end
 
   test "stores node_id when provided" do
-    config = Config.load(handler: MyApp.Handler, node_id: 42)
+    config = Config.load(handler: LogHandler, node_id: 42)
     assert config.node_id == 42
   end
 
   test "defaults the health thresholds and overrides max_processing_delay_seconds" do
-    defaults = Config.load(handler: MyApp.Handler)
+    defaults = Config.load(handler: LogHandler)
     assert defaults.inactivity_seconds == 20
     assert defaults.max_processing_delay_seconds == 20
     assert defaults.recovery_overlap_seconds == 300
 
-    tuned = Config.load(handler: MyApp.Handler, max_processing_delay_seconds: 45)
+    tuned = Config.load(handler: LogHandler, max_processing_delay_seconds: 45)
     assert tuned.max_processing_delay_seconds == 45
     assert tuned.inactivity_seconds == 20
   end
 
   test "accepts a recovery overlap override" do
-    config = Config.load(handler: MyApp.Handler, recovery_overlap_seconds: 900)
+    config = Config.load(handler: LogHandler, recovery_overlap_seconds: 900)
     assert config.recovery_overlap_seconds == 900
   end
 
   test "defaults concurrency to 10 and accepts an override" do
-    assert Config.load(handler: MyApp.Handler).concurrency == 10
-    assert Config.load(handler: MyApp.Handler, concurrency: 50).concurrency == 50
+    assert Config.load(handler: LogHandler).concurrency == 10
+    assert Config.load(handler: LogHandler, concurrency: 50).concurrency == 50
   end
 
   test "raises on missing :handler" do
-    assert_raise ArgumentError, ~r/:handler/, fn -> Config.load([]) end
+    assert_raise NimbleOptions.ValidationError, ~r/required :handler option not found/, fn -> Config.load([]) end
+  end
+
+  test "rejects unknown options" do
+    assert_raise NimbleOptions.ValidationError, ~r/unknown options \[:concurency\]/, fn ->
+      Config.load(handler: LogHandler, concurency: 50)
+    end
+  end
+
+  test "rejects options of the wrong type" do
+    assert_raise NimbleOptions.ValidationError, ~r/:inactivity_seconds/, fn ->
+      Config.load(handler: LogHandler, inactivity_seconds: "20")
+    end
+
+    assert_raise NimbleOptions.ValidationError, ~r/:node_id/, fn ->
+      Config.load(handler: LogHandler, node_id: 0)
+    end
+  end
+
+  test "rejects a handler that is not a loaded module" do
+    assert_raise NimbleOptions.ValidationError, ~r/expected a loaded module implementing UOF.SDK.MessageHandler/, fn ->
+      Config.load(handler: MyApp.MissingHandler)
+    end
+  end
+
+  test "rejects a monitor store missing required callbacks" do
+    assert_raise NimbleOptions.ValidationError, ~r/IncompleteStore does not implement/, fn ->
+      Config.load(handler: LogHandler, monitor_store: IncompleteStore)
+    end
+  end
+
+  test "requires the recovery overlap to exceed the processing delay" do
+    assert_raise ArgumentError, ~r/recovery_overlap_seconds \(20\) must exceed max_processing_delay_seconds \(20\)/, fn ->
+      Config.load(handler: LogHandler, recovery_overlap_seconds: 20)
+    end
+
+    assert Config.load(handler: LogHandler, recovery_overlap_seconds: 21).recovery_overlap_seconds == 21
   end
 end

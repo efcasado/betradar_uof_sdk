@@ -13,7 +13,7 @@ defmodule UOF.SDK do
       Supervisor.start_link(children, strategy: :one_for_one)
 
   Configuration is read from application env (see `UOF.SDK.Config`); pass a
-  keyword list as the child argument (`{UOF.SDK, sessions: [:live]}`) to
+  keyword list as the child argument (`{UOF.SDK, concurrency: 20}`) to
   override per start.
 
   It supervises (in order, with `:rest_for_one`) an optional monitor-state store,

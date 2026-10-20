@@ -126,6 +126,7 @@ defmodule UOF.SDK.Config do
           content_producer: Transport.producer_spec(),
           system_producer: Transport.producer_spec(),
           ownership: Transport.ownership(),
+          connection_namespaces: [:system | :content],
           metadata_adapter: MessageMetadata.adapter(),
           routing_key_metadata_key: atom(),
           monitor_store: {module(), keyword()},
@@ -145,6 +146,7 @@ defmodule UOF.SDK.Config do
     :content_producer,
     :system_producer,
     :ownership,
+    :connection_namespaces,
     :metadata_adapter,
     :routing_key_metadata_key,
     :monitor_store,
@@ -177,6 +179,7 @@ defmodule UOF.SDK.Config do
         content_producer: pipelines.content,
         system_producer: pipelines.system,
         ownership: pipelines.ownership,
+        connection_namespaces: pipelines.connection_namespaces,
         metadata_adapter: pipelines.metadata_adapter,
         routing_key_metadata_key: pipelines.routing_key_metadata_key
       )

@@ -405,18 +405,27 @@ arrives as duplicates. The checkpoint does not wait for content processing:
 
 RabbitMQ assigns a consumer tag (`amq.ctag-…`) to every consume session. A new tag means the
 subscription was re-established and messages may have been missed. The SDK tracks one tag
-for the system pipeline and one for the content pipeline:
+for each consume session:
 
-- AMQP: the `:consumer_tag` delivery metadata of the SDK's own consumers.
+- AMQP: the `:consumer_tag` delivery metadata of the SDK's own consumers, one for the system
+  pipeline and one for the content pipeline, whose queues are separate sessions.
 - Pulsar: the `__rabbitmq_consumer_tag` property set by the source connector, which holds the
-  upstream consume session.
+  upstream consume session. Both subscriptions carry that same tag, so only the system
+  pipeline reports it. Waiting for a content message as well would stall an instance whose
+  Key-Shared share is quiet.
+
+On Pulsar, startup therefore does not prove that the content subscription exists. Once it does,
+it retains a replay whether or not its consumer is connected. A brand-new subscription is
+created by its consumer shortly after startup, so in principle a first recovery replay could
+start publishing before it exists and those messages would never reach it. To rule that out,
+create `<subscription>-content` before an instance starts for the first time.
 
 While running, a tag the monitor has not seen before recovers every producer. Tags are
 compared by novelty rather than arrival order, so a late message from a superseded session
 is not a change.
 
 The monitor saves the last tags in its [snapshot](#snapshot-contents). After a restart it
-waits, for up to `inactivity_seconds`, until both pipelines report their current tags.
+waits, for up to `inactivity_seconds`, until every tracked pipeline reports its current tag.
 Matching tags mean the upstream session never broke: synchronized producers resume from the
 retained backlog without recovery. This is what lets a Pulsar deployment survive an SDK
 restart. Different tags are saved with every producer unsynchronized, and recovery starts.
@@ -458,7 +467,7 @@ persistent store when progress must survive those.
 
 | Field | Meaning |
 | --- | --- |
-| `consumer_tags` | Committed [consumer tags](#consumer-tags) of the system and content pipelines |
+| `consumer_tags` | Committed [consumer tags](#consumer-tags) of the tracked consume sessions |
 | `producers` | Per producer: recovery checkpoint (epoch milliseconds) and whether it is synchronized with those sessions |
 
 A producer may resume at startup only when it is synchronized and has a checkpoint. A
@@ -542,10 +551,10 @@ The [ETS store tests](../test/uof/sdk/producer_monitor/store/ets_test.exs) show 
 ### Restart Resume
 
 At startup, a synchronized producer with a checkpoint enters `:resuming`. It becomes `:up`
-once both pipelines report unchanged [consumer tags](#consumer-tags) and it hears a heartbeat
-generated within `inactivity_seconds`. Heartbeats drained from retained backlog keep it
-resuming, so a session change or recovery request still in the backlog is seen first. Content
-may still be draining when it becomes `:up`. Without a heartbeat within `inactivity_seconds` it
+once the tracked pipelines report unchanged [consumer tags](#consumer-tags) and it hears a
+heartbeat generated within `inactivity_seconds`. Heartbeats drained from retained backlog keep
+it resuming, so a session change or recovery request still in the backlog is seen first.
+Content may still be draining when it becomes `:up`. Without a heartbeat within `inactivity_seconds` it
 recovers, and a readiness deadline prevents an incomplete restart from waiting indefinitely.
 
 Direct AMQP reconnects create new consume sessions and require recovery. Pulsar can resume

@@ -245,7 +245,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     refute_received {:connection_sink, _}
   end
 
-  test "observes a consumer tag from Pulsar RabbitMQ source properties" do
+  test "leaves Pulsar consumer tags to the system pipeline" do
     name = Module.concat(__MODULE__, PulsarConsumerTag)
 
     start_link_supervised!(%{
@@ -264,50 +264,30 @@ defmodule UOF.SDK.ContentPipelineTest do
          ]}
     })
 
-    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{
-        properties: %{
-          "__rabbitmq_routing_key" => "-.-.-.alive.-.-.-.-",
-          "__rabbitmq_queue_name" => "uof-content",
-          "__rabbitmq_consumer_tag" => "ctag-1"
+    alive =
+      Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
+        metadata: %{
+          properties: %{
+            "__rabbitmq_routing_key" => "-.-.-.alive.-.-.-.-",
+            "__rabbitmq_consumer_tag" => "ctag-1"
+          }
         }
-      }
-    )
+      )
 
-    assert_receive {:connection_sink, {:content, "ctag-1"}}
-  end
-
-  test "observes a Pulsar RabbitMQ source consumer tag from event messages" do
-    name = Module.concat(__MODULE__, PulsarEventConsumerTag)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             metadata_adapter: :pulsar_rabbitmq_source,
-             monitor: Sink
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
-      metadata: %{
-        properties: %{
-          "__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.1.-",
-          "__rabbitmq_queue_name" => "uof-content",
-          "__rabbitmq_consumer_tag" => "ctag-1"
+    event =
+      Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+        metadata: %{
+          properties: %{
+            "__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.1.-",
+            "__rabbitmq_consumer_tag" => "ctag-1"
+          }
         }
-      }
-    )
+      )
 
+    assert_receive {:ack, ^alive, [_successful], []}, 1_000
+    assert_receive {:ack, ^event, [_successful], []}, 1_000
     assert_receive {:odds_change, _, _}
-    assert_receive {:connection_sink, {:content, "ctag-1"}}
+    refute_received {:connection_sink, _}
   end
 
   test "acks another node's messages without dispatching them" do

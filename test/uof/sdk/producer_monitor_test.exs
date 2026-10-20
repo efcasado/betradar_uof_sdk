@@ -1146,6 +1146,44 @@ defmodule UOF.SDK.ProducerMonitorTest do
                  fn -> ProducerMonitor.handle_info(:tick, state) end
   end
 
+  describe "a transport that tracks only the system namespace" do
+    test "recovers once the system namespace is observed", %{clock: clock} do
+      m = start_monitor([connection_namespaces: [:system]], clock)
+
+      ProducerMonitor.observe_connection(m, {:system, "ctag-a"})
+      assert_recovery_triggered()
+      sync(m)
+      assert stored_snapshot().consumer_tags == %{system: "ctag-a"}
+    end
+
+    test "resumes without waiting for a content namespace", %{clock: clock} do
+      save_state(%{1 => 1_000}, [1], %{system: "ctag-sys"})
+      m = start_monitor([connection_namespaces: [:system]], clock)
+
+      ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      tick(m)
+      assert_receive {:status, %ProducerStatus{status: :up}}
+
+      # The readiness deadline passes without a content observation.
+      set_clock(clock, 1_000 + @inactivity + 1)
+      ProducerMonitor.alive(m, 1, 1_000 + @inactivity + 1, true)
+      tick(m)
+      refute_received {:recover_called, _, _}
+      assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
+    end
+
+    test "a system consumer tag change recovers", %{clock: clock} do
+      save_state(%{1 => 1_000}, [1], %{system: "ctag-old"})
+      m = start_monitor([connection_namespaces: [:system]], clock)
+
+      ProducerMonitor.observe_connection(m, {:system, "ctag-new"})
+      assert_receive {:recover_called, "pre", opts}
+      assert opts[:after] == 1_000
+      refute resumable?(1)
+    end
+  end
+
   test "resumed producer recovers incrementally when a namespace consumer tag changed across restart", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 50_000)

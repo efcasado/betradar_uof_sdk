@@ -49,9 +49,9 @@ defmodule UOF.SDK do
   API directly, this goes through the producer monitor: the producer shows as
   recovering and the request is correlated with its `snapshot_complete` and
   stall-guarded, healing exactly like an automatic recovery. During restart,
-  the recovery intent is persisted immediately but HTTP waits until the system
-  and content pipelines are both ready. Pass `full: true` to ignore the
-  checkpoint and request a full snapshot. Refused with
+  the recovery intent is persisted immediately but HTTP waits until the
+  pipelines whose consumer tags are tracked are ready. Pass `full: true` to
+  ignore the checkpoint and request a full snapshot. Refused with
   `{:error, :passive}` on an instance that does not currently own the system
   subscription (multi-instance Pulsar) — issue it on the active instance.
   """
@@ -70,6 +70,7 @@ defmodule UOF.SDK do
            handler: config.handler,
            inactivity_ms: config.inactivity_seconds * 1_000,
            ownership: config.ownership,
+           connection_namespaces: config.connection_namespaces,
            node_id: config.node_id,
            monitor_store: config.monitor_store,
            min_interval_ms: config.min_interval_between_recoveries * 1_000,

@@ -143,7 +143,7 @@ defmodule UOF.SDK.ContentPipeline do
           event_urn: rk.event_urn
         }
 
-        deliver(context.handler, rk.message_type, decoded, ctx)
+        track_processing(context, rk, decoded, fn -> deliver(context.handler, rk.message_type, decoded, ctx) end)
         maybe_track_connection(context, rk.message_type, message)
         observe(context, rk, decoded)
         message
@@ -195,16 +195,21 @@ defmodule UOF.SDK.ContentPipeline do
     end
   end
 
-  defp observe(ctx, %RoutingKey{message_type: type}, msg) when type in @content_message_types do
+  defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
+
+  # The monitor measures content lag from the oldest message still being
+  # handled, so a slow handler on one processor is visible even while other
+  # processors complete fresher messages. Completion also records the content
+  # timestamp; only content-session alives go through `message/3`.
+  defp track_processing(%{monitor: monitor}, %RoutingKey{message_type: type}, msg, fun)
+       when not is_nil(monitor) and type in @content_message_types do
     product = Map.get(msg, :product)
     timestamp = Map.get(msg, :timestamp)
 
-    if product && timestamp do
-      notify(ctx.monitor, :message, [product, timestamp])
-    end
+    if product && timestamp, do: monitor.track_processing(product, timestamp, fun), else: fun.()
   end
 
-  defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
+  defp track_processing(_context, _rk, _msg, fun), do: fun.()
 
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 

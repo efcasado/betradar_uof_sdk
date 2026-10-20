@@ -20,6 +20,12 @@ defmodule UOF.SDK.ContentPipelineTest do
   defmodule Sink do
     @moduledoc false
     def message(product, ts), do: emit({:message_sink, product, ts})
+
+    def track_processing(product, ts, fun) do
+      emit({:tracking_sink, product, ts})
+      fun.()
+    end
+
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
     def observe_connection(tag), do: emit({:connection_sink, tag})
 
@@ -95,7 +101,10 @@ defmodule UOF.SDK.ContentPipelineTest do
       metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-"}
     )
 
-    assert_receive {:message_sink, 3, 99}
+    # Content timestamps reach the monitor through processing tracking, which
+    # records them on completion; message/2 is only for content-session alives.
+    assert_receive {:tracking_sink, 3, 99}
+    refute_received {:message_sink, 3, 99}
   end
 
   test "routes content-session alive timestamps to the monitor" do
@@ -362,6 +371,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:ack, ^other, [_successful], []}, 1_000
     refute_received {:odds_change, _, _}
     refute_received {:message_sink, _, _}
+    refute_received {:tracking_sink, _, _}
     refute_received {:connection_sink, _}
 
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="2"/>),
@@ -408,5 +418,28 @@ defmodule UOF.SDK.ContentPipelineTest do
     )
 
     assert_receive {:other_node, %{count: 1}, %{node_id: "8", message_type: "odds_change"}}, 1_000
+  end
+
+  test "tracks content messages, not alives, while their handler runs" do
+    name = Module.concat(__MODULE__, Tracking)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [[name: name, handler: Handler, concurrency: 1, producer: {Broadway.DummyProducer, []}, monitor: Sink]]}
+    })
+
+    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
+      metadata: %{routing_key: "-.-.-.alive.-.-.-.-"}
+    )
+
+    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="42"/>),
+      metadata: %{routing_key: "hi.-.live.odds_change.1.sr:match.1.-"}
+    )
+
+    assert_receive {:tracking_sink, 1, 42}
+    assert_receive {:odds_change, _, _}
+    refute_received {:tracking_sink, 1, 1}
   end
 end

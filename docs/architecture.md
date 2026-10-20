@@ -331,7 +331,17 @@ messages are ignored using recovery-job generations.
 
 `snapshot_complete` marks the feed's completion of a recovery replay. Content callbacks run
 on their own processors, so this system observation is separate from application processing
-completion. Content timestamps supply the monitor's processing-delay observations.
+completion. A producer is `:up` when the feed has confirmed synchronization and content
+processing is within `max_processing_delay_seconds`: a replay still being processed shows
+as `:delayed` once it lags beyond that threshold. Applications that must not act until every
+replayed message is handled should treat the threshold as their tolerance.
+
+Content lag is measured from the oldest content message still being handled, falling back to
+the newest one completed. Each content processor reports the message it is handling to the monitor, so one
+processor stuck on an old message is not hidden by fresher messages completing elsewhere.
+After a restart, a resuming producer needs content processed in the current session; its
+stored checkpoint does not count. With several instances on one Pulsar subscription, each
+monitor measures only its own share of content.
 
 The lifecycle states describe the monitor's view:
 
@@ -393,7 +403,7 @@ Clock skew can therefore affect lag observations. Recovery cooldown uses monoton
 | Setting | What it measures or controls | Effect |
 | --- | --- | --- |
 | `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Records recovery on an observed heartbeat timeout and requests it once the producer's alives resume; also bounds session-readiness waiting |
-| `max_processing_delay_seconds` | Age of the latest observed content timestamp, including content-session heartbeats | Moves synchronized producers between `:up` and `:delayed`; freshness also gates restart resume |
+| `max_processing_delay_seconds` | Age of the oldest content message still being handled, or else of the newest one completed, including content-session heartbeats | Moves synchronized producers between `:up` and `:delayed`; freshness also gates restart resume |
 | `min_interval_between_recoveries` | Per-producer recovery-request cooldown and delay after a failed request | Defers requests or retries while recovery remains pending |
 | `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp |
 | `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window; must exceed `max_processing_delay_seconds` |

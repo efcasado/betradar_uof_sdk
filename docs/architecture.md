@@ -299,10 +299,15 @@ receive lifecycle changes through `handle_producer_status/1` and can query state
 ## Recovery
 
 Starting the supervisor establishes the runtime tree. Producer initialization loads persisted
-session/progress records and fetches active producer descriptions through `uof_api`. Failure
-to load descriptions fails startup: recovery needs the producer's API product and advertised
-recovery window. Transport consumption and producer synchronization proceed after that
-initialization; a successful `start_link/1` is not a feed-synchronization barrier.
+session/progress records and fetches active producer descriptions through `uof_api`; recovery
+needs each producer's API product and advertised recovery window. Fetched descriptions are
+stored in the monitor snapshot. If the API fails, the monitor starts from the stored
+descriptions, or else from the configured `:producers`, logs a warning, and keeps retrying
+the API in the background. Startup fails only when none of the three has descriptions. An
+`alive` from an unknown producer also reloads the descriptions, at most once per minute, so a
+producer activated after startup is monitored from its next `alive`. Transport consumption
+and producer synchronization proceed after that initialization; a successful `start_link/1`
+is not a feed-synchronization barrier.
 
 Recovery is a coordinated sequence:
 
@@ -544,6 +549,7 @@ use transport and message diagnostics to investigate why progress has stopped.
 | `[:uof_sdk, :recovery, :failed]` | A rejected or failed recovery request, with its reason and `retry_in_ms` |
 | `[:uof_sdk, :recovery, :stalled]` | A request with no `snapshot_complete` within `max_recovery_time`, emitted before it is reissued |
 | `[:uof_sdk, :producer, :status]` | A reported producer status transition, emitted whether or not a handler is configured |
+| `[:uof_sdk, :producers, :loaded]` | Producer descriptions loaded, with `count` and `source` (`:api`, `:snapshot`, or `:config`); a fallback source means the API was unavailable |
 | `[:uof_sdk, :message, :other_node]` | A message addressed to another `node_id`, acknowledged without processing; expected when subscriptions share an access token |
 | `[:uof_sdk, :amqp, :setup_failure]` | A returned AMQP setup failure, preserving the operation, original reason, and retry classification |
 | `[:broadway_rabbitmq, :amqp, :open_connection, :start / :stop / :exception]` | Spans around shared AMQP connection establishment |

@@ -57,6 +57,22 @@ defmodule UOF.SDK.Config do
       default: 3600,
       doc: "Wait for recovery completion before reissuing a stalled request."
     ],
+    producers: [
+      type:
+        {:list,
+         {:keyword_list,
+          [
+            id: [type: :pos_integer, required: true],
+            product: [type: :string, required: true, doc: "Recovery API path segment, e.g. `\"liveodds\"`."],
+            name: [type: {:or, [:string, nil]}, default: nil],
+            recovery_window_minutes: [type: {:or, [:pos_integer, nil]}, default: nil]
+          ]}},
+      default: [],
+      doc: """
+      Producer descriptions used only when the UOF API cannot provide them at startup and
+      none were stored by a previous run. Each entry needs `:id` and `:product`.
+      """
+    ],
     recovery_overlap_seconds: [
       type: :pos_integer,
       default: 300,
@@ -123,7 +139,8 @@ defmodule UOF.SDK.Config do
           max_processing_delay_seconds: pos_integer(),
           min_interval_between_recoveries: pos_integer(),
           max_recovery_time: pos_integer(),
-          recovery_overlap_seconds: pos_integer()
+          recovery_overlap_seconds: pos_integer(),
+          producers: [map()]
         }
 
   defstruct [
@@ -142,7 +159,8 @@ defmodule UOF.SDK.Config do
     :max_processing_delay_seconds,
     :min_interval_between_recoveries,
     :max_recovery_time,
-    :recovery_overlap_seconds
+    :recovery_overlap_seconds,
+    :producers
   ]
 
   @doc """
@@ -157,17 +175,18 @@ defmodule UOF.SDK.Config do
       |> NimbleOptions.validate!(@schema)
       |> validate_recovery_overlap!()
 
-    producers = Transport.producers(cfg[:transport], cfg[:node_id])
+    pipelines = Transport.producers(cfg[:transport], cfg[:node_id])
 
     struct!(
       __MODULE__,
       Keyword.merge(cfg,
-        transport_children: producers.children,
-        content_producer: producers.content,
-        system_producer: producers.system,
-        ownership: producers.ownership,
-        metadata_adapter: producers.metadata_adapter,
-        routing_key_metadata_key: producers.routing_key_metadata_key
+        producers: Enum.map(cfg[:producers], &Map.new/1),
+        transport_children: pipelines.children,
+        content_producer: pipelines.content,
+        system_producer: pipelines.system,
+        ownership: pipelines.ownership,
+        metadata_adapter: pipelines.metadata_adapter,
+        routing_key_metadata_key: pipelines.routing_key_metadata_key
       )
     )
   end

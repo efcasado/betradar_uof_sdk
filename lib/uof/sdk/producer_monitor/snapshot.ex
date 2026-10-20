@@ -8,6 +8,8 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   milliseconds) and whether the producer is synchronized with those sessions.
   A producer may resume retained backlog only when it is synchronized and has a
   checkpoint.
+  `descriptions` holds the last producer descriptions loaded from the UOF API,
+  so the monitor can start when the API is unavailable.
 
   `UOF.SDK.ProducerMonitor.Store` implementations persist the encoded binary
   without interpreting it. `decode!/1` is public so operators can inspect a
@@ -22,15 +24,23 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
     defstruct checkpoint: nil, synchronized: false
   end
 
-  @type t :: %__MODULE__{
-          consumer_tags: %{optional(:system | :content) => binary()},
-          producers: %{optional(integer()) => Progress.t()}
+  @type description :: %{
+          id: integer(),
+          name: String.t() | nil,
+          product: String.t(),
+          recovery_window_minutes: integer() | nil
         }
 
-  defstruct consumer_tags: %{}, producers: %{}
+  @type t :: %__MODULE__{
+          consumer_tags: %{optional(:system | :content) => binary()},
+          producers: %{optional(integer()) => Progress.t()},
+          descriptions: [description()]
+        }
+
+  defstruct consumer_tags: %{}, producers: %{}, descriptions: []
 
   @format :uof_sdk_monitor_snapshot
-  @version 1
+  @version 2
   @namespaces [:system, :content]
 
   @doc "Whether the producer may resume retained backlog without recovery."
@@ -60,9 +70,12 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
 
   @doc "Encode a snapshot for a store."
   @spec encode(t()) :: binary()
-  def encode(%__MODULE__{consumer_tags: consumer_tags, producers: producers}) do
+  def encode(%__MODULE__{consumer_tags: consumer_tags, producers: producers, descriptions: descriptions}) do
     producers = Map.new(producers, fn {id, progress} -> {id, {progress.checkpoint, progress.synchronized}} end)
-    :erlang.term_to_binary({@format, @version, %{consumer_tags: consumer_tags, producers: producers}})
+
+    :erlang.term_to_binary(
+      {@format, @version, %{consumer_tags: consumer_tags, producers: producers, descriptions: descriptions}}
+    )
   end
 
   @doc """
@@ -72,11 +85,12 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   @spec decode!(binary()) :: t()
   def decode!(binary) when is_binary(binary) do
     case binary_to_term(binary) do
-      {@format, @version, %{consumer_tags: consumer_tags, producers: producers}}
-      when is_map(consumer_tags) and is_map(producers) ->
+      {@format, @version, %{consumer_tags: consumer_tags, producers: producers, descriptions: descriptions}}
+      when is_map(consumer_tags) and is_map(producers) and is_list(descriptions) ->
         %__MODULE__{
           consumer_tags: validate_consumer_tags!(consumer_tags),
-          producers: Map.new(producers, &decode_progress!/1)
+          producers: Map.new(producers, &decode_progress!/1),
+          descriptions: Enum.map(descriptions, &validate_description!/1)
         }
 
       {@format, version, _data} ->
@@ -109,5 +123,15 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
 
   defp decode_progress!(entry) do
     raise ArgumentError, "invalid producer monitor snapshot progress: #{inspect(entry)}"
+  end
+
+  defp validate_description!(%{id: id, name: name, product: product, recovery_window_minutes: window} = description)
+       when is_integer(id) and (is_binary(name) or is_nil(name)) and is_binary(product) and
+              (is_integer(window) or is_nil(window)) and map_size(description) == 4 do
+    description
+  end
+
+  defp validate_description!(entry) do
+    raise ArgumentError, "invalid producer monitor snapshot description: #{inspect(entry)}"
   end
 end

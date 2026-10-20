@@ -56,11 +56,13 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   # Starts a monitor whose recover_fun signals the test with the request_id.
+  # `producers:` are served by a stubbed descriptions API.
   defp start_monitor(overrides \\ [], clock) do
     test_pid = self()
+    {producers, overrides} = Keyword.pop(overrides, :producers, [%Producer{id: 1, product: "pre"}])
 
     defaults = [
-      producers: [%Producer{id: 1, product: "pre"}],
+      producer_fetcher: fn -> {:ok, %{producer: Enum.map(producers, &api_description/1)}} end,
       handler: Handler,
       recover_fun: fn product, opts ->
         send(test_pid, {:recover_called, product, opts})
@@ -80,6 +82,16 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ]
 
     start_supervised!({ProducerMonitor, Keyword.merge(defaults, overrides)})
+  end
+
+  defp api_description(%Producer{} = producer) do
+    %{
+      id: producer.id,
+      name: producer.name,
+      active: true,
+      api_url: "https://api.example.com/v1/#{producer.product}/",
+      stateful_recovery_window_in_minutes: producer.recovery_window_minutes
+    }
   end
 
   defp set_clock(clock, value), do: Agent.update(clock, fn _ -> value end)
@@ -169,12 +181,14 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   test "fails startup when producer descriptions cannot be loaded" do
-    assert_raise RuntimeError, "could not load UOF producers: {:error, :timeout}", fn ->
-      ProducerMonitor.init(
-        producer_fetcher: fn -> {:error, :timeout} end,
-        tick_ms: 60_000
-      )
-    end
+    assert_raise RuntimeError,
+                 "could not load UOF producers: :timeout; no stored or configured producer descriptions",
+                 fn ->
+                   ProducerMonitor.init(
+                     producer_fetcher: fn -> {:error, :timeout} end,
+                     tick_ms: 60_000
+                   )
+                 end
   end
 
   test "uses an explicit runtime state struct", %{clock: clock} do
@@ -1308,6 +1322,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 50_000)
     m = start_monitor([monitor_store: {RecordingStore, pid: self()}], clock)
+    # Startup stores the loaded descriptions.
+    assert_receive {:saved, %Snapshot{descriptions: [%{id: 1}]}}
 
     ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
     ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
@@ -1329,6 +1345,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   test "a failing save crashes the monitor before the recovery request", %{clock: clock} do
     persist_healthy_shutdown(1_000)
+    # Matching stored descriptions leave startup nothing to save.
+    store_snapshot(%{
+      stored_snapshot()
+      | descriptions: [%{id: 1, name: nil, product: "pre", recovery_window_minutes: nil}]
+    })
+
     set_clock(clock, 50_000)
     m = start_monitor([monitor_store: {FailingStore, []}], clock)
     ref = Process.monitor(m)
@@ -1350,10 +1372,103 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
   end
 
+  describe "producer descriptions" do
+    setup do
+      attach_telemetry([[:uof_sdk, :producers, :loaded]])
+    end
+
+    test "API descriptions are stored for later startups", %{clock: clock} do
+      start_monitor(clock)
+
+      assert_receive {:telemetry, [:uof_sdk, :producers, :loaded], %{count: 1}, %{source: :api}}
+      assert [%{id: 1, product: "pre"}] = stored_snapshot().descriptions
+    end
+
+    test "starts from stored descriptions when the API fails and reloads in the background", %{clock: clock} do
+      store_snapshot(%Snapshot{descriptions: [%{id: 1, name: nil, product: "pre", recovery_window_minutes: nil}]})
+      calls = start_supervised!(%{id: :calls, start: {Agent, :start_link, [fn -> 0 end]}})
+
+      fetcher = fn ->
+        case Agent.get_and_update(calls, &{&1, &1 + 1}) do
+          0 ->
+            {:error, :unavailable}
+
+          _ ->
+            {:ok,
+             %{
+               producer:
+                 Enum.map([%Producer{id: 1, product: "pre"}, %Producer{id: 2, product: "live"}], &api_description/1)
+             }}
+        end
+      end
+
+      m = start_monitor([producer_fetcher: fetcher, descriptions_refresh_ms: 20], clock)
+
+      assert_receive {:telemetry, [:uof_sdk, :producers, :loaded], %{count: 1}, %{source: :snapshot}}
+      assert {:ok, %ProducerStatus{id: 1}} = ProducerMonitor.producer(m, 1)
+
+      assert_receive {:telemetry, [:uof_sdk, :producers, :loaded], %{count: 2}, %{source: :api}}, 1_000
+      assert {:ok, %ProducerStatus{id: 2, status: :down}} = ProducerMonitor.producer(m, 2)
+      assert [%{id: 1}, %{id: 2}] = stored_snapshot().descriptions
+    end
+
+    test "starts from configured producers when the API fails and nothing is stored" do
+      configured = [%{id: 7, name: "Live Odds", product: "liveodds", recovery_window_minutes: 4320}]
+
+      assert {:ok, %ProducerMonitor{producers: %{7 => %Producer{product: "liveodds", recovery_window_minutes: 4320}}}} =
+               ProducerMonitor.init(
+                 producer_fetcher: fn -> {:error, :unavailable} end,
+                 producers: configured,
+                 tick_ms: 60_000
+               )
+
+      assert_receive {:telemetry, [:uof_sdk, :producers, :loaded], %{count: 1}, %{source: :config}}
+    end
+
+    test "stored descriptions take precedence over configured producers" do
+      store_snapshot(%Snapshot{descriptions: [%{id: 1, name: nil, product: "pre", recovery_window_minutes: nil}]})
+
+      assert {:ok, %ProducerMonitor{producers: producers}} =
+               ProducerMonitor.init(
+                 producer_fetcher: fn -> {:error, :unavailable} end,
+                 producers: [%{id: 7, name: nil, product: "liveodds", recovery_window_minutes: nil}],
+                 tick_ms: 60_000
+               )
+
+      assert Map.keys(producers) == [1]
+    end
+
+    test "an alive from an unknown producer reloads descriptions at most once per interval", %{clock: clock} do
+      calls = start_supervised!(%{id: :calls, start: {Agent, :start_link, [fn -> 0 end]}})
+
+      fetcher = fn ->
+        known = if Agent.get_and_update(calls, &{&1, &1 + 1}) == 0, do: [1], else: [1, 2]
+        {:ok, %{producer: Enum.map(known, &api_description(%Producer{id: &1, product: "p#{&1}"}))}}
+      end
+
+      m = start_monitor([producer_fetcher: fetcher], clock)
+
+      # Producer 2 was activated after startup: its first alive is dropped
+      # and reloads the descriptions; the next one starts its recovery.
+      ProducerMonitor.alive(m, 2, 1_000, true)
+      wait_until(fn -> match?({:ok, _}, ProducerMonitor.producer(m, 2)) end)
+
+      ProducerMonitor.alive(m, 2, 2_000, true)
+      assert_recovery_triggered("p2")
+
+      # Another unknown producer within the interval waits for the next slot.
+      ProducerMonitor.alive(m, 3, 3_000, true)
+      sync(m)
+      assert Agent.get(calls, & &1) == 2
+    end
+  end
+
   test "a missing snapshot starts every producer down", %{clock: clock} do
     m = start_monitor(clock)
     assert {:ok, %ProducerStatus{status: :down}} = ProducerMonitor.producer(m, 1)
-    assert ETS.load([]) == nil
+    # Only the loaded descriptions are stored.
+    assert %Snapshot{consumer_tags: tags, producers: progress, descriptions: [%{id: 1}]} = stored_snapshot()
+    assert tags == %{} and progress == %{}
   end
 
   test "resumed producer recovers on an unsubscribed alive", %{clock: clock} do

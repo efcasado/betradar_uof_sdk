@@ -423,6 +423,16 @@ defmodule UOF.SDK.ProducerMonitorTest do
       assert_receive {:status, %ProducerStatus{status: :up}}
     end
 
+    test "a completed message records its timestamp", %{clock: clock} do
+      m = start_monitor([max_processing_delay_ms: @lag], clock)
+      bring_up(m)
+
+      ProducerMonitor.track_processing(1, 4_000, fn -> :ok end)
+      sync(m)
+
+      assert {:ok, %ProducerStatus{last_message_timestamp: 4_000}} = ProducerMonitor.producer(m, 1)
+    end
+
     test "a raising handler does not leave its message in flight", %{clock: clock} do
       m = start_monitor([max_processing_delay_ms: @lag], clock)
       bring_up(m)
@@ -442,9 +452,9 @@ defmodule UOF.SDK.ProducerMonitorTest do
       bring_up(m)
 
       pid = spawn(fn -> ProducerMonitor.track_processing(1, 1_000, fn -> Process.sleep(:infinity) end) end)
-      wait_until(fn -> :ets.member(ProducerMonitor.InFlight, pid) end)
+      wait_until(fn -> Map.has_key?(:sys.get_state(m).in_flight, pid) end)
       Process.exit(pid, :kill)
-      wait_until_idle(pid)
+      wait_until(fn -> not Map.has_key?(:sys.get_state(m).in_flight, pid) end)
 
       set_clock(clock, 1_000 + @lag + 1)
       ProducerMonitor.message(m, 1, 1_000 + @lag + 1)

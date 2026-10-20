@@ -24,10 +24,11 @@ defmodule UOF.SDK.ProducerMonitor do
   tolerance can be tuned separately from the alive-gap/recovery trigger.
 
   Content lag is measured from the oldest content message still being
-  handled, falling back to the newest one completed. Processors record the
-  message they are handling in an ETS table this process owns (see
-  `track_processing/3`), so one processor stuck on an old message is not
-  hidden by fresher messages completing elsewhere.
+  handled, falling back to the newest one completed. Content processors report
+  each message they start and finish (see `track_processing/4`), and this
+  process keeps the in-flight message of every processor, so one processor
+  stuck on an old message is not hidden by fresher messages completing
+  elsewhere. Processors are monitored so one that dies mid-message is dropped.
 
   `:up` therefore means the feed confirmed synchronization (`snapshot_complete`
   or continuing heartbeats) and content processing is within
@@ -133,7 +134,6 @@ defmodule UOF.SDK.ProducerMonitor do
   @default_max_processing_delay_ms 20_000
   @default_tick_ms 1_000
   @default_recovery_overlap_ms 5 * 60_000
-  @in_flight __MODULE__.InFlight
 
   @type ownership :: :always_active | {:failover, :active | :passive}
 
@@ -149,7 +149,8 @@ defmodule UOF.SDK.ProducerMonitor do
           inactivity_ms: non_neg_integer(),
           max_processing_delay_ms: non_neg_integer(),
           tick_ms: pos_integer(),
-          recovery_overlap_ms: non_neg_integer()
+          recovery_overlap_ms: non_neg_integer(),
+          in_flight: %{optional(pid()) => {integer(), integer()} | nil}
         }
 
   @enforce_keys [
@@ -167,7 +168,7 @@ defmodule UOF.SDK.ProducerMonitor do
     :recovery_overlap_ms
   ]
 
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [in_flight: %{}]
 
   ## Client API ---------------------------------------------------------------
 
@@ -196,21 +197,21 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @doc """
-  Run `fun` while recording that the calling content processor is handling a
+  Run `fun` while the calling content processor is reported as handling a
   message generated at `gen_timestamp` for `producer_id`.
 
-  Called by the content pipeline around the handler callback. The record is
-  removed when `fun` returns or raises, so a failed message does not leave a
-  stale entry behind.
+  Called by the content pipeline around the handler callback. Completion is
+  reported when `fun` returns or raises, and records `gen_timestamp` as
+  processed: a failed message no longer holds processing back.
   """
-  @spec track_processing(integer(), integer(), (-> result)) :: result when result: term()
-  def track_processing(producer_id, gen_timestamp, fun) do
-    :ets.insert(@in_flight, {self(), producer_id, gen_timestamp})
+  @spec track_processing(GenServer.server(), integer(), integer(), (-> result)) :: result when result: term()
+  def track_processing(server \\ __MODULE__, producer_id, gen_timestamp, fun) do
+    GenServer.cast(server, {:processing, self(), producer_id, gen_timestamp})
 
     try do
       fun.()
     after
-      :ets.delete(@in_flight, self())
+      GenServer.cast(server, {:processed, self()})
     end
   end
 
@@ -270,8 +271,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @impl true
   def init(opts) do
-    :ets.new(@in_flight, [:named_table, :public, :set, write_concurrency: true])
-
     monitor_store = Keyword.get(opts, :monitor_store, {UOF.SDK.ProducerMonitor.Store.ETS, []})
     snapshot = load_snapshot(monitor_store)
 
@@ -356,12 +355,25 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   def handle_cast({:message, id, gen_ts}, state) do
-    state =
-      with_producer(state, id, fn p ->
-        put_producer(state, Producer.observe_message(p, gen_ts))
-      end)
+    {:noreply, observe_message(state, id, gen_ts)}
+  end
 
-    {:noreply, state}
+  # A processor is monitored the first time it reports, so an entry cannot
+  # outlive it. Between messages its entry is nil rather than removed.
+  def handle_cast({:processing, pid, id, gen_ts}, state) do
+    if not Map.has_key?(state.in_flight, pid), do: Process.monitor(pid)
+    {:noreply, %{state | in_flight: Map.put(state.in_flight, pid, {id, gen_ts})}}
+  end
+
+  def handle_cast({:processed, pid}, state) do
+    case Map.get(state.in_flight, pid) do
+      {id, gen_ts} ->
+        state = %{state | in_flight: Map.put(state.in_flight, pid, nil)}
+        {:noreply, observe_message(state, id, gen_ts)}
+
+      nil ->
+        {:noreply, state}
+    end
   end
 
   # A passive instance ignores session observations entirely: the owner heals
@@ -428,7 +440,7 @@ defmodule UOF.SDK.ProducerMonitor do
       if owns_control?(state) do
         now = state.now_fun.()
         ensure_connection_readiness!(state, now)
-        in_flight = oldest_in_flight()
+        in_flight = oldest_in_flight(state)
         Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now, Map.get(in_flight, &1.id)))
       else
         # A passive instance sees no system alives and only a partial content
@@ -439,6 +451,10 @@ defmodule UOF.SDK.ProducerMonitor do
 
     schedule_tick(state)
     {:noreply, state}
+  end
+
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    {:noreply, %{state | in_flight: Map.delete(state.in_flight, pid)}}
   end
 
   def handle_info({:stall, id, request_id}, state) do
@@ -880,19 +896,16 @@ defmodule UOF.SDK.ProducerMonitor do
   defp owns_control?(%{ownership: {:failover, :active}}), do: true
   defp owns_control?(%{ownership: {:failover, :passive}}), do: false
 
-  # Oldest in-flight content timestamp per producer. Entries of processors that
-  # died without cleanup are dropped.
-  defp oldest_in_flight do
-    @in_flight
-    |> :ets.tab2list()
-    |> Enum.reduce(%{}, fn {pid, id, timestamp}, oldest ->
-      if Process.alive?(pid) do
-        Map.update(oldest, id, timestamp, &min(&1, timestamp))
-      else
-        :ets.delete(@in_flight, pid)
-        oldest
-      end
+  # Oldest in-flight content timestamp per producer.
+  defp oldest_in_flight(state) do
+    Enum.reduce(state.in_flight, %{}, fn
+      {_pid, {id, timestamp}}, oldest -> Map.update(oldest, id, timestamp, &min(&1, timestamp))
+      {_pid, nil}, oldest -> oldest
     end)
+  end
+
+  defp observe_message(state, id, gen_ts) do
+    with_producer(state, id, fn p -> put_producer(state, Producer.observe_message(p, gen_ts)) end)
   end
 
   defp schedule_tick(state), do: Process.send_after(self(), :tick, state.tick_ms)

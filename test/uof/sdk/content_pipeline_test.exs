@@ -101,7 +101,10 @@ defmodule UOF.SDK.ContentPipelineTest do
       metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-"}
     )
 
-    assert_receive {:message_sink, 3, 99}
+    # Content timestamps reach the monitor through processing tracking, which
+    # records them on completion; message/2 is only for content-session alives.
+    assert_receive {:tracking_sink, 3, 99}
+    refute_received {:message_sink, 3, 99}
   end
 
   test "routes content-session alive timestamps to the monitor" do
@@ -368,6 +371,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:ack, ^other, [_successful], []}, 1_000
     refute_received {:odds_change, _, _}
     refute_received {:message_sink, _, _}
+    refute_received {:tracking_sink, _, _}
     refute_received {:connection_sink, _}
 
     Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="2"/>),

@@ -337,7 +337,7 @@ as `:delayed` once it lags beyond that threshold. Applications that must not act
 replayed message is handled should treat the threshold as their tolerance.
 
 Content lag is measured from the oldest content message still being handled, falling back to
-the newest one completed. Each content processor records the message it is handling, so one
+the newest one completed. Each content processor reports the message it is handling to the monitor, so one
 processor stuck on an old message is not hidden by fresher messages completing elsewhere.
 After a restart, a resuming producer needs content processed in the current session; its
 stored checkpoint does not count. With several instances on one Pulsar subscription, each

@@ -29,7 +29,13 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     @moduledoc false
 
     def message(product, timestamp), do: notify({:observed_message, product, timestamp})
-    def track_processing(_product, _timestamp, fun), do: fun.()
+
+    def track_processing(product, timestamp, fun) do
+      result = fun.()
+      notify({:observed_message, product, timestamp})
+      result
+    end
+
     def observe_connection(tag), do: notify({:observed_connection, tag})
 
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)

@@ -310,8 +310,11 @@ Recovery is a coordinated sequence:
    creates recovery intent for a producer.
 2. The monitor persists that the producer requires recovery before issuing HTTP.
 3. Once ownership, connection gates, and cooldown permit it, the SDK requests recovery with
-   a request ID. A stored checkpoint selects incremental recovery; without one, recovery
-   requests a full snapshot.
+   a request ID. After a heartbeat timeout it also waits for the producer's alives to
+   resume: Betradar rejects recovery for a silent producer, and failed requests count
+   against its rate limit. A stored checkpoint selects incremental recovery, whose replay
+   start is clamped to the recovery window when issued; without one, recovery requests a
+   full snapshot.
 4. Replayed content arrives through the normal feed and application callbacks.
 5. A matching `snapshot_complete` ends the recovery job and updates producer state.
 
@@ -334,7 +337,7 @@ The lifecycle states describe the monitor's view:
 
 | State | Meaning |
 | --- | --- |
-| `:down` | Unsynchronized, with no pending recovery job |
+| `:down` | Unsynchronized: no recovery job yet, or one waiting for the producer's alives to resume |
 | `:recovering` | Recovery is pending, being requested, or awaiting completion |
 | `:up` | The monitor considers the producer synchronized |
 | `:delayed` | Processing observations exceed the configured delay threshold |
@@ -389,7 +392,7 @@ Clock skew can therefore affect lag observations. Recovery cooldown uses monoton
 
 | Setting | What it measures or controls | Effect |
 | --- | --- | --- |
-| `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Requests recovery on an observed heartbeat timeout; also bounds session-readiness waiting |
+| `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Records recovery on an observed heartbeat timeout and requests it once the producer's alives resume; also bounds session-readiness waiting |
 | `max_processing_delay_seconds` | Age of the latest observed content timestamp, including content-session heartbeats | Moves synchronized producers between `:up` and `:delayed`; freshness also gates restart resume |
 | `min_interval_between_recoveries` | Per-producer recovery-request cooldown and delay after a failed request | Defers requests or retries while recovery remains pending |
 | `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp |

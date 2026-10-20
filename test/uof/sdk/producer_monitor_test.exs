@@ -246,12 +246,115 @@ defmodule UOF.SDK.ProducerMonitorTest do
     set_clock(clock, 1_000 + @inactivity + 1)
     tick(m)
 
+    # Recovery is recorded at once but issued only when alives resume.
+    assert_receive {:status, %ProducerStatus{status: :down}}
+    refute_received {:recover_called, _product, _opts}
+
+    flush_statuses()
+    ProducerMonitor.alive(m, 1, 2_000, true)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     rid2 = assert_recovery_triggered()
 
     # A later recovery follows the same status lifecycle.
     ProducerMonitor.snapshot_complete(m, 1, rid2)
     assert_receive {:status, %ProducerStatus{status: :up}}
+  end
+
+  describe "heartbeat timeout recovery waits for alives to resume" do
+    test "records recovery durably before any request is issued", %{clock: clock} do
+      m = start_monitor(clock)
+      time_out_up_producer(m, clock)
+
+      refute synchronized?(1)
+      refute_received {:recover_called, _product, _opts}
+      assert {:ok, %ProducerStatus{status: :down}} = ProducerMonitor.producer(m, 1)
+      assert {:error, :already_recovering} = ProducerMonitor.recover(m, 1, [])
+    end
+
+    test "an unsubscribed alive releases a single request", %{clock: clock} do
+      m = start_monitor(clock)
+      time_out_up_producer(m, clock)
+
+      ProducerMonitor.alive(m, 1, 2_000, false)
+      assert_receive {:status, %ProducerStatus{status: :recovering}}
+      assert_recovery_triggered()
+
+      ProducerMonitor.alive(m, 1, 3_000, false)
+      sync(m)
+      refute_received {:recover_called, _product, _opts}
+      refute_received {:status, _producer}
+    end
+
+    test "a reconnect while waiting does not issue the request", %{clock: clock} do
+      m = start_monitor(clock)
+
+      ProducerMonitor.observe_connection(m, {:system, :system_a})
+      ProducerMonitor.observe_connection(m, {:content, :content_a})
+      rid = assert_recovery_triggered()
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+      assert_receive {:status, %ProducerStatus{status: :up}}
+
+      set_clock(clock, 1_000 + @inactivity + 1)
+      tick(m)
+      assert_receive {:status, %ProducerStatus{status: :down}}
+      flush_statuses()
+
+      ProducerMonitor.observe_connection(m, {:content, :content_b})
+      sync(m)
+      refute_received {:recover_called, _product, _opts}
+      refute_received {:status, _producer}
+
+      ProducerMonitor.alive(m, 1, 2_000, true)
+      assert_receive {:status, %ProducerStatus{status: :recovering}}
+      assert_recovery_triggered()
+    end
+
+    test "clamps :after to the recovery window at the time of issue", %{clock: clock} do
+      m = start_monitor([producers: [%Producer{id: 1, product: "pre", recovery_window_minutes: 60}]], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      rid = assert_recovery_triggered()
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+      assert_receive {:status, %ProducerStatus{status: :up}}
+      ProducerMonitor.alive(m, 1, 5_000, true)
+      sync(m)
+      assert checkpoint(1) == {:ok, 5_000}
+
+      set_clock(clock, 1_000 + @inactivity + 1)
+      tick(m)
+      assert_receive {:status, %ProducerStatus{status: :down}}
+
+      # Alives resume after the checkpoint has left the 60 min window.
+      now = 3 * 60 * 60_000
+      set_clock(clock, now)
+      ProducerMonitor.alive(m, 1, now, true)
+
+      assert_receive {:recover_called, "pre", opts}
+      assert opts[:after] == now - 60 * 60_000
+    end
+  end
+
+  # Brings producer 1 up, then lets its heartbeat lapse.
+  defp time_out_up_producer(m, clock) do
+    ProducerMonitor.alive(m, 1, 1_000, true)
+    rid = assert_recovery_triggered()
+    ProducerMonitor.snapshot_complete(m, 1, rid)
+    assert_receive {:status, %ProducerStatus{status: :up}}
+
+    set_clock(clock, 1_000 + @inactivity + 1)
+    tick(m)
+    assert_receive {:status, %ProducerStatus{status: :down}}
+    flush_statuses()
+  end
+
+  # Drops status notifications already received, so a later assertion cannot
+  # match one left over from an earlier transition.
+  defp flush_statuses do
+    receive do
+      {:status, _producer} -> flush_statuses()
+    after
+      0 -> :ok
+    end
   end
 
   test "processing lag marks down + delayed without recovering", %{clock: clock} do
@@ -722,6 +825,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     set_clock(clock, 1_000 + @inactivity + 1)
     tick(m)
+    assert_receive {:status, %ProducerStatus{status: :down}}
+    refute_received {:recover_called, _product, _opts}
+
+    flush_statuses()
+    ProducerMonitor.alive(m, 1, 2_000, true)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", _}
   end
@@ -1010,6 +1118,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
     set_clock(clock, 1_000 + @inactivity + 1)
     tick(m)
 
+    assert_receive {:status, %ProducerStatus{status: :down}}
+    refute_received {:recover_called, _product, _opts}
+
+    flush_statuses()
+    ProducerMonitor.alive(m, 1, 2_000, true)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 1_000
@@ -1292,6 +1405,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
     report_active_state(m, :active)
     tick(m)
 
+    assert_receive {:status, %ProducerStatus{status: :down}}
+    refute_received {:recover_called, _product, _opts}
+
+    flush_statuses()
+    ProducerMonitor.alive(m, 1, 3_000, true)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 2_000

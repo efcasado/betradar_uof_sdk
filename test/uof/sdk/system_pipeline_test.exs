@@ -184,30 +184,6 @@ defmodule UOF.SDK.SystemPipelineTest do
     refute_received {:connection_sink, _}
   end
 
-  test "observes a connection token from a custom metadata field" do
-    name = Module.concat(__MODULE__, CustomToken)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {SystemPipeline, :start_link,
-         [
-           [
-             name: name,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink,
-             connection_token_metadata_key: :conn_id
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", conn_id: "conn-abc-123"}
-    )
-
-    assert_receive {:connection_sink, {:system, "conn-abc-123"}}
-  end
-
   test "acks another node's snapshot_complete without reaching the monitor" do
     name = Module.concat(__MODULE__, OtherNode)
 

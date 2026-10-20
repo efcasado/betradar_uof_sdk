@@ -359,12 +359,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.snapshot_complete(m, 1, rid1)
     assert_receive {:status, %ProducerStatus{status: :up}}
 
-    # same connection token -> deduped, no recovery
+    # same consumer tag -> deduped, no recovery
     ProducerMonitor.observe_connection(m, {:system, :conn_a})
     sync(m)
     refute_received {:recover_called, _, _}
 
-    # new connection token (a reconnect) -> down + recover
+    # new consumer tag (a reconnect) -> down + recover
     ProducerMonitor.observe_connection(m, {:system, :conn_b})
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", _}
@@ -405,22 +405,22 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
-  test "first token from the second connection namespace triggers one startup recovery", %{clock: clock} do
+  test "first consumer tag from the second namespace triggers one startup recovery", %{clock: clock} do
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, :same_underlying_token})
+    ProducerMonitor.observe_connection(m, {:system, "same-ctag"})
     sync(m)
     refute_received {:status, %ProducerStatus{status: :recovering}}
     refute_received {:recover_called, _, _}
 
-    ProducerMonitor.observe_connection(m, {:content, :same_underlying_token})
+    ProducerMonitor.observe_connection(m, {:content, "same-ctag"})
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     rid1 = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid1)
     assert_receive {:status, %ProducerStatus{status: :up}}
   end
 
-  test "same namespace token changes before startup is ready do not recover early", %{clock: clock} do
+  test "same namespace consumer tag changes before startup is ready do not recover early", %{clock: clock} do
     m = start_monitor(clock)
 
     ProducerMonitor.observe_connection(m, {:system, :system_a})
@@ -446,7 +446,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
-  test "token changes in either connection namespace trigger recovery after startup", %{clock: clock} do
+  test "consumer tag changes in either namespace trigger recovery after startup", %{clock: clock} do
     m = start_monitor(clock)
 
     ProducerMonitor.observe_connection(m, {:system, :system_a})
@@ -470,7 +470,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", _}
   end
 
-  test "a token change replaces an in-flight recovery", %{clock: clock} do
+  test "a consumer tag change replaces an in-flight recovery", %{clock: clock} do
     m = start_monitor(clock)
 
     ProducerMonitor.alive(m, 1, 1_000, true)
@@ -853,7 +853,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   ## Restart resume -------------------------------------------------------------
 
   # Persist the state of a producer that was up, with a checkpoint and both
-  # namespace tokens — the shape a healthy shutdown leaves behind.
+  # namespace consumer tags — the shape a healthy shutdown leaves behind.
   defp persist_healthy_shutdown(checkpoint) do
     save_state(
       %{1 => checkpoint},
@@ -867,7 +867,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     set_clock(clock, 50_000)
     m = start_monitor(clock)
 
-    # same tokens after restart -> same upstream consume session -> no recovery
+    # same consumer tags after restart -> same upstream consume session -> no recovery
     ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
     ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
     # subscribed alive on the resuming producer -> no recovery either
@@ -942,7 +942,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
                  fn -> ProducerMonitor.handle_info(:tick, state) end
   end
 
-  test "resumed producer recovers incrementally when a namespace token changed across restart", %{clock: clock} do
+  test "resumed producer recovers incrementally when a namespace consumer tag changed across restart", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 50_000)
     m = start_monitor(clock)
@@ -951,7 +951,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(m)
     refute_received {:recover_called, _, _}
 
-    # A persisted content token is only a comparison baseline. Recovery waits
+    # A persisted content consumer tag is only a comparison baseline. Recovery waits
     # until the content pipeline has actually attached in this monitor session.
     ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
 
@@ -1061,7 +1061,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute_received {:recover_called, _, _}
     refute resumable?(1)
 
-    # The unchanged token does not itself indicate a reconnect. Becoming ready
+    # The unchanged consumer tag does not itself indicate a reconnect. Becoming ready
     # must nevertheless issue the recovery remembered from subscribed=0.
     ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
     assert_receive {:recover_called, "pre", opts}
@@ -1132,7 +1132,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert synchronized?(1)
   end
 
-  test "persists connection tokens as they change", %{clock: clock} do
+  test "persists consumer tags as they change", %{clock: clock} do
     m = start_monitor(clock)
 
     ProducerMonitor.observe_connection(m, {:system, "ctag-a"})
@@ -1323,11 +1323,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{status: :up}}
   end
 
-  test "stale token observations after a reconnect do not re-trigger recovery", %{clock: clock} do
+  test "stale consumer tag observations after a reconnect do not re-trigger recovery", %{clock: clock} do
     m = start_monitor(clock)
     establish_session(m)
 
-    # genuine reconnect: never-seen token
+    # genuine reconnect: never-seen consumer tag
     ProducerMonitor.observe_connection(m, {:content, "c2"})
     assert_recovery_triggered()
 
@@ -1339,7 +1339,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert stored_snapshot().consumer_tags == %{system: "s1", content: "c2"}
   end
 
-  test "persisted tokens arm the restart connection gate before observations arrive", %{clock: clock} do
+  test "persisted consumer tags arm the restart connection gate before observations arrive", %{clock: clock} do
     save_state(%{}, [], %{system: "old-s", content: "old-c"})
     m = start_monitor(clock)
 

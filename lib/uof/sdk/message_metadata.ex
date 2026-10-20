@@ -20,11 +20,10 @@ defmodule UOF.SDK.MessageMetadata do
     end
   end
 
-  @spec connection_token(Message.t(), adapter(), atom() | nil) :: term() | nil
-  def connection_token(%Message{metadata: metadata}, :amqp, nil), do: Map.get(metadata, :consumer_tag)
-  def connection_token(%Message{metadata: metadata}, :amqp, key), do: Map.get(metadata, key)
+  @spec consumer_tag(Message.t(), adapter()) :: binary() | nil
+  def consumer_tag(%Message{metadata: metadata}, :amqp), do: Map.get(metadata, :consumer_tag)
 
-  def connection_token(%Message{metadata: metadata}, :pulsar_rabbitmq_source, _key) do
+  def consumer_tag(%Message{metadata: metadata}, :pulsar_rabbitmq_source) do
     case metadata[:properties] do
       %{"__rabbitmq_consumer_tag" => consumer_tag} -> consumer_tag
       _properties -> nil

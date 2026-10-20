@@ -21,7 +21,7 @@ defmodule UOF.SDK.ContentPipelineTest do
     @moduledoc false
     def message(product, ts), do: emit({:message_sink, product, ts})
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
-    def observe_connection(token), do: emit({:connection_sink, token})
+    def observe_connection(tag), do: emit({:connection_sink, tag})
 
     defp emit(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
   end
@@ -263,34 +263,8 @@ defmodule UOF.SDK.ContentPipelineTest do
     refute_received {:connection_sink, _}
   end
 
-  test "observes a content connection token from a custom metadata field" do
-    name = Module.concat(__MODULE__, CustomToken)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink,
-             connection_token_metadata_key: :conn_id
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", conn_id: "conn-abc-123"}
-    )
-
-    assert_receive {:connection_sink, {:content, "conn-abc-123"}}
-  end
-
-  test "observes a connection token from Pulsar RabbitMQ source properties" do
-    name = Module.concat(__MODULE__, PulsarConnToken)
+  test "observes a consumer tag from Pulsar RabbitMQ source properties" do
+    name = Module.concat(__MODULE__, PulsarConsumerTag)
 
     start_link_supervised!(%{
       id: name,
@@ -322,8 +296,8 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:connection_sink, {:content, "ctag-1"}}
   end
 
-  test "observes a Pulsar RabbitMQ source connection token from event messages" do
-    name = Module.concat(__MODULE__, PulsarEventConnToken)
+  test "observes a Pulsar RabbitMQ source consumer tag from event messages" do
+    name = Module.concat(__MODULE__, PulsarEventConsumerTag)
 
     start_link_supervised!(%{
       id: name,

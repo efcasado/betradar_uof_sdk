@@ -101,7 +101,6 @@ defmodule UOF.SDK do
        node_id: config.node_id,
        metadata_adapter: config.metadata_adapter,
        routing_key_metadata_key: config.routing_key_metadata_key,
-       connection_token_metadata_key: config.connection_token_metadata_key,
        monitor: ProducerMonitor},
       {ContentPipeline,
        name: ContentPipeline,
@@ -111,7 +110,6 @@ defmodule UOF.SDK do
        node_id: config.node_id,
        metadata_adapter: config.metadata_adapter,
        routing_key_metadata_key: config.routing_key_metadata_key,
-       connection_token_metadata_key: config.connection_token_metadata_key,
        monitor: ProducerMonitor}
     ]
   end

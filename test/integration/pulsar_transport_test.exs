@@ -29,7 +29,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     @moduledoc false
 
     def message(product, timestamp), do: notify({:observed_message, product, timestamp})
-    def observe_connection(token), do: notify({:observed_connection, token})
+    def observe_connection(tag), do: notify({:observed_connection, tag})
 
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
   end
@@ -168,7 +168,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     refute_received {:odds_change, _, %{routing_key: ^other}}
   end
 
-  test "changes the connection token when the source connector restarts", %{channel: channel} do
+  test "changes the consumer tag when the source connector restarts", %{channel: channel} do
     publish_odds_change(channel, "111", 100)
 
     assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000

@@ -34,7 +34,6 @@ defmodule UOF.SDK.ConfigTest do
     assert :consumer_tag in system_opts[:metadata]
     assert config.metadata_adapter == :amqp
     assert config.routing_key_metadata_key == :routing_key
-    assert config.connection_token_metadata_key == nil
     assert config.ownership == :always_active
     assert config.transport_children == [{Connection, connection: conn}]
     assert content_opts[:client] == Client
@@ -109,7 +108,6 @@ defmodule UOF.SDK.ConfigTest do
 
     assert config.metadata_adapter == :pulsar_rabbitmq_source
     assert config.routing_key_metadata_key == :routing_key
-    assert config.connection_token_metadata_key == nil
     assert config.ownership == {:failover, :passive}
   end
 

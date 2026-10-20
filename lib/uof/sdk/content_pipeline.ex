@@ -21,9 +21,6 @@ defmodule UOF.SDK.ContentPipeline do
       `:pulsar_rabbitmq_source`; default `:amqp`).
     * `:routing_key_metadata_key` — the `message.metadata` field carrying the
       UOF routing key for AMQP/custom producers (default `:routing_key`).
-    * `:connection_token_metadata_key` — the `message.metadata` field carrying
-      a reconnect token. With the default AMQP producer, `nil` uses its consumer
-      tag.
     * `:node_id` — this SDK node's id. Messages addressed to another node
       (recovery replays it requested) are acked without dispatch. `nil`
       accepts every node.
@@ -92,7 +89,6 @@ defmodule UOF.SDK.ContentPipeline do
     concurrency = Keyword.get(opts, :concurrency, 10)
     metadata_adapter = Keyword.get(opts, :metadata_adapter, :amqp)
     routing_key_key = Keyword.get(opts, :routing_key_metadata_key, :routing_key)
-    connection_token_key = Keyword.get(opts, :connection_token_metadata_key)
 
     Broadway.start_link(__MODULE__,
       name: name,
@@ -106,8 +102,7 @@ defmodule UOF.SDK.ContentPipeline do
         monitor: Keyword.get(opts, :monitor),
         node_id: Keyword.get(opts, :node_id),
         metadata_adapter: metadata_adapter,
-        routing_key_key: routing_key_key,
-        connection_token_key: connection_token_key
+        routing_key_key: routing_key_key
       }
     )
   end
@@ -212,14 +207,10 @@ defmodule UOF.SDK.ContentPipeline do
   defp maybe_track_connection(_context, _type, _message), do: :ok
 
   defp notify_connection(%{monitor: monitor} = context, message) do
-    case connection_token(message, context) do
+    case MessageMetadata.consumer_tag(message, context.metadata_adapter) do
       nil -> :ok
-      token -> monitor.observe_connection({:content, token})
+      tag -> monitor.observe_connection({:content, tag})
     end
-  end
-
-  defp connection_token(message, context) do
-    MessageMetadata.connection_token(message, context.metadata_adapter, context.connection_token_key)
   end
 
   defp notify(nil, _fun, _args), do: :ok

@@ -17,9 +17,6 @@ defmodule UOF.SDK.SystemPipeline do
       `:pulsar_rabbitmq_source`; default `:amqp`).
     * `:routing_key_metadata_key` - the `message.metadata` field carrying the
       UOF routing key for AMQP/custom producers (default `:routing_key`).
-    * `:connection_token_metadata_key` - the `message.metadata` field carrying a
-      per-connection token for reconnect detection. With the default AMQP
-      producer, `nil` uses its consumer tag.
     * `:node_id` - this SDK node's id. `snapshot_complete` addressed to another
       node is acked without reaching the monitor, so a colliding `request_id`
       from another node cannot complete our recovery. `nil` accepts every node.
@@ -49,7 +46,6 @@ defmodule UOF.SDK.SystemPipeline do
     name = Keyword.fetch!(opts, :name)
     metadata_adapter = Keyword.get(opts, :metadata_adapter, :amqp)
     routing_key_key = Keyword.get(opts, :routing_key_metadata_key, :routing_key)
-    connection_token_key = Keyword.get(opts, :connection_token_metadata_key)
 
     Broadway.start_link(__MODULE__,
       name: name,
@@ -60,8 +56,7 @@ defmodule UOF.SDK.SystemPipeline do
         monitor: Keyword.get(opts, :monitor),
         node_id: Keyword.get(opts, :node_id),
         metadata_adapter: metadata_adapter,
-        routing_key_key: routing_key_key,
-        connection_token_key: connection_token_key
+        routing_key_key: routing_key_key
       }
     )
   end
@@ -135,18 +130,14 @@ defmodule UOF.SDK.SystemPipeline do
 
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
-  defp maybe_track_connection(%{monitor: monitor, connection_token_key: key} = context, "alive", message) do
-    case connection_token(message, %{context | connection_token_key: key}) do
+  defp maybe_track_connection(%{monitor: monitor} = context, "alive", message) do
+    case MessageMetadata.consumer_tag(message, context.metadata_adapter) do
       nil -> :ok
-      token -> monitor.observe_connection({:system, token})
+      tag -> monitor.observe_connection({:system, tag})
     end
   end
 
   defp maybe_track_connection(_context, _type, _message), do: :ok
-
-  defp connection_token(message, context) do
-    MessageMetadata.connection_token(message, context.metadata_adapter, context.connection_token_key)
-  end
 
   defp notify(nil, _fun, _args), do: :ok
   defp notify(mod, fun, args), do: apply(mod, fun, args)

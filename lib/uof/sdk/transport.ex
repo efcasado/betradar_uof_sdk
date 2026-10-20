@@ -20,8 +20,7 @@ defmodule UOF.SDK.Transport do
           system: producer_spec(),
           ownership: ownership(),
           metadata_adapter: :amqp | :pulsar_rabbitmq_source,
-          routing_key_metadata_key: atom(),
-          connection_token_metadata_key: atom() | nil
+          routing_key_metadata_key: atom()
         }
   def producers(transport, node_id) do
     case normalize(transport) do
@@ -48,12 +47,11 @@ defmodule UOF.SDK.Transport do
       system: rabbitmq_producer(system_bindings(node_id)),
       ownership: :always_active,
       metadata_adapter: :amqp,
-      routing_key_metadata_key: :routing_key,
-      connection_token_metadata_key: nil
+      routing_key_metadata_key: :routing_key
     }
   end
 
-  # :consumer_tag metadata is the per-consume connection token used for
+  # :consumer_tag metadata identifies the consume session and is used for
   # reconnect detection; the amqp library includes it in every basic_deliver
   # even though broadway_rabbitmq doesn't document it.
   defp rabbitmq_producer(bindings) do
@@ -87,8 +85,7 @@ defmodule UOF.SDK.Transport do
         :topics,
         :conn_opts,
         :client,
-        :routing_key_metadata_key,
-        :connection_token_metadata_key
+        :routing_key_metadata_key
       ])
       |> Keyword.put(:client, @pulsar_client)
       |> Keyword.put(:topics, [topic])
@@ -117,8 +114,7 @@ defmodule UOF.SDK.Transport do
       system: pulsar_producer(system_opts, subscription, :system, :failover),
       ownership: {:failover, :passive},
       metadata_adapter: :pulsar_rabbitmq_source,
-      routing_key_metadata_key: :routing_key,
-      connection_token_metadata_key: nil
+      routing_key_metadata_key: :routing_key
     }
   end
 

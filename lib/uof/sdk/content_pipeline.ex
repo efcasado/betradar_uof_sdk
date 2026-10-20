@@ -45,15 +45,21 @@ defmodule UOF.SDK.ContentPipeline do
 
   ## Failure handling
 
-  Processing is **single-attempt**. A message that fails to decode (or whose
-  processing crashes) is rejected **without requeue** (`on_failure: :reject`) —
-  Betradar's broker has no dead-letter queue we can declare, and requeuing a
-  message that deterministically fails to parse would loop forever. Content gaps
-  from dropped messages are closed by recovery, not redelivery.
+  Processing is **single-attempt**: requeuing a message that deterministically
+  fails to parse would loop forever, and content gaps from dropped messages are
+  closed by recovery, not redelivery.
+
+    * **AMQP:** a message that fails to decode (or whose processing crashes) is
+      rejected **without requeue** (`on_failure: :reject`). Betradar's broker has
+      no dead-letter queue we can declare.
+    * **Pulsar:** a failed message is nacked and, about a second later, diverted
+      to the `<topic>-<subscription>-DLQ` topic instead of being processed again
+      (see `UOF.SDK.Transport`), where it can be inspected.
 
   Every failure passes through `handle_failed/2`, which logs the routing key,
-  reason and (truncated) payload — the only forensic record, since there is no
-  DLQ — and emits `[:uof_sdk, :message, :failed]` telemetry for alerting.
+  reason, transport delivery details and (truncated) payload, and emits
+  `[:uof_sdk, :message, :failed]` telemetry for alerting. On AMQP the log is the
+  only forensic record.
 
   Retrying a handler's side-effects (for a transient downstream) is the
   handler's concern: only it knows whether re-applying is idempotent, and
@@ -167,14 +173,15 @@ defmodule UOF.SDK.ContentPipeline do
       # Structured fields as Logger metadata (namespaced to avoid collisions) so
       # backends can emit JSON; the message stays a short human-readable summary.
       # Rendering (plain vs structured) is the app's Logger config concern.
-      Logger.error("UOF message processing failed: #{inspect(message.status)}",
-        uof_reason: inspect(message.status),
-        uof_routing_key: rk.raw,
-        uof_message_type: rk.message_type,
-        uof_event_urn: rk.event_urn,
-        uof_redelivered: message.metadata[:redelivered],
-        uof_delivery_tag: message.metadata[:delivery_tag],
-        uof_payload: truncate(message.data, 4096)
+      Logger.error(
+        "UOF message processing failed: #{inspect(message.status)}",
+        [
+          uof_reason: inspect(message.status),
+          uof_routing_key: rk.raw,
+          uof_message_type: rk.message_type,
+          uof_event_urn: rk.event_urn,
+          uof_payload: truncate(message.data, 4096)
+        ] ++ MessageMetadata.delivery_log_metadata(message, context.metadata_adapter)
       )
     end
 

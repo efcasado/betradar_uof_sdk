@@ -89,7 +89,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     on_exit(fn -> AMQP.Connection.close(connection) end)
 
-    %{channel: channel}
+    %{channel: channel, subscription: subscription}
   end
 
   test "carries synthetic UOF XML and routing metadata from RabbitMQ to the SDK", %{channel: channel} do
@@ -173,6 +173,34 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     # arrives, the other node's message has already been dropped.
     assert_receive {:odds_change, _, %{routing_key: ^ours}}, 10_000
     refute_received {:odds_change, _, %{routing_key: ^other}}
+  end
+
+  test "dead-letters a message that fails once instead of processing it again", %{
+    channel: channel,
+    subscription: subscription
+  } do
+    test_pid = self()
+    id = make_ref()
+
+    :telemetry.attach(
+      id,
+      [:uof_sdk, :message, :failed],
+      fn _event, _measurements, metadata, _config -> send(test_pid, {:failed, metadata.routing_key}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    routing_key = "hi.-.live.odds_change.1.sr:match.777.-"
+    :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, "<not valid UOF XML>")
+
+    assert_receive {:failed, ^routing_key}, 10_000
+
+    dlq = "uof-feed-#{subscription}-content-DLQ"
+    assert TestSupport.await_topic_messages!(dlq, 1) == 1
+
+    # Diverted on its redelivery, so the pipeline saw it exactly once.
+    refute_receive {:failed, ^routing_key}, 2_000
   end
 
   test "changes the consumer tag when the source connector restarts", %{channel: channel} do

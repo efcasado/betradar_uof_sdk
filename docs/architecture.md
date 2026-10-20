@@ -284,7 +284,11 @@ Handler persistence and transport acknowledgement are separate operations. Appli
 should make their effects idempotent because reconnects and recovery can replay messages.
 Failures pass through the pipeline's failure callback, which logs context and emits
 `[:uof_sdk, :message, :failed]` telemetry. The AMQP transport rejects failed messages without
-requeue; Pulsar acknowledgement and redelivery follow the configured adapter behaviour.
+requeue. The Pulsar transport nacks a failed message and, about a second later, diverts it to
+the `<topic>-<subscription>-DLQ` topic instead of processing it again, so it remains available
+for inspection; batch-index acknowledgement keeps the failure from redelivering the other
+messages of its batch. Override `:consumer_opts` (`:redelivery_interval`,
+`:dead_letter_policy`, `:batch_index_ack_enabled`) to change this.
 A message failure emits diagnostics but does not directly request producer recovery.
 
 Content delivery is not gated on producer health. Live and replayed content can reach handlers

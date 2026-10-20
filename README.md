@@ -96,6 +96,13 @@ subscription, and `node_id`. Additional transport options are passed to
 `:conn_opts` configures the shared client. The SDK owns the two subscription types and the
 system consumer's ownership callback.
 
+A message that fails to decode or process is not retried: about a second later it is
+diverted to a dead-letter topic named `<topic>-<subscription>-DLQ`, one for each of the
+`-content` and `-system` subscriptions. The broker must allow those topics to be created
+automatically, or you create them in advance. Acknowledgements are tracked per batch index,
+so a failure doesn't redeliver the rest of its batch; Pulsar 4.2 brokers enable this by
+default (`acknowledgmentAtBatchIndexLevelEnabled`).
+
 See the [architecture guide](docs/architecture.md#pulsar) for the connector contract,
 key-based batching, failover, and node isolation.
 

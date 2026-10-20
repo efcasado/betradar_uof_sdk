@@ -118,10 +118,24 @@ defmodule UOF.SDK.Transport do
     }
   end
 
+  # Processing is single-attempt, as with AMQP's reject without requeue. A
+  # failed message is nacked; without a redelivery interval it would stay
+  # unacknowledged for the life of the consumer, count against the broker's
+  # unacked-message limit, and return on every restart. Instead it is
+  # redelivered once after a second and diverted, before reaching the
+  # pipeline again, to the "<topic>-<subscription>-DLQ" topic, where it stays
+  # inspectable. Batch-index acks keep one failure from redelivering the
+  # messages that share its batch. Users may override any of these.
+  @pulsar_consumer_defaults [
+    batch_index_ack_enabled: true,
+    redelivery_interval: 1_000,
+    dead_letter_policy: [max_redelivery: 1]
+  ]
+
   defp pulsar_producer(opts, subscription, suffix, subscription_type) do
     consumer_opts =
-      opts
-      |> Keyword.get(:consumer_opts, [])
+      @pulsar_consumer_defaults
+      |> Keyword.merge(Keyword.get(opts, :consumer_opts, []))
       |> Keyword.put(:subscription_type, subscription_type)
 
     opts =

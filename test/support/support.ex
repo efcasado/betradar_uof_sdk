@@ -108,6 +108,23 @@ defmodule UOF.SDK.TestSupport do
 
   defp topic_admin_url, do: "http://localhost:#{@pulsar_http_port}/admin/v2/persistent/public/default/uof-feed"
 
+  @doc "Waits until `topic` has received at least `count` messages and returns how many it has."
+  def await_topic_messages!(topic, count, attempts \\ 100) do
+    url = ~c"http://localhost:#{@pulsar_http_port}/admin/v2/persistent/public/default/#{topic}/stats"
+
+    received =
+      case :httpc.request(:get, {url, []}, [timeout: 1_000], body_format: :binary) do
+        {:ok, {{_version, 200, _reason}, _headers, body}} -> Jason.decode!(body)["msgInCounter"]
+        _result -> 0
+      end
+
+    cond do
+      received >= count -> received
+      attempts == 0 -> raise "topic #{topic} received #{received} of #{count} messages"
+      true -> Process.sleep(100) && await_topic_messages!(topic, count, attempts - 1)
+    end
+  end
+
   def source_queue do
     url = ~c"http://localhost:#{@rabbitmq_http_port}/api/queues/%2f"
     authorization = ~c"Basic #{Base.encode64("guest:guest")}"

@@ -149,8 +149,10 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec check(t(), integer(), non_neg_integer(), non_neg_integer(), boolean()) :: check_result()
-  def check(producer, now, inactivity_ms, max_processing_delay_ms, connections_ready?) do
+  @spec check(t(), integer(), non_neg_integer(), non_neg_integer(), boolean(), integer() | nil) :: check_result()
+  def check(producer, now, inactivity_ms, max_processing_delay_ms, connections_ready?, in_flight_ts) do
+    freshness = content_freshness(producer, in_flight_ts)
+
     cond do
       recovering?(producer) ->
         :unchanged
@@ -158,15 +160,15 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       alive_violation?(producer, now, inactivity_ms) ->
         {:recovery_needed, producer, :alive_timeout}
 
-      producer.status == :up and processing_violation?(producer, now, max_processing_delay_ms) ->
-        {:transition, mark_delayed(producer, now - producer.last_message_timestamp)}
+      producer.status == :up and processing_violation?(freshness, now, max_processing_delay_ms) ->
+        {:transition, mark_delayed(producer, now - freshness)}
 
       producer.status == :delayed and
-          not processing_violation?(producer, now, max_processing_delay_ms) ->
+          not processing_violation?(freshness, now, max_processing_delay_ms) ->
         {:transition, mark_up(producer)}
 
       producer.status == :resuming and producer.last_alive_at != nil and connections_ready? and
-          not processing_violation?(producer, now, max_processing_delay_ms) ->
+        freshness != nil and not processing_violation?(freshness, now, max_processing_delay_ms) ->
         {:transition, mark_up(producer)}
 
       true ->
@@ -408,11 +410,13 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   # Content timestamps include event messages and content-session alives. A
   # fresh system alive is intentionally not evidence that content caught up.
-  defp processing_violation?(%__MODULE__{last_message_timestamp: nil}, _now, _ms), do: false
+  # The oldest message still being handled bounds how far processing lags;
+  # without one, the newest completed message does.
+  defp content_freshness(_producer, in_flight_ts) when is_integer(in_flight_ts), do: in_flight_ts
+  defp content_freshness(%__MODULE__{last_message_timestamp: timestamp}, nil), do: timestamp
 
-  defp processing_violation?(%__MODULE__{last_message_timestamp: timestamp}, now, ms) do
-    now - timestamp > ms
-  end
+  defp processing_violation?(nil, _now, _ms), do: false
+  defp processing_violation?(freshness, now, ms), do: now - freshness > ms
 
   defp max_timestamp(nil, timestamp), do: timestamp
   defp max_timestamp(timestamp, nil), do: timestamp

@@ -23,6 +23,18 @@ defmodule UOF.SDK.ProducerMonitor do
   The processing threshold is independent of `inactivity_ms` so consumer-lag
   tolerance can be tuned separately from the alive-gap/recovery trigger.
 
+  Content lag is measured from the oldest content message still being
+  handled, falling back to the newest one completed. Processors record the
+  message they are handling in an ETS table this process owns (see
+  `track_processing/3`), so one processor stuck on an old message is not
+  hidden by fresher messages completing elsewhere.
+
+  `:up` therefore means the feed confirmed synchronization (`snapshot_complete`
+  or continuing heartbeats) and content processing is within
+  `max_processing_delay_ms`. A recovery replay still being processed shows
+  as `:delayed` once it lags beyond that threshold. With several instances on
+  one Pulsar subscription, each monitor sees only its own share of content.
+
   ## Recovery orchestration
 
   Recovery checkpoints are owned here, not by the Broadway pipeline. Subscribed
@@ -121,6 +133,7 @@ defmodule UOF.SDK.ProducerMonitor do
   @default_max_processing_delay_ms 20_000
   @default_tick_ms 1_000
   @default_recovery_overlap_ms 5 * 60_000
+  @in_flight __MODULE__.InFlight
 
   @type ownership :: :always_active | {:failover, :active | :passive}
 
@@ -183,6 +196,25 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @doc """
+  Run `fun` while recording that the calling content processor is handling a
+  message generated at `gen_timestamp` for `producer_id`.
+
+  Called by the content pipeline around the handler callback. The record is
+  removed when `fun` returns or raises, so a failed message does not leave a
+  stale entry behind.
+  """
+  @spec track_processing(integer(), integer(), (-> result)) :: result when result: term()
+  def track_processing(producer_id, gen_timestamp, fun) do
+    :ets.insert(@in_flight, {self(), producer_id, gen_timestamp})
+
+    try do
+      fun.()
+    after
+      :ets.delete(@in_flight, self())
+    end
+  end
+
+  @doc """
   Correlate `snapshot_complete` with an in-flight recovery.
 
   A matching completion moves the producer to `:up` and establishes the alive
@@ -238,6 +270,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @impl true
   def init(opts) do
+    :ets.new(@in_flight, [:named_table, :public, :set, write_concurrency: true])
+
     monitor_store = Keyword.get(opts, :monitor_store, {UOF.SDK.ProducerMonitor.Store.ETS, []})
     snapshot = load_snapshot(monitor_store)
 
@@ -394,7 +428,8 @@ defmodule UOF.SDK.ProducerMonitor do
       if owns_control?(state) do
         now = state.now_fun.()
         ensure_connection_readiness!(state, now)
-        Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now))
+        in_flight = oldest_in_flight()
+        Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now, Map.get(in_flight, &1.id)))
       else
         # A passive instance sees no system alives and only a partial content
         # view, so status transitions here would be noise; healing happens on
@@ -460,13 +495,14 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  defp check(state, producer, now) do
+  defp check(state, producer, now, in_flight_ts) do
     case Producer.check(
            producer,
            now,
            state.inactivity_ms,
            state.max_processing_delay_ms,
-           Connections.ready?(state.connections)
+           Connections.ready?(state.connections),
+           in_flight_ts
          ) do
       {:recovery_needed, producer, :alive_timeout} ->
         {state, _producer} = prepare_recovery(state, producer, after_from_checkpoint(state, producer), true)
@@ -521,13 +557,11 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   # Resuming safely requires both durable eligibility and a checkpoint. The
-  # current-session heartbeat, connection, and catch-up gates live in check/3.
+  # current-session heartbeat, connection, and content catch-up gates live in
+  # Producer.check/6. The checkpoint is not content evidence: catching up
+  # requires content processed in this session.
   defp restore_producer(producer, snapshot) do
-    if Snapshot.resumable?(snapshot, producer.id) do
-      %{producer | status: :resuming, last_message_timestamp: Snapshot.progress(snapshot, producer.id).checkpoint}
-    else
-      producer
-    end
+    if Snapshot.resumable?(snapshot, producer.id), do: %{producer | status: :resuming}, else: producer
   end
 
   defp load_producers(opts) do
@@ -845,6 +879,21 @@ defmodule UOF.SDK.ProducerMonitor do
   defp owns_control?(%{ownership: :always_active}), do: true
   defp owns_control?(%{ownership: {:failover, :active}}), do: true
   defp owns_control?(%{ownership: {:failover, :passive}}), do: false
+
+  # Oldest in-flight content timestamp per producer. Entries of processors that
+  # died without cleanup are dropped.
+  defp oldest_in_flight do
+    @in_flight
+    |> :ets.tab2list()
+    |> Enum.reduce(%{}, fn {pid, id, timestamp}, oldest ->
+      if Process.alive?(pid) do
+        Map.update(oldest, id, timestamp, &min(&1, timestamp))
+      else
+        :ets.delete(@in_flight, pid)
+        oldest
+      end
+    end)
+  end
 
   defp schedule_tick(state), do: Process.send_after(self(), :tick, state.tick_ms)
 

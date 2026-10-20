@@ -300,12 +300,10 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     end
   end
 
-  # The UOF API returns non-2xx statuses and transport failures as
-  # `{:error, %UOF.API.Error{}}`; a 2xx acknowledgement can still carry a
-  # non-ACCEPTED response code. A rejected request must stay pending because
-  # no `snapshot_complete` will be published for it. An exception is not a
-  # rejected request: it crashes the monitor after recovery intent is already
-  # durable, so supervision restarts with recovery still required.
+  # A 2xx acknowledgement can still carry a non-ACCEPTED response code; no
+  # `snapshot_complete` follows a rejection, so it must stay pending.
+  # Exceptions are not rescued: recovery intent is already durable, so a crash
+  # restarts with recovery still required.
   defp send_recovery_request(recover_fun, product, opts) do
     case recover_fun.(product, opts) do
       {:ok, %Response{response_code: code} = response} when code != "ACCEPTED" ->

@@ -18,6 +18,7 @@ Applications interact with a small set of modules:
 | --- | --- |
 | `UOF.SDK` | Starts the SDK and exposes producer state and manual recovery |
 | `UOF.SDK.MessageHandler` | Defines callbacks for feed content and producer-status changes |
+| `UOF.SDK.ProducerStatus` | Reports a producer's lifecycle state and observations |
 | `UOF.SDK.Context` | Supplies producer identity, message type, routing key, and event URN to content callbacks |
 | `UOF.SDK.ProducerMonitor.Store` | Defines persistence operations for consume sessions and recovery progress |
 
@@ -340,17 +341,17 @@ The lifecycle states describe the monitor's view:
 | `:delayed` | Processing observations exceed the configured delay threshold |
 | `:resuming` | Restored progress is eligible for resume, pending continuity and freshness checks |
 
-A pending or in-flight recovery job is projected as `:recovering` when state is reported.
-Internal request functions, timers, and job correlation stay out of the public producer view.
+A pending or in-flight recovery job is reported as `:recovering` in `UOF.SDK.ProducerStatus`.
+Recovery jobs, timers, and request correlation are not part of it.
 
 Query the current state synchronously:
 
 ```elixir
 UOF.SDK.producers()
-#=> [%UOF.SDK.ProducerMonitor.Producer{id: 1, product: "liveodds", status: :up, ...}, ...]
+#=> [%UOF.SDK.ProducerStatus{id: 1, product: "liveodds", status: :up, ...}, ...]
 
 UOF.SDK.producer(1)
-#=> {:ok, %UOF.SDK.ProducerMonitor.Producer{...}}
+#=> {:ok, %UOF.SDK.ProducerStatus{...}}
 ```
 
 Automatic recovery normally needs no application intervention. For a manual request, use

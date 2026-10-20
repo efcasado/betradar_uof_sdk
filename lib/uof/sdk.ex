@@ -27,7 +27,7 @@ defmodule UOF.SDK do
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.ProducerMonitor
-  alias UOF.SDK.ProducerMonitor.Producer
+  alias UOF.SDK.ProducerStatus
   alias UOF.SDK.SystemPipeline
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -37,11 +37,11 @@ defmodule UOF.SDK do
   end
 
   @doc "Current state of every known producer (the health check)."
-  @spec producers() :: [Producer.t()]
+  @spec producers() :: [ProducerStatus.t()]
   defdelegate producers(), to: ProducerMonitor
 
   @doc "Current state of a single producer by id."
-  @spec producer(integer()) :: {:ok, Producer.t()} | :error
+  @spec producer(integer()) :: {:ok, ProducerStatus.t()} | :error
   defdelegate producer(id), to: ProducerMonitor
 
   @doc """

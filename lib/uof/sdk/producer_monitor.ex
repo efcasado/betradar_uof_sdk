@@ -108,6 +108,7 @@ defmodule UOF.SDK.ProducerMonitor do
   alias UOF.SDK.ProducerMonitor.Producer
   alias UOF.SDK.ProducerMonitor.Store.ProducerProgress
   alias UOF.SDK.ProducerMonitor.Store.Session
+  alias UOF.SDK.ProducerStatus
 
   require Logger
 
@@ -794,18 +795,21 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   ## Helpers ------------------------------------------------------------------
-  # Producer recovery state contains internal functions, cooldown history, and
-  # request correlation. Only the derived lifecycle status crosses the public
-  # API and callback boundary.
-  defp reported_producer(producer) do
-    producer =
-      if Producer.recovering?(producer) do
-        %{producer | status: :recovering, processing_queue_delay: nil}
-      else
-        producer
-      end
+  # Recovery state stays internal; a pending or in-flight job is reported as
+  # `:recovering`.
+  defp reported_producer(%Producer{} = producer) do
+    recovering? = Producer.recovering?(producer)
 
-    %{producer | recovery: nil}
+    %ProducerStatus{
+      id: producer.id,
+      name: producer.name,
+      product: producer.product,
+      recovery_window_minutes: producer.recovery_window_minutes,
+      status: if(recovering?, do: :recovering, else: producer.status),
+      last_alive_at: producer.last_alive_at,
+      last_message_timestamp: producer.last_message_timestamp,
+      processing_queue_delay: if(!recovering?, do: producer.processing_queue_delay)
+    }
   end
 
   defp recovery_in_flight?(producer) do

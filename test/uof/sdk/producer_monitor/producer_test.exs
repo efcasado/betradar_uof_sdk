@@ -55,14 +55,25 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert {:transition, %Producer{status: :up}} = Producer.check(producer, 1_001, 900, 900, true)
   end
 
+  @tag :capture_log
   test "request ids continue from their start and wrap within the request-id range" do
-    next_id = Producer.request_id_generator(999_999)
+    producer =
+      %Producer{id: 1}
+      |> Producer.configure_recovery(recover_fun: fn _product, _opts -> {:ok, nil} end, request_id_start: 999_999)
+      |> Producer.prepare_recovery(nil)
+      |> Producer.initiate_recovery()
 
-    assert [999_999, 1_000_000, 1, 2] == Enum.map(1..4, fn _ -> next_id.() end)
+    # Each stall reissues the job with the producer's next request id.
+    issued =
+      Enum.scan(1..3, producer, fn _, producer ->
+        Producer.handle_stall(producer, producer.recovery.job.request_id)
+      end)
+
+    assert Enum.map([producer | issued], & &1.recovery.job.request_id) == [999_999, 1_000_000, 1, 2]
   end
 
   test "default request-id sequences start at a random offset" do
-    starts = Enum.map(1..5, fn _ -> Producer.request_id_generator().() end)
+    starts = Enum.map(1..5, fn _ -> Producer.configure_recovery(%Producer{id: 1}, []).recovery.next_request_id end)
 
     assert Enum.all?(starts, &(&1 in 1..1_000_000))
     assert length(Enum.uniq(starts)) > 1
@@ -76,7 +87,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
         send(test_pid, {:recover_called, product, opts})
         {:ok, :accepted}
       end,
-      gen_request_id: fn -> 42 end,
+      request_id_start: 42,
       monotonic_fun: fn -> 1_000 end,
       node_id: 7,
       min_interval_ms: 50,

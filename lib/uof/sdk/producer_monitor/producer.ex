@@ -57,7 +57,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           job: recovery_job() | nil,
           last_issued_at: integer() | nil,
           request: (term(), keyword() -> term()),
-          gen_request_id: (-> integer()),
+          next_request_id: pos_integer(),
           monotonic_fun: (-> integer()),
           node_id: integer() | nil,
           min_interval_ms: non_neg_integer(),
@@ -105,7 +105,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       job: nil,
       last_issued_at: nil,
       request: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
-      gen_request_id: Keyword.get_lazy(opts, :gen_request_id, &request_id_generator/0),
+      next_request_id: Keyword.get_lazy(opts, :request_id_start, fn -> :rand.uniform(@max_request_id) end),
       monotonic_fun: Keyword.get(opts, :monotonic_fun, &monotonic_ms/0),
       node_id: Keyword.get(opts, :node_id),
       min_interval_ms: Keyword.get(opts, :min_interval_ms, @default_min_interval_ms),
@@ -113,25 +113,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     }
 
     %{producer | recovery: recovery}
-  end
-
-  # `snapshot_complete` correlation trusts request ids, so sequences from
-  # different VM boots and Pulsar control-plane owners must not overlap: a
-  # completion left in a retained backlog, or one for the previous owner's
-  # request, would otherwise complete a newer request before its replay
-  # arrives. A per-VM counter restarts near 1 on every boot, so each sequence
-  # starts at a random offset, as the official SDKs do, and wraps within the
-  # Java SDK's range.
-  @doc false
-  @spec request_id_generator(pos_integer()) :: (-> pos_integer())
-  def request_id_generator(start \\ :rand.uniform(@max_request_id))
-      when is_integer(start) and start in 1..@max_request_id do
-    counter = :atomics.new(1, signed: false)
-
-    fn ->
-      issued = :atomics.add_get(counter, 1, 1) - 1
-      rem(start - 1 + issued, @max_request_id) + 1
-    end
   end
 
   @doc false
@@ -287,13 +268,18 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   defp issue_recovery(%__MODULE__{recovery: %{job: job} = recovery} = producer) do
     after_ts = job.after_ts
-    request_id = recovery.gen_request_id.()
+    request_id = recovery.next_request_id
     opts = build_opts(after_ts, request_id, recovery.node_id)
     job = %{job | request_id: request_id}
 
     producer = %{
       producer
-      | recovery: %{recovery | job: job, last_issued_at: recovery.monotonic_fun.()}
+      | recovery: %{
+          recovery
+          | job: job,
+            next_request_id: next_request_id(request_id),
+            last_issued_at: recovery.monotonic_fun.()
+        }
     }
 
     case safe_recover(recovery.request, producer.product, opts) do
@@ -337,6 +323,16 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     Logger.warning("UOF.SDK.ProducerMonitor: recover request failed: #{detail}")
     :error
   end
+
+  # `snapshot_complete` correlation trusts request ids, so sequences from
+  # different VM boots and Pulsar control-plane owners must not overlap: a
+  # completion left in a retained backlog, or one for the previous owner's
+  # request, would otherwise complete a newer request before its replay
+  # arrives. Each producer's sequence starts at a random offset, as the
+  # official SDKs do, and wraps within the Java SDK's range. Completion is
+  # correlated per producer, so producers need not share a sequence.
+  defp next_request_id(@max_request_id), do: 1
+  defp next_request_id(request_id), do: request_id + 1
 
   defp build_opts(after_ts, request_id, node_id) do
     [request_id: request_id]

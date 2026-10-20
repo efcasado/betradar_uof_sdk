@@ -5,7 +5,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
   alias UOF.SDK.ProducerMonitor.Snapshot.Progress
 
   @snapshot %Snapshot{
-    tokens: %{system: "ctag-s", content: "ctag-c"},
+    consumer_tags: %{system: "ctag-s", content: "ctag-c"},
     producers: %{
       1 => %Progress{checkpoint: 2_000, synchronized: true},
       3 => %Progress{checkpoint: nil, synchronized: false}
@@ -28,7 +28,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
   test "a session change unsynchronizes every producer and keeps checkpoints" do
     changed = Snapshot.change_session(@snapshot, %{system: "ctag-s", content: "ctag-c2"})
 
-    assert changed.tokens == %{system: "ctag-s", content: "ctag-c2"}
+    assert changed.consumer_tags == %{system: "ctag-s", content: "ctag-c2"}
     assert Snapshot.progress(changed, 1) == %Progress{checkpoint: 2_000, synchronized: false}
     refute Snapshot.resumable?(changed, 1)
   end
@@ -39,7 +39,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
 
   test "rejects other terms and unsupported versions" do
     assert_raise ArgumentError, ~r/unreadable producer monitor snapshot/, fn ->
-      Snapshot.decode!(:erlang.term_to_binary(%{tokens: %{}}))
+      Snapshot.decode!(:erlang.term_to_binary(%{consumer_tags: %{}}))
     end
 
     assert_raise ArgumentError, ~r/unsupported producer monitor snapshot version: 2/, fn ->
@@ -48,13 +48,15 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
   end
 
   test "rejects snapshots with an invalid shape" do
-    assert_raise ArgumentError, ~r/invalid producer monitor snapshot token/, fn ->
-      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 1, %{tokens: %{other: "t"}, producers: %{}}}))
+    assert_raise ArgumentError, ~r/invalid producer monitor snapshot consumer tag/, fn ->
+      Snapshot.decode!(
+        :erlang.term_to_binary({:uof_sdk_monitor_snapshot, 1, %{consumer_tags: %{other: "t"}, producers: %{}}})
+      )
     end
 
     assert_raise ArgumentError, ~r/invalid producer monitor snapshot progress/, fn ->
       Snapshot.decode!(
-        :erlang.term_to_binary({:uof_sdk_monitor_snapshot, 1, %{tokens: %{}, producers: %{1 => {"2000", true}}}})
+        :erlang.term_to_binary({:uof_sdk_monitor_snapshot, 1, %{consumer_tags: %{}, producers: %{1 => {"2000", true}}}})
       )
     end
   end

@@ -98,9 +98,8 @@ messages and `alive` messages used to observe content freshness. Bindings also a
 
 Each queue is exclusive and auto-deleted. Instances do not divide work through a shared
 queue, so this mode scales processing through local Broadway concurrency. A fresh consume
-session receives a new consumer tag, which the monitor uses to detect a possible feed gap.
-Custom producers must likewise provide `:consumer_tag` metadata or set
-`:connection_token_metadata_key`; without a token, reconnects go undetected.
+session receives a new [consumer tag](#consumer-tags), which the monitor uses to detect a
+possible feed gap.
 
 Broadway owns reconnect backoff. A channel failure replaces that channel while the shared
 connection remains available. A connection failure causes both consumers to obtain channels
@@ -145,7 +144,7 @@ the key used for distributed dispatch:
 | --- | --- |
 | Pulsar message key | Sport-event URN for event messages; `system` for `alive` and `snapshot_complete` |
 | `__rabbitmq_routing_key` property | Original AMQP routing key, used by the SDK for message type, event identity, and node filtering |
-| `__rabbitmq_consumer_tag` property | Server-generated upstream consume-session identity, used to detect possible gaps |
+| `__rabbitmq_consumer_tag` property | The upstream session's [consumer tag](#consumer-tags), used to detect possible gaps and to resume after an SDK restart |
 
 Use a RabbitMQ source connector with `messageKeyRules` and `__rabbitmq_routing_key`
 support ([apache/pulsar-connectors#140](https://github.com/apache/pulsar-connectors/pull/140)).
@@ -360,6 +359,27 @@ This uses the same monitor coordination, lifecycle reporting, and stall guard as
 recovery. On a passive Pulsar instance it returns `{:error, :passive}`; issue the request
 on the active owner instead.
 
+### Consumer Tags
+
+RabbitMQ assigns a consumer tag (`amq.ctag-…`) to every consume session. A new tag means the
+subscription was re-established and messages may have been missed. The SDK tracks one tag
+for the system pipeline and one for the content pipeline:
+
+- AMQP: the `:consumer_tag` delivery metadata of the SDK's own consumers.
+- Pulsar: the `__rabbitmq_consumer_tag` property set by the source connector, which holds the
+  upstream consume session.
+
+While running, a tag the monitor has not seen before recovers every producer. Tags are
+compared by novelty rather than arrival order, so a late message from a superseded session
+is not a change.
+
+The monitor saves the last tags in its [snapshot](#snapshot-contents). After a restart it
+waits, for up to `inactivity_seconds`, until both pipelines report their current tags.
+Matching tags mean the upstream session never broke: synchronized producers resume from the
+retained backlog without recovery. This is what lets a Pulsar deployment survive an SDK
+restart. Different tags are saved with every producer unsynchronized, and recovery starts.
+Direct AMQP opens new consume sessions on every restart, so its tags always differ.
+
 ### Time and Recovery Controls
 
 Public duration settings are in seconds and converted to milliseconds internally. Feed
@@ -396,12 +416,11 @@ persistent store when progress must survive those.
 
 | Field | Meaning |
 | --- | --- |
-| `tokens` | Committed system and content consume-session tokens |
+| `consumer_tags` | Committed [consumer tags](#consumer-tags) of the system and content pipelines |
 | `producers` | Per producer: recovery checkpoint (epoch milliseconds) and whether it is synchronized with those sessions |
 
 A producer may resume at startup only when it is synchronized and has a checkpoint. A
-consume-session change saves the new tokens with every producer unsynchronized, in one
-write. Recovery preparation saves the producer as unsynchronized before its HTTP request,
+consumer tag change saves the new tags with every producer unsynchronized, in one write. Recovery preparation saves the producer as unsynchronized before its HTTP request,
 so a crash at any point cannot resume from stale state. Checkpoints only move forward.
 
 The monitor saves only when the snapshot changes: on a session change, a checkpoint advance
@@ -480,10 +499,10 @@ The [ETS store tests](../test/uof/sdk/producer_monitor/store/ets_test.exs) show 
 
 ### Restart Resume
 
-At startup, a synchronized producer with a checkpoint enters `:resuming`. Persisted tokens are comparison baselines. The current pipelines must report
-their sessions again, and the monitor uses heartbeat and content-freshness observations to
-decide when to leave that state. Session-readiness deadlines prevent an incomplete restart
-from waiting indefinitely.
+At startup, a synchronized producer with a checkpoint enters `:resuming`. It becomes `:up`
+once both pipelines report unchanged [consumer tags](#consumer-tags) and processing has
+caught up. Without a heartbeat within `inactivity_seconds` it recovers, and a readiness
+deadline prevents an incomplete restart from waiting indefinitely.
 
 Direct AMQP reconnects create new consume sessions and require recovery. Pulsar can resume
 retained backlog when its upstream connector session remains unchanged. An upstream session
@@ -525,7 +544,7 @@ and connection gates, persists transitions, and publishes producer-status callba
 HTTP attempts, and timers. These functions execute in the monitor process; status callbacks
 also run there and should complete promptly.
 
-`ProducerMonitor.Connections` tracks consume-session tokens independently of producer state.
+`ProducerMonitor.Connections` tracks [consumer tags](#consumer-tags) independently of producer state.
 `Transport` derives the two producer specifications and the shared transport child from one
 configuration. `MessageMetadata` normalizes transport metadata, and `RoutingKey` supplies
 routing and event identity. The pipelines own decoding and dispatch rather than recovery

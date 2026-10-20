@@ -51,7 +51,7 @@ defmodule UOF.SDK.ProducerMonitor do
   ## Restart resume
 
   The monitor saves its state as one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`):
-  the committed consume-session tokens and, per producer, a checkpoint and
+  the committed consumer tags of both pipelines and, per producer, a checkpoint and
   whether it is synchronized with those sessions. A producer may resume only
   when it is synchronized and has a checkpoint. At startup that state is
   restored:
@@ -59,11 +59,11 @@ defmodule UOF.SDK.ProducerMonitor do
     * A resumable producer with a checkpoint starts as `:resuming`. It becomes
       `:up` after processing catches up, an `alive` is heard, and both pipeline
       connections are observed in the current process.
-    * Persisted session tokens are comparison baselines, not evidence that
+    * Persisted consumer tags are comparison baselines, not evidence that
       the current pipelines are ready. Recovery HTTP waits until both pipelines
       are observed. If that does not happen within one alive-inactivity
       interval, the monitor crashes so supervision restarts both pipelines.
-      Once ready, a changed token is saved together with every producer marked
+      Once ready, a changed consumer tag is saved together with every producer marked
       unsynchronized, and recovery starts.
     * A resumable producer gets one alive-inactivity interval to provide a
       current heartbeat; silence then follows the normal recovery path instead
@@ -249,7 +249,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state = %__MODULE__{
       producers: producers,
       snapshot: snapshot,
-      connections: Connections.new(snapshot.tokens),
+      connections: Connections.new(snapshot.consumer_tags),
       ownership: Keyword.get(opts, :ownership, {:failover, :passive}),
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),

@@ -2,7 +2,8 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   @moduledoc """
   The producer monitor's persisted state and its binary encoding.
 
-  `tokens` holds the committed system and content consume-session tokens.
+  `consumer_tags` holds the committed RabbitMQ consumer tags of the system and
+  content consume sessions.
   `producers` holds, per producer id, the recovery checkpoint (epoch
   milliseconds) and whether the producer is synchronized with those sessions.
   A producer may resume retained backlog only when it is synchronized and has a
@@ -22,11 +23,11 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   end
 
   @type t :: %__MODULE__{
-          tokens: %{optional(:system | :content) => binary()},
+          consumer_tags: %{optional(:system | :content) => binary()},
           producers: %{optional(integer()) => Progress.t()}
         }
 
-  defstruct tokens: %{}, producers: %{}
+  defstruct consumer_tags: %{}, producers: %{}
 
   @format :uof_sdk_monitor_snapshot
   @version 1
@@ -49,19 +50,19 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   end
 
   # A consume-session change can leave a delivery gap, so no producer remains
-  # synchronized with the new tokens. Both changes are saved in one write.
+  # synchronized with the new consumer tags. Both changes are saved in one write.
   @doc false
   @spec change_session(t(), map()) :: t()
-  def change_session(%__MODULE__{} = snapshot, tokens) do
+  def change_session(%__MODULE__{} = snapshot, consumer_tags) do
     producers = Map.new(snapshot.producers, fn {id, progress} -> {id, %{progress | synchronized: false}} end)
-    %{snapshot | tokens: tokens, producers: producers}
+    %{snapshot | consumer_tags: consumer_tags, producers: producers}
   end
 
   @doc "Encode a snapshot for a store."
   @spec encode(t()) :: binary()
-  def encode(%__MODULE__{tokens: tokens, producers: producers}) do
+  def encode(%__MODULE__{consumer_tags: consumer_tags, producers: producers}) do
     producers = Map.new(producers, fn {id, progress} -> {id, {progress.checkpoint, progress.synchronized}} end)
-    :erlang.term_to_binary({@format, @version, %{tokens: tokens, producers: producers}})
+    :erlang.term_to_binary({@format, @version, %{consumer_tags: consumer_tags, producers: producers}})
   end
 
   @doc """
@@ -71,8 +72,12 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   @spec decode!(binary()) :: t()
   def decode!(binary) when is_binary(binary) do
     case binary_to_term(binary) do
-      {@format, @version, %{tokens: tokens, producers: producers}} when is_map(tokens) and is_map(producers) ->
-        %__MODULE__{tokens: validate_tokens!(tokens), producers: Map.new(producers, &decode_progress!/1)}
+      {@format, @version, %{consumer_tags: consumer_tags, producers: producers}}
+      when is_map(consumer_tags) and is_map(producers) ->
+        %__MODULE__{
+          consumer_tags: validate_consumer_tags!(consumer_tags),
+          producers: Map.new(producers, &decode_progress!/1)
+        }
 
       {@format, version, _data} ->
         raise ArgumentError, "unsupported producer monitor snapshot version: #{inspect(version)}"
@@ -88,13 +93,13 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
     ArgumentError -> raise ArgumentError, "unreadable producer monitor snapshot: not a valid external term"
   end
 
-  defp validate_tokens!(tokens) do
-    Enum.each(tokens, fn
-      {namespace, token} when namespace in @namespaces and is_binary(token) -> :ok
-      entry -> raise ArgumentError, "invalid producer monitor snapshot token: #{inspect(entry)}"
+  defp validate_consumer_tags!(consumer_tags) do
+    Enum.each(consumer_tags, fn
+      {namespace, tag} when namespace in @namespaces and is_binary(tag) -> :ok
+      entry -> raise ArgumentError, "invalid producer monitor snapshot consumer tag: #{inspect(entry)}"
     end)
 
-    tokens
+    consumer_tags
   end
 
   defp decode_progress!({id, {checkpoint, synchronized}})

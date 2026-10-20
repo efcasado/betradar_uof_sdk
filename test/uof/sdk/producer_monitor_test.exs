@@ -109,9 +109,9 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
   end
 
-  defp save_state(checkpoints, synchronized_producers, session_tokens \\ %{}) do
-    if map_size(session_tokens) > 0 do
-      store_snapshot(Snapshot.change_session(stored_snapshot(), session_tokens))
+  defp save_state(checkpoints, synchronized_producers, consumer_tags \\ %{}) do
+    if map_size(consumer_tags) > 0 do
+      store_snapshot(Snapshot.change_session(stored_snapshot(), consumer_tags))
     end
 
     ## Health monitoring ---------------------------------------------------------
@@ -1137,15 +1137,15 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.observe_connection(m, {:system, "ctag-a"})
     sync(m)
-    assert stored_snapshot().tokens == %{}
+    assert stored_snapshot().consumer_tags == %{}
 
     ProducerMonitor.observe_connection(m, {:content, "ctag-b"})
     sync(m)
-    assert stored_snapshot().tokens == %{system: "ctag-a", content: "ctag-b"}
+    assert stored_snapshot().consumer_tags == %{system: "ctag-a", content: "ctag-b"}
 
     ProducerMonitor.observe_connection(m, {:system, "ctag-c"})
     sync(m)
-    assert stored_snapshot().tokens == %{system: "ctag-c", content: "ctag-b"}
+    assert stored_snapshot().consumer_tags == %{system: "ctag-c", content: "ctag-b"}
   end
 
   defp report_active_state(monitor, active_state) do
@@ -1336,7 +1336,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(m)
 
     refute_receive {:recover_called, _product, _opts}
-    assert stored_snapshot().tokens == %{system: "s1", content: "c2"}
+    assert stored_snapshot().consumer_tags == %{system: "s1", content: "c2"}
   end
 
   test "persisted tokens arm the restart connection gate before observations arrive", %{clock: clock} do
@@ -1370,7 +1370,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute_receive {:recover_called, _product, _opts}
     refute_receive {:status, _producer}
     assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
-    assert stored_snapshot().tokens == %{system: "s1", content: "c1"}
+    assert stored_snapshot().consumer_tags == %{system: "s1", content: "c1"}
     assert synchronized?(1)
 
     # the stale baseline re-detects the session change once promoted
@@ -1378,7 +1378,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.observe_connection(m, {:content, "c2"})
     assert_recovery_triggered()
     sync(m)
-    assert stored_snapshot().tokens == %{system: "s1", content: "c2"}
+    assert stored_snapshot().consumer_tags == %{system: "s1", content: "c2"}
   end
 
   test "a stale retry timer does not issue recovery for a healthy producer", %{clock: clock} do

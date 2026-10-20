@@ -8,15 +8,7 @@ defmodule UOF.SDK.Transport do
   @exchange "unifiedfeed"
   @pulsar_client :uof_sdk_pulsar
 
-  @content_message_types ~w[
-    odds_change
-    bet_settlement
-    bet_stop
-    bet_cancel
-    rollback_bet_cancel
-    rollback_bet_settlement
-    fixture_change
-  ]
+  @content_message_types UOF.SDK.MessageHandler.content_message_types()
 
   @type producer_spec :: {module(), keyword()}
   @type child_spec :: Supervisor.child_spec() | {module(), term()}

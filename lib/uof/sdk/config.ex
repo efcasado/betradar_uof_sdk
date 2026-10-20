@@ -146,9 +146,6 @@ defmodule UOF.SDK.Config do
   @doc """
   Load config from application env, merging `overrides` on top, and validate it.
 
-  Invalid or unknown options raise `NimbleOptions.ValidationError`; inconsistent
-  options raise `ArgumentError`.
-
   ## Options
 
   #{NimbleOptions.docs(@schema)}
@@ -188,17 +185,12 @@ defmodule UOF.SDK.Config do
 
     if overlap <= delay do
       raise ArgumentError,
-            "recovery_overlap_seconds (#{overlap}) must exceed max_processing_delay_seconds (#{delay}): " <>
-              "a producer stays :up while content lags by up to the processing delay, so a shorter " <>
-              "look-back can skip messages that were delivered but not yet processed. Raise " <>
-              ":recovery_overlap_seconds, with margin for clock skew, or lower :max_processing_delay_seconds."
+            "recovery_overlap_seconds (#{overlap}) must exceed max_processing_delay_seconds (#{delay})"
     end
 
     cfg
   end
 
-  # Checked at startup rather than at the first message or store call, where a
-  # misspelled module would fail every delivery.
   @doc false
   def validate_module(module, behaviour) when is_atom(module) do
     if Code.ensure_loaded?(module) do

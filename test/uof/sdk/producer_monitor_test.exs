@@ -839,6 +839,75 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{id: 1, status: :up}}
   end
 
+  describe "telemetry" do
+    setup do
+      attach_telemetry([
+        [:uof_sdk, :recovery, :completed],
+        [:uof_sdk, :recovery, :failed],
+        [:uof_sdk, :recovery, :stalled],
+        [:uof_sdk, :producer, :status]
+      ])
+    end
+
+    test "a completed recovery reports its duration since the request", %{clock: clock} do
+      monotonic = start_supervised!(%{id: :monotonic, start: {Agent, :start_link, [fn -> 100 end]}})
+      m = start_monitor([monotonic_fun: fn -> Agent.get(monotonic, & &1) end], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      rid = assert_recovery_triggered()
+      Agent.update(monotonic, fn _ -> 350 end)
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+
+      assert_receive {:telemetry, [:uof_sdk, :recovery, :completed], %{duration_ms: 250},
+                      %{producer_id: 1, product: "pre", request_id: ^rid}}
+    end
+
+    test "a failed request reports its reason and retry delay", %{clock: clock} do
+      m = start_monitor([recover_fun: fn _product, _opts -> {:error, :boom} end, min_interval_ms: 60_000], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+
+      assert_receive {:telemetry, [:uof_sdk, :recovery, :failed], _measurements,
+                      %{producer_id: 1, reason: ":boom", retry_in_ms: 60_000, request_id: rid}}
+
+      assert is_integer(rid)
+    end
+
+    test "a stalled request is reported before it is reissued", %{clock: clock} do
+      m = start_monitor([max_recovery_ms: 20], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      rid = assert_recovery_triggered()
+
+      assert_receive {:telemetry, [:uof_sdk, :recovery, :stalled], _measurements, %{producer_id: 1, request_id: ^rid}},
+                     500
+    end
+
+    test "status transitions are reported without a handler", %{clock: clock} do
+      m = start_monitor([handler: nil], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      assert_receive {:telemetry, [:uof_sdk, :producer, :status], _measurements, %{producer_id: 1, status: :recovering}}
+
+      ProducerMonitor.snapshot_complete(m, 1, assert_recovery_triggered())
+      assert_receive {:telemetry, [:uof_sdk, :producer, :status], _measurements, %{producer_id: 1, status: :up}}
+    end
+  end
+
+  defp attach_telemetry(events) do
+    test_pid = self()
+    id = make_ref()
+
+    :telemetry.attach_many(
+      id,
+      events,
+      fn event, measurements, metadata, _config -> send(test_pid, {:telemetry, event, measurements, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+  end
+
   test "stall guard reissues with the original :after timestamp", %{clock: clock} do
     put_checkpoint(1, @now - 60_000)
     m = start_monitor([now_fun: fn -> @now end, max_recovery_ms: 20], clock)

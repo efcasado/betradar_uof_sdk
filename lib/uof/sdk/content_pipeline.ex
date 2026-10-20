@@ -114,8 +114,20 @@ defmodule UOF.SDK.ContentPipeline do
     if RoutingKey.for_node?(rk, context.node_id) do
       handle_node_message(message, context, rk)
     else
-      message
+      skip_other_node(message, rk)
     end
+  end
+
+  # Expected when several subscriptions share an access token; a steady rate on
+  # a single subscription points at instances configured with mixed node ids.
+  defp skip_other_node(%Message{} = message, rk) do
+    :telemetry.execute([:uof_sdk, :message, :other_node], %{count: 1}, %{
+      routing_key: rk.raw,
+      message_type: rk.message_type,
+      node_id: rk.node_id
+    })
+
+    message
   end
 
   # The AMQP bindings already scope by node; Pulsar's source connector binds

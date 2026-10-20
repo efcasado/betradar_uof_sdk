@@ -527,11 +527,17 @@ use transport and message diagnostics to investigate why progress has stopped.
 | `handle_producer_status/1` | Reported producer-state transitions, delivered synchronously by the monitor |
 | `[:uof_sdk, :message, :failed]` | A decoding or processing failure, with routing context and failure reason |
 | `[:uof_sdk, :recovery, :initiated]` | A successful recovery request, with producer ID, request ID, and replay start timestamp; not recovery completion |
+| `[:uof_sdk, :recovery, :completed]` | A matching `snapshot_complete`, with `duration_ms` since the completed request was issued |
+| `[:uof_sdk, :recovery, :failed]` | A rejected or failed recovery request, with its reason and `retry_in_ms` |
+| `[:uof_sdk, :recovery, :stalled]` | A request with no `snapshot_complete` within `max_recovery_time`, emitted before it is reissued |
+| `[:uof_sdk, :producer, :status]` | A reported producer status transition, emitted whether or not a handler is configured |
+| `[:uof_sdk, :message, :other_node]` | A message addressed to another `node_id`, acknowledged without processing; expected when subscriptions share an access token |
 | `[:uof_sdk, :amqp, :setup_failure]` | A returned AMQP setup failure, preserving the operation, original reason, and retry classification |
 | `[:broadway_rabbitmq, :amqp, :open_connection, :start / :stop / :exception]` | Spans around shared AMQP connection establishment |
 
-Correlate recovery logs and initiation events by producer and request ID, then observe
-producer status for lifecycle progress. Message-failure logs include routing context and
+Recovery events share producer ID, product, and request ID, so initiation, failures,
+stalls, and completion can be correlated per request. A recovery with no `:completed`
+event, or repeated `:failed` or `:stalled` events, is the signal to alert on. Message-failure logs include routing context and
 a truncated payload. AMQP diagnostics distinguish expected retries from permanent failures;
 unexpected exceptions and exits also appear through process failure reports. A quiet error
 log alone does not establish readiness or prove that handlers have completed their work.

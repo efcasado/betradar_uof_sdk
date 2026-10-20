@@ -65,11 +65,23 @@ defmodule UOF.SDK.SystemPipeline do
   def handle_message(_processor, %Message{} = message, context) do
     rk = message |> routing_key(context) |> RoutingKey.parse()
 
-    if rk.message_type in ["alive", "snapshot_complete"] and RoutingKey.for_node?(rk, context.node_id) do
-      handle_system_message(message, context, rk)
-    else
-      message
+    cond do
+      rk.message_type not in ["alive", "snapshot_complete"] -> message
+      RoutingKey.for_node?(rk, context.node_id) -> handle_system_message(message, context, rk)
+      true -> skip_other_node(message, rk)
     end
+  end
+
+  # Expected when several subscriptions share an access token; a steady rate on
+  # a single subscription points at instances configured with mixed node ids.
+  defp skip_other_node(%Message{} = message, rk) do
+    :telemetry.execute([:uof_sdk, :message, :other_node], %{count: 1}, %{
+      routing_key: rk.raw,
+      message_type: rk.message_type,
+      node_id: rk.node_id
+    })
+
+    message
   end
 
   defp handle_system_message(%Message{} = message, context, rk) do

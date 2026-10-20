@@ -379,4 +379,34 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:odds_change, _, %{routing_key: "lo.pre.-.odds_change.1.sr:match.1.7"}}, 1_000
     assert_receive {:odds_change, _, %{routing_key: "hi.-.live.odds_change.1.sr:match.1.-"}}, 1_000
   end
+
+  test "reports messages addressed to another node" do
+    name = Module.concat(__MODULE__, OtherNodeTelemetry)
+    test_pid = self()
+    id = make_ref()
+
+    :telemetry.attach(
+      id,
+      [:uof_sdk, :message, :other_node],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:other_node, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    start_link_supervised!(%{
+      id: name,
+      start:
+        {ContentPipeline, :start_link,
+         [[name: name, handler: Handler, concurrency: 1, producer: {Broadway.DummyProducer, []}, node_id: 7]]}
+    })
+
+    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+      metadata: %{routing_key: "lo.pre.-.odds_change.1.sr:match.1.8"}
+    )
+
+    assert_receive {:other_node, %{count: 1}, %{node_id: "8", message_type: "odds_change"}}, 1_000
+  end
 end

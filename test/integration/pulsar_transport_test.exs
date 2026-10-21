@@ -28,6 +28,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
   defmodule Monitor do
     @moduledoc false
 
+    def alive(_product, _timestamp, _subscribed?), do: :ok
     def observe_connection(tag), do: notify({:observed_connection, tag})
 
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
@@ -89,7 +90,8 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
       {"hi.-.pre.odds_change.1.sr:match.12345.-",
        ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)},
       {"hi.-.pre.fixture_change.1.sr:match.67890.-",
-       ~s(<fixture_change product="1" event_id="sr:match:67890" timestamp="43" change_type="1"/>)}
+       ~s(<fixture_change product="1" event_id="sr:match:67890" timestamp="43" change_type="1"/>)},
+      {"-.-.-.alive.-.-.-.-", ~s(<alive product="1" timestamp="44" subscribed="1"/>)}
     ]
 
     Enum.each(messages, fn {routing_key, xml} ->
@@ -106,7 +108,9 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     assert fixture_context.routing_key == "hi.-.pre.fixture_change.1.sr:match.67890.-"
     assert fixture_context.event_urn == "sr:match:67890"
 
-    assert_receive {:observed_connection, {:content, consumer_tag}}, 10_000
+    # Both subscriptions carry the same connector session; the system
+    # pipeline reports it.
+    assert_receive {:observed_connection, {:system, consumer_tag}}, 10_000
     assert is_binary(consumer_tag) and consumer_tag != ""
   end
 
@@ -193,27 +197,21 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
   end
 
   test "changes the consumer tag when the source connector restarts", %{channel: channel} do
-    publish_odds_change(channel, "111", 100)
-
-    assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
-    assert_receive {:observed_connection, {:content, old_consumer_tag}}, 10_000
+    publish_alive(channel, 100)
+    assert_receive {:observed_connection, {:system, old_consumer_tag}}, 10_000
 
     {:ok, old_queue} = TestSupport.source_queue()
     TestSupport.restart_source!()
     _new_queue = TestSupport.wait_for_new_source_queue!(old_queue)
 
-    publish_odds_change(channel, "222", 101)
-
-    assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
-    assert_receive {:observed_connection, {:content, new_consumer_tag}}, 10_000
+    publish_alive(channel, 101)
+    assert_receive {:observed_connection, {:system, new_consumer_tag}}, 10_000
 
     refute new_consumer_tag == old_consumer_tag
   end
 
-  defp publish_odds_change(channel, event_id, timestamp) do
-    routing_key = "hi.-.pre.odds_change.1.sr:match.#{event_id}.-"
-    xml = ~s(<odds_change product="1" event_id="sr:match:#{event_id}" timestamp="#{timestamp}"/>)
-
-    :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, xml)
+  defp publish_alive(channel, timestamp) do
+    xml = ~s(<alive product="1" timestamp="#{timestamp}" subscribed="1"/>)
+    :ok = AMQP.Basic.publish(channel, "unifiedfeed", "-.-.-.alive.-.-.-.-", xml)
   end
 end

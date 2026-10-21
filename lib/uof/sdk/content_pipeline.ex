@@ -192,22 +192,17 @@ defmodule UOF.SDK.ContentPipeline do
 
   defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
 
-  defp maybe_track_connection(%{metadata_adapter: :amqp} = context, "alive", message) do
-    notify_connection(context, message)
-  end
-
-  defp maybe_track_connection(%{metadata_adapter: :pulsar_rabbitmq_source} = context, _type, message) do
-    notify_connection(context, message)
-  end
-
-  defp maybe_track_connection(_context, _type, _message), do: :ok
-
-  defp notify_connection(%{monitor: monitor} = context, message) do
-    case MessageMetadata.consumer_tag(message, context.metadata_adapter) do
+  # Only AMQP gives the content pipeline its own consume session. With Pulsar
+  # both subscriptions carry the connector's session tag, which the system
+  # pipeline already reports.
+  defp maybe_track_connection(%{metadata_adapter: :amqp, monitor: monitor}, "alive", message) do
+    case MessageMetadata.consumer_tag(message, :amqp) do
       nil -> :ok
       tag -> monitor.observe_connection({:content, tag})
     end
   end
+
+  defp maybe_track_connection(_context, _type, _message), do: :ok
 
   ## delivery to the user handler --------------------------------------------
 

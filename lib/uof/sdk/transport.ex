@@ -19,6 +19,7 @@ defmodule UOF.SDK.Transport do
           children: [child_spec()],
           system: producer_spec(),
           ownership: ownership(),
+          connection_namespaces: [:system | :content],
           metadata_adapter: :amqp | :pulsar_rabbitmq_source,
           routing_key_metadata_key: atom()
         }
@@ -46,6 +47,7 @@ defmodule UOF.SDK.Transport do
       content: rabbitmq_producer(content_bindings(node_id)),
       system: rabbitmq_producer(system_bindings(node_id)),
       ownership: :always_active,
+      connection_namespaces: [:system, :content],
       metadata_adapter: :amqp,
       routing_key_metadata_key: :routing_key
     }
@@ -113,6 +115,11 @@ defmodule UOF.SDK.Transport do
       content: pulsar_producer(base_opts, subscription, :content, :key_shared),
       system: pulsar_producer(system_opts, subscription, :system, :failover),
       ownership: {:failover, :passive},
+      # Both subscriptions carry the connector's one upstream session tag, and
+      # once created the durable content subscription retains a replay whether
+      # or not its consumer is connected. Waiting for a content tag would only
+      # stall an instance whose Key-Shared share is quiet.
+      connection_namespaces: [:system],
       metadata_adapter: :pulsar_rabbitmq_source,
       routing_key_metadata_key: :routing_key
     }

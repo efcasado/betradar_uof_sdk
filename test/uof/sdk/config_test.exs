@@ -35,6 +35,7 @@ defmodule UOF.SDK.ConfigTest do
     assert config.metadata_adapter == :amqp
     assert config.routing_key_metadata_key == :routing_key
     assert config.ownership == :always_active
+    assert config.connection_namespaces == [:system, :content]
     assert config.transport_children == [{Connection, connection: conn}]
     assert content_opts[:client] == Client
     assert system_opts[:client] == Client
@@ -109,6 +110,7 @@ defmodule UOF.SDK.ConfigTest do
     assert config.metadata_adapter == :pulsar_rabbitmq_source
     assert config.routing_key_metadata_key == :routing_key
     assert config.ownership == {:failover, :passive}
+    assert config.connection_namespaces == [:system]
   end
 
   test "Pulsar consumers dead-letter failed messages after a single attempt by default" do

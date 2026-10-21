@@ -65,20 +65,26 @@ defmodule UOF.SDK.ProducerMonitor do
   ## Restart resume
 
   The monitor saves its state as one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`):
-  the committed consumer tags of both pipelines and, per producer, a checkpoint and
-  whether it is synchronized with those sessions. A producer may resume only
+  the committed consumer tags of the tracked pipelines and, per producer, a
+  checkpoint and whether it is synchronized with those sessions.
+
+  `:connection_namespaces` lists the pipelines whose consumer tags are tracked.
+  AMQP tracks `:system` and `:content`, which are separate consume sessions.
+  Pulsar tracks only `:system`: both subscriptions carry the same upstream
+  connector session, and once created the durable content subscription retains
+  replayed content whether or not its consumer is connected. A producer may resume only
   when it is synchronized and has a checkpoint. At startup that state is
   restored:
 
     * A resumable producer with a checkpoint starts as `:resuming`. It becomes
-      `:up` once both pipeline connections are observed in the current process
+      `:up` once the tracked pipeline connections are observed in the current process
       and it hears an `alive` generated within one alive-inactivity interval:
       alives drained from retained backlog do not count, so anything still in
       the backlog is seen first.
     * Persisted consumer tags are comparison baselines, not evidence that
-      the current pipelines are ready. Recovery HTTP waits until both pipelines
-      are observed. If that does not happen within one alive-inactivity
-      interval, the monitor crashes so supervision restarts both pipelines.
+      the current pipelines are ready. Recovery HTTP waits until the tracked
+      pipelines are observed. If that does not happen within one alive-inactivity
+      interval, the monitor crashes so supervision restarts the pipelines.
       Once ready, a changed consumer tag is saved together with every producer marked
       unsynchronized, and recovery starts.
     * A resumable producer gets one alive-inactivity interval to provide a
@@ -129,6 +135,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @default_inactivity_ms 20_000
   @default_tick_ms 1_000
+  @connection_namespaces [:system, :content]
   @default_recovery_overlap_ms 5 * 60_000
   @default_descriptions_refresh_ms 60_000
 
@@ -213,7 +220,7 @@ defmodule UOF.SDK.ProducerMonitor do
   completion is correlated via `snapshot_complete`, and the
   stall guard reissues if it goes missing. If a persisted connection session is
   still reconnecting, the recovery requirement is recorded immediately and its
-  HTTP request waits for both pipelines. Pass `full: true` to ignore the
+  HTTP request waits for the tracked pipelines. Pass `full: true` to ignore the
   checkpoint and request a full snapshot. Refused while the producer is already
   recovering, including during a cooldown or retry delay, and with
   `{:error, :passive}` while this instance does not own the system
@@ -240,10 +247,10 @@ defmodule UOF.SDK.ProducerMonitor do
   @doc """
   Observe a pipeline connection as `{namespace, consumer_tag}`.
 
-  Startup recovery waits until both the system and content connection namespaces
-  have been observed, so replay starts only after both consumers are ready. After
-  startup, a consumer tag change in any namespace recovers every producer to close the
-  message-gap a reconnect leaves behind.
+  Startup recovery waits until every tracked namespace (see "Restart resume")
+  has been observed, so replay starts only after those consumers are ready.
+  After startup, a consumer tag change in any namespace recovers every producer
+  to close the message-gap a reconnect leaves behind.
   """
   def observe_connection(server \\ __MODULE__, connection) do
     GenServer.cast(server, {:observe_connection, connection})
@@ -256,6 +263,7 @@ defmodule UOF.SDK.ProducerMonitor do
     monitor_store = Keyword.get(opts, :monitor_store, {UOF.SDK.ProducerMonitor.Store.ETS, []})
     snapshot = load_snapshot(monitor_store)
     {descriptions, source} = load_descriptions(opts, snapshot)
+    namespaces = Keyword.get(opts, :connection_namespaces, @connection_namespaces)
 
     producers =
       Map.new(descriptions, fn description ->
@@ -266,7 +274,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state = %__MODULE__{
       producers: producers,
       snapshot: snapshot,
-      connections: Connections.new(snapshot.consumer_tags),
+      connections: Connections.new(snapshot.consumer_tags, namespaces),
       ownership: Keyword.get(opts, :ownership, {:failover, :passive}),
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
@@ -742,7 +750,7 @@ defmodule UOF.SDK.ProducerMonitor do
   # interval after this instance acquires control, or the health check recovers
   # it. `resuming_since` starts that interval without counting as a heartbeat.
   # Connection readiness gets the same interval; failure is process-fatal so
-  # :rest_for_one restarts both pipelines instead of waiting forever.
+  # :rest_for_one restarts the pipelines instead of waiting forever.
   defp start_active_monitoring(state) do
     now = state.now_fun.()
 

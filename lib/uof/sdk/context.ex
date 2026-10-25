@@ -3,23 +3,20 @@ defmodule UOF.SDK.Context do
   Metadata passed alongside every decoded message to a `UOF.SDK.MessageHandler`
   callback.
 
-  `status` reflects the producer's recovery state (`:up`, `:recovering`,
-  `:down`, ...). Until the producer lifecycle layer lands it is `:unknown`.
+  Producer status is reported separately through `UOF.SDK.producer/1` and
+  `UOF.SDK.MessageHandler.handle_producer_status/1`. Content delivery is
+  independent of producer status.
   """
-
-  @type status :: :unknown | :up | :recovering | :down
 
   @type t :: %__MODULE__{
           producer_id: integer() | nil,
           message_type: String.t() | nil,
           routing_key: String.t() | nil,
-          event_urn: String.t() | nil,
-          status: status()
+          event_urn: String.t() | nil
         }
 
   defstruct producer_id: nil,
             message_type: nil,
             routing_key: nil,
-            event_urn: nil,
-            status: :unknown
+            event_urn: nil
 end

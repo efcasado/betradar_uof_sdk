@@ -147,6 +147,9 @@ The monitor starts passive and waits for the broker's ownership report. The acti
 periodic health checks, issues recovery requests, and writes the snapshot. Passive instances
 continue their content processing. Demotion parks in-flight recoveries; promotion reloads the
 snapshot, restores producers from it as a restart does, and permits pending work to resume.
+The monitor also watches the active system consumer process and demotes when it exits, because
+an exit may arrive without a final passive ownership report. A replacement consumer must
+report ownership before the monitor resumes control-plane work.
 Ownership reports are coordination signals, not fencing tokens: brief overlap during failover
 can issue duplicate recovery requests, which are harmless beyond quota.
 

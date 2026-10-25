@@ -300,7 +300,7 @@ persistent store when progress must survive those.
 | Field | Meaning |
 | --- | --- |
 | `consumer_tag` | Committed consumer tag of the connector's upstream session |
-| `producers` | Per producer: recovery checkpoint (epoch milliseconds), whether it is synchronized with that session, and whether a full recovery is pending |
+| `producers` | Per producer: recovery checkpoint (epoch milliseconds) and the recovery it still owes: none when synchronized with that session, `:incremental` from the checkpoint, or `:full` |
 | `descriptions` | The last producer descriptions loaded from the UOF API |
 
 A producer may resume at startup only when it is synchronized and has a checkpoint. A consumer

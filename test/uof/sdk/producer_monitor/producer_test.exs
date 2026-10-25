@@ -73,12 +73,12 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
         max_recovery_ms: 0
       )
       |> Producer.prepare_recovery(nil)
-      |> Producer.advance()
+      |> Producer.advance(0, 1_000)
 
     # Each stall reissues the job with the producer's next request id.
     issued =
       Enum.scan(1..3, producer, fn _, producer ->
-        producer |> Producer.handle_response(:ok) |> Producer.advance()
+        producer |> Producer.handle_response(:ok) |> Producer.advance(0, 1_000)
       end)
 
     assert Enum.map([producer | issued], & &1.recovery.job.request_id) == [999_999, 1_000_000, 1, 2]
@@ -115,7 +115,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert Producer.recovering?(producer)
     assert Producer.recovery_pending?(producer)
 
-    producer = Producer.advance(producer)
+    producer = Producer.advance(producer, 0, 1_000)
     assert_receive {:recover_called, nil, request}
     assert request == [after: 0, node_id: 7, request_id: 42]
     refute Producer.recovery_pending?(producer)
@@ -123,7 +123,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
     # An accepted request is left alone until it stalls.
     producer = Producer.handle_response(producer, :ok)
-    assert Producer.advance(producer) == producer
+    assert Producer.advance(producer, 0, 1_000) == producer
 
     assert {:ok, producer} = Producer.complete_recovery(producer, 42, 2_000)
     refute Producer.recovering?(producer)
@@ -131,18 +131,33 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert producer.last_alive_at == 2_000
 
     # A new job within the cooldown since the last attempt stays pending.
-    producer = producer |> Producer.prepare_recovery(500) |> Producer.advance()
+    producer = producer |> Producer.prepare_recovery(500) |> Producer.advance(0, 1_000)
     assert Producer.recovery_pending?(producer)
     refute_received {:recover_called, _product, _request}
   end
 
-  test "a job awaiting alives is not issued" do
-    producer =
-      %Producer{id: 1}
-      |> Producer.configure_recovery(recover_fun: fn _product, _opts -> flunk("issued") end)
-      |> Producer.prepare_recovery(500, true)
+  test "a pending job is not issued while the producer is silent" do
+    test_pid = self()
 
-    assert Producer.advance(producer) == producer
+    producer =
+      %Producer{id: 1, last_alive_at: 0}
+      |> Producer.configure_recovery(
+        recover_fun: fn _product, _opts ->
+          send(test_pid, :issued)
+          {:ok, nil}
+        end
+      )
+      |> Producer.prepare_recovery(500)
+
+    # Last heard at 0: silent at 2_000 with a 1_000 heartbeat interval.
+    assert Producer.silent?(producer, 2_000, 1_000)
+    assert Producer.advance(producer, 2_000, 1_000) == producer
+
+    # The next alive makes it current again, and the job goes out.
+    {:ok, heard} = Producer.observe_alive(producer, 1_900, true, 2_000)
+    refute Producer.silent?(heard, 2_000, 1_000)
+    Producer.advance(heard, 2_000, 1_000)
+    assert_receive :issued
   end
 
   test "a stalled request is reclamped when the recovery window moves" do
@@ -171,7 +186,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
         monotonic_fun: fn -> Agent.get(now, & &1) end
       )
       |> Producer.prepare_recovery(@now - 2 * 60 * 60_000)
-      |> Producer.advance()
+      |> Producer.advance(0, 1_000)
 
     assert_receive {:recover_called, first}
     assert first[:after] == @now - 50 * 60_000
@@ -181,7 +196,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
     # Past max_recovery_ms (10 minutes by default), the request stalls.
     Agent.update(now, &(&1 + 20 * 60_000))
-    producer = Producer.advance(producer)
+    producer = Producer.advance(producer, 0, 1_000)
 
     assert_receive {:recover_called, second}
     assert second[:after] == @now - 30 * 60_000
@@ -205,14 +220,14 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
         min_interval_ms: 0
       )
       |> Producer.prepare_recovery(@now - 2 * 60 * 60_000)
-      |> Producer.advance()
+      |> Producer.advance(0, 1_000)
 
     assert_receive {:recover_called, first}
     assert first[:after] == @now - 50 * 60_000
 
     producer = Producer.handle_response(producer, {:error, :unavailable})
     Agent.update(now, &(&1 + 20 * 60_000))
-    Producer.advance(producer)
+    Producer.advance(producer, 0, 1_000)
 
     assert_receive {:recover_called, second}
     assert second[:after] == @now - 30 * 60_000

@@ -5,10 +5,11 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   `consumer_tag` holds the committed consumer tag of the source connector's
   upstream consume session.
   `producers` holds, per producer id, the recovery checkpoint (epoch
-  milliseconds), whether the producer is synchronized with that session, and
-  whether a full recovery must still complete.
-  A producer may resume retained backlog only when it is synchronized and has a
-  checkpoint.
+  milliseconds) and the recovery it still owes: `nil` when it is synchronized
+  with that session, `:incremental` for a recovery from the checkpoint (or a
+  full one without a checkpoint), and `:full` for a full recovery.
+  A producer may resume retained backlog only when it owes no recovery and has
+  a checkpoint.
   `descriptions` holds the last producer descriptions loaded from the UOF API,
   so the monitor can start when the API is unavailable.
 
@@ -20,13 +21,18 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   defmodule Progress do
     @moduledoc "Recovery progress for one producer."
 
-    @type t :: %__MODULE__{
-            checkpoint: integer() | nil,
-            synchronized: boolean(),
-            full_recovery_pending: boolean()
-          }
+    @type pending_recovery :: nil | :incremental | :full
 
-    defstruct checkpoint: nil, synchronized: false, full_recovery_pending: false
+    @type t :: %__MODULE__{checkpoint: integer() | nil, pending_recovery: pending_recovery()}
+
+    # A producer with no saved progress owes a recovery.
+    defstruct checkpoint: nil, pending_recovery: :incremental
+
+    @doc false
+    # A full recovery owed stays owed until it completes.
+    @spec owe(t(), :incremental | :full) :: t()
+    def owe(%__MODULE__{pending_recovery: :full} = progress, _kind), do: progress
+    def owe(%__MODULE__{} = progress, kind), do: %{progress | pending_recovery: kind}
   end
 
   @type description :: %{
@@ -50,10 +56,7 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   @doc "Whether the producer may resume retained backlog without recovery."
   @spec resumable?(t(), integer()) :: boolean()
   def resumable?(%__MODULE__{} = snapshot, id) do
-    match?(
-      %Progress{synchronized: true, full_recovery_pending: false, checkpoint: checkpoint} when is_integer(checkpoint),
-      progress(snapshot, id)
-    )
+    match?(%Progress{pending_recovery: nil, checkpoint: checkpoint} when is_integer(checkpoint), progress(snapshot, id))
   end
 
   @doc false
@@ -66,12 +69,12 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
     %{snapshot | producers: Map.put(snapshot.producers, id, progress)}
   end
 
-  # A consume-session change can leave a delivery gap, so no producer remains
-  # synchronized with the new consumer tag. Both changes are saved in one write.
+  # A consume-session change can leave a delivery gap, so every producer owes a
+  # recovery with the new consumer tag. Both changes are saved in one write.
   @doc false
   @spec change_session(t(), binary()) :: t()
   def change_session(%__MODULE__{} = snapshot, consumer_tag) do
-    producers = Map.new(snapshot.producers, fn {id, progress} -> {id, %{progress | synchronized: false}} end)
+    producers = Map.new(snapshot.producers, fn {id, progress} -> {id, Progress.owe(progress, :incremental)} end)
     %{snapshot | consumer_tag: consumer_tag, producers: producers}
   end
 
@@ -80,7 +83,7 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   def encode(%__MODULE__{consumer_tag: consumer_tag, producers: producers, descriptions: descriptions}) do
     producers =
       Map.new(producers, fn {id, progress} ->
-        {id, {progress.checkpoint, progress.synchronized, progress.full_recovery_pending}}
+        {id, {progress.checkpoint, progress.pending_recovery}}
       end)
 
     :erlang.term_to_binary(
@@ -120,10 +123,10 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
     ArgumentError -> raise ArgumentError, "unreadable producer monitor snapshot: not a valid external term"
   end
 
-  defp decode_progress!({id, {checkpoint, synchronized, full_recovery_pending}})
-       when is_integer(id) and (is_integer(checkpoint) or is_nil(checkpoint)) and is_boolean(synchronized) and
-              is_boolean(full_recovery_pending) do
-    {id, %Progress{checkpoint: checkpoint, synchronized: synchronized, full_recovery_pending: full_recovery_pending}}
+  defp decode_progress!({id, {checkpoint, pending_recovery}})
+       when is_integer(id) and (is_integer(checkpoint) or is_nil(checkpoint)) and
+              pending_recovery in [nil, :incremental, :full] do
+    {id, %Progress{checkpoint: checkpoint, pending_recovery: pending_recovery}}
   end
 
   defp decode_progress!(entry) do

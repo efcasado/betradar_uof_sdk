@@ -42,9 +42,11 @@ defmodule UOF.SDK.ProducerMonitor do
 
   Events only record facts and change recovery jobs; `reconcile/1`, run after
   every event and on every tick, is the only place requests are issued. It
-  calls `Producer.advance/1` for each producer while this instance owns the
+  calls `Producer.advance/3` for each producer while this instance owns the
   control plane and the upstream session is confirmed, so every request passes
-  the same gates and there are no recovery timers.
+  the same gates and there are no recovery timers. Status callbacks are
+  derived the same way: after every event, each producer's reported status is
+  compared with the last one published, and only changes are published.
 
   A delivery gap marks the producer `:recovering`. The request is issued after
   the per-producer cooldown with a fresh `request_id` and a checkpoint-derived
@@ -52,7 +54,7 @@ defmodule UOF.SDK.ProducerMonitor do
   timeout records the recovery immediately but issues it only once the
   producer's alives resume: Betradar rejects recovery while a producer is
   silent, and failed requests count against its rate limit. Until then the
-  producer is reported `:down`; the alive that releases the request reports
+  producer is reported `:down`; the next alive lets the request go and reports
   it `:recovering`. Issuing emits
   `[:uof_sdk, :recovery, :initiated]` telemetry and starts the stall deadline.
   Failed requests are retried; stalled requests are reissued from the original
@@ -159,7 +161,8 @@ defmodule UOF.SDK.ProducerMonitor do
           descriptions_refresh_ms: pos_integer(),
           next_refresh_at: integer() | nil,
           refresh_scheduled?: boolean(),
-          refresh_task: reference() | nil
+          refresh_task: reference() | nil,
+          published: %{optional(integer()) => ProducerStatus.status()}
         }
 
   @enforce_keys [
@@ -184,7 +187,8 @@ defmodule UOF.SDK.ProducerMonitor do
                 descriptions_refresh_ms: @default_descriptions_refresh_ms,
                 next_refresh_at: nil,
                 refresh_scheduled?: false,
-                refresh_task: nil
+                refresh_task: nil,
+                published: %{}
               ]
 
   def start_link(opts) do
@@ -298,6 +302,11 @@ defmodule UOF.SDK.ProducerMonitor do
 
     state = if owns_control?(state), do: start_active_monitoring(state), else: state
 
+    state = %{
+      state
+      | published: Map.new(state.producers, fn {id, producer} -> {id, reported_status(producer, state)} end)
+    }
+
     schedule_tick(state)
     {:ok, state}
   end
@@ -307,7 +316,7 @@ defmodule UOF.SDK.ProducerMonitor do
     result =
       state.producers
       |> Map.values()
-      |> Enum.map(&reported_producer/1)
+      |> Enum.map(&reported_producer(&1, state))
       |> Enum.sort_by(& &1.id)
 
     {:reply, result, state}
@@ -316,7 +325,7 @@ defmodule UOF.SDK.ProducerMonitor do
   def handle_call({:get_producer, id}, _from, state) do
     result =
       case Map.fetch(state.producers, id) do
-        {:ok, producer} -> {:ok, reported_producer(producer)}
+        {:ok, producer} -> {:ok, reported_producer(producer, state)}
         :error -> :error
       end
 
@@ -341,7 +350,7 @@ defmodule UOF.SDK.ProducerMonitor do
           true ->
             after_ts = if !opts[:full], do: after_from_checkpoint(state, producer)
             state = if opts[:full], do: require_recovery(state, id, true), else: state
-            {:reply, :ok, state |> request_recovery(producer, after_ts) |> reconcile()}
+            {:reply, :ok, state |> request_recovery(producer, after_ts) |> settle()}
         end
     end
   end
@@ -356,7 +365,7 @@ defmodule UOF.SDK.ProducerMonitor do
         :error -> schedule_refresh(state)
       end
 
-    {:noreply, reconcile(state)}
+    {:noreply, settle(state)}
   end
 
   # A passive instance ignores session observations entirely: the owner heals
@@ -367,7 +376,7 @@ defmodule UOF.SDK.ProducerMonitor do
   def handle_cast({:observe_consumer_tag, tag}, state) do
     state = if owns_control?(state), do: track_consumer_tag(state, tag), else: state
 
-    {:noreply, reconcile(state)}
+    {:noreply, settle(state)}
   end
 
   def handle_cast({:active_state, %{active_state: active_state} = metadata}, state) do
@@ -407,11 +416,11 @@ defmodule UOF.SDK.ProducerMonitor do
           |> change_ownership(:passive, metadata)
       end
 
-    {:noreply, reconcile(state)}
+    {:noreply, settle(state)}
   end
 
   def handle_cast({:snapshot_complete, id, request_id}, state) do
-    {:noreply, state |> complete_recovery(id, request_id) |> reconcile()}
+    {:noreply, state |> complete_recovery(id, request_id) |> settle()}
   end
 
   defp monitor_consumer(state, consumer_pid) do
@@ -479,7 +488,7 @@ defmodule UOF.SDK.ProducerMonitor do
       if owns_control?(state) do
         now = state.now_fun.()
         ensure_session_readiness!(state, now)
-        state.producers |> Map.values() |> Enum.reduce(state, &check(&2, &1, now)) |> reconcile()
+        state.producers |> Map.values() |> Enum.reduce(state, &check(&2, &1, now)) |> settle()
       else
         # A passive instance sees no system alives, so status transitions here
         # would be noise; healing happens on
@@ -509,7 +518,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def handle_info({:DOWN, ref, :process, consumer_pid, _reason}, %{consumer_ref: ref, consumer_pid: consumer_pid} = state) do
     state = clear_consumer_monitor(state)
-    {:noreply, state |> change_ownership(:passive, %{consumer_pid: consumer_pid}) |> reconcile()}
+    {:noreply, state |> change_ownership(:passive, %{consumer_pid: consumer_pid}) |> settle()}
   end
 
   def handle_info({ref, result}, %{refresh_task: ref} = state) do
@@ -541,7 +550,7 @@ defmodule UOF.SDK.ProducerMonitor do
         nil -> state
       end
 
-    {:noreply, reconcile(state)}
+    {:noreply, settle(state)}
   end
 
   defp on_alive(state, producer, gen_ts, subscribed?) do
@@ -554,10 +563,6 @@ defmodule UOF.SDK.ProducerMonitor do
         # or session startup. Only HTTP issuance depends on ownership and
         # readiness; the durable requirement itself must never be discarded.
         request_recovery(state, producer)
-
-      {:alive_resumed, producer} ->
-        producer = Producer.release_recovery(producer, after_from_checkpoint(state, producer))
-        state |> put_producer(producer) |> notify_recovery(producer)
 
       {:checkpoint, producer, timestamp} ->
         state
@@ -572,7 +577,7 @@ defmodule UOF.SDK.ProducerMonitor do
   defp check(state, producer, now) do
     case Producer.check(producer, now, state.inactivity_ms, Session.ready?(state.session)) do
       {:recovery_needed, producer, :alive_timeout} ->
-        {state, _producer} = prepare_recovery(state, producer, after_from_checkpoint(state, producer), true)
+        {state, _producer} = prepare_recovery(state, producer, after_from_checkpoint(state, producer))
         state
 
       {:transition, producer} ->
@@ -595,8 +600,8 @@ defmodule UOF.SDK.ProducerMonitor do
     state
   end
 
-  defp prepare_recovery(state, before, after_ts, awaiting_alive \\ false) do
-    producer = Producer.prepare_recovery(before, after_ts, awaiting_alive)
+  defp prepare_recovery(state, before, after_ts) do
+    producer = Producer.prepare_recovery(before, after_ts)
 
     # The durable safety transition must precede HTTP issuance. If the monitor
     # crashes after the request, restart will require another recovery instead
@@ -605,16 +610,12 @@ defmodule UOF.SDK.ProducerMonitor do
       state
       |> put_producer(producer)
       |> require_recovery(before.id)
-      |> notify_recovery(producer)
 
     {state, producer}
   end
 
   defp commit_producer_transition(state, after_) do
-    state = put_producer(state, after_)
-    state = persist_producer_progress(state, after_)
-    notify(state, reported_producer(after_))
-    state
+    state |> put_producer(after_) |> persist_producer_progress(after_)
   end
 
   # Only a missing snapshot starts empty. One that cannot be decoded raises:
@@ -749,11 +750,6 @@ defmodule UOF.SDK.ProducerMonitor do
   # ownership converges (see the supervisor comment in UOF.SDK).
   defp notify_handler(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
 
-  defp notify_recovery(state, producer) do
-    notify(state, reported_producer(producer))
-    state
-  end
-
   defp park_recoveries(state) do
     in_flight = Enum.filter(state.producers, fn {_id, producer} -> recovery_in_flight?(producer) end)
 
@@ -785,16 +781,14 @@ defmodule UOF.SDK.ProducerMonitor do
       %{state | snapshot: snapshot, session: Session.new(snapshot.consumer_tag)},
       fn {_id, producer}, state ->
         if Producer.recovering?(producer) do
-          if Snapshot.progress(snapshot, producer.id).full_recovery_pending do
+          if Snapshot.progress(snapshot, producer.id).pending_recovery == :full do
             put_producer(state, Producer.repeat_recovery(producer, nil))
           else
             state
           end
         else
           restored = restore_producer(%{producer | status: :down, last_alive_at: nil, resuming_since: nil}, snapshot)
-          state = put_producer(state, restored)
-          if restored.status != producer.status, do: notify(state, reported_producer(restored))
-          state
+          put_producer(state, restored)
         end
       end
     )
@@ -899,37 +893,65 @@ defmodule UOF.SDK.ProducerMonitor do
   # Runtime status is not stored. `:resuming` is reconstructed at startup from
   # the producer checkpoint and its synchronization flag.
   defp persist_producer_progress(state, after_) do
-    synchronized? = after_.status == :up
-    update_progress(state, after_.id, &%{&1 | synchronized: synchronized?, full_recovery_pending: false})
+    pending = if after_.status == :up, do: nil, else: :incremental
+    update_progress(state, after_.id, &%{&1 | pending_recovery: pending})
   end
 
   defp require_recovery(state, id, full_recovery? \\ false) do
     update_progress(
       state,
       id,
-      &%{&1 | synchronized: false, full_recovery_pending: &1.full_recovery_pending or full_recovery?}
+      &Snapshot.Progress.owe(&1, if(full_recovery?, do: :full, else: :incremental))
     )
   end
+
+  # Run after every event: issue what is due, then publish status changes.
+  defp settle(state), do: state |> reconcile() |> publish_status_changes()
 
   # The only place recovery requests are issued. Every request therefore passes
   # the same gates: control-plane ownership and a confirmed upstream session.
   defp reconcile(state) do
     if may_issue?(state) do
-      Enum.reduce(state.producers, state, fn {_id, producer}, state -> put_producer(state, Producer.advance(producer)) end)
+      now = state.now_fun.()
+
+      Enum.reduce(state.producers, state, fn {_id, producer}, state ->
+        put_producer(state, Producer.advance(producer, now, state.inactivity_ms))
+      end)
     else
       state
     end
+  end
+
+  # Status callbacks follow the reported status rather than individual
+  # transitions. A producer added by a description reload is recorded without a
+  # callback, like those loaded at startup.
+  defp publish_status_changes(state) do
+    Enum.reduce(state.producers, state, fn {id, producer}, state ->
+      status = reported_status(producer, state)
+
+      case Map.fetch(state.published, id) do
+        {:ok, ^status} ->
+          state
+
+        {:ok, _previous} ->
+          notify(state, reported_producer(producer, state))
+          %{state | published: Map.put(state.published, id, status)}
+
+        :error ->
+          %{state | published: Map.put(state.published, id, status)}
+      end
+    end)
   end
 
   defp may_issue?(state), do: owns_control?(state) and not Session.awaiting_readiness?(state.session)
 
   defp after_from_checkpoint(state, producer) do
     progress = Snapshot.progress(state.snapshot, producer.id)
-    if progress.full_recovery_pending, do: nil, else: progress.checkpoint
+    if progress.pending_recovery == :full, do: nil, else: progress.checkpoint
   end
 
   defp preserve_full_recovery(state, producer, after_ts) do
-    if Snapshot.progress(state.snapshot, producer.id).full_recovery_pending, do: nil, else: after_ts
+    if Snapshot.progress(state.snapshot, producer.id).pending_recovery == :full, do: nil, else: after_ts
   end
 
   defp put_producer(state, %Producer{} = producer) do
@@ -973,24 +995,30 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Helpers ------------------------------------------------------------------
   # Recovery state stays internal; a pending or in-flight job is reported as
-  # `:recovering`. A job awaiting the producer's alives is reported as `:down`:
-  # the producer is silent and no recovery can start until it is heard again.
-  defp reported_producer(%Producer{} = producer) do
-    recovering? = Producer.recovering?(producer)
+  # `:recovering`. A pending job of a silent producer is reported as `:down`:
+  # no recovery can start until the producer is heard again. A passive
+  # instance hears no alives, so silence is only judged while active.
+  defp reported_status(%Producer{} = producer, state) do
+    cond do
+      Producer.recovery_pending?(producer) and owns_control?(state) and
+          Producer.silent?(producer, state.now_fun.(), state.inactivity_ms) ->
+        :down
 
-    status =
-      cond do
-        Producer.awaiting_alive?(producer) -> :down
-        recovering? -> :recovering
-        true -> producer.status
-      end
+      Producer.recovering?(producer) ->
+        :recovering
 
+      true ->
+        producer.status
+    end
+  end
+
+  defp reported_producer(%Producer{} = producer, state) do
     %ProducerStatus{
       id: producer.id,
       name: producer.name,
       product: producer.product,
       recovery_window_minutes: producer.recovery_window_minutes,
-      status: status,
+      status: reported_status(producer, state),
       last_alive_at: producer.last_alive_at,
       alive_delay: producer.alive_delay
     }

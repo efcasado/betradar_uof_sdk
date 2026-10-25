@@ -126,12 +126,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ## Health monitoring ---------------------------------------------------------
     Enum.each(checkpoints, fn {id, timestamp} -> put_checkpoint(id, timestamp) end)
-    Enum.each(synchronized_producers, fn id -> update_stored_progress(id, &%{&1 | synchronized: true}) end)
+    Enum.each(synchronized_producers, fn id -> update_stored_progress(id, &%{&1 | pending_recovery: nil}) end)
   end
 
   defp resumable?(id), do: Snapshot.resumable?(stored_snapshot(), id)
 
-  defp synchronized?(id), do: Snapshot.progress(stored_snapshot(), id).synchronized
+  defp synchronized?(id), do: is_nil(Snapshot.progress(stored_snapshot(), id).pending_recovery)
 
   defp tick(monitor) do
     send(monitor, :tick)
@@ -686,7 +686,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert :ok = ProducerMonitor.recover(m, 1, full: true)
     assert_receive {:recover_called, "pre", first}
     refute Keyword.has_key?(first, :after)
-    assert Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+    assert Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
 
     ProducerMonitor.observe_consumer_tag(m, "s2")
     assert_receive {:recover_called, "pre", replacement}
@@ -695,11 +695,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.snapshot_complete(m, 1, first[:request_id])
     sync(m)
-    assert Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+    assert Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
 
     ProducerMonitor.snapshot_complete(m, 1, replacement[:request_id])
     assert_receive {:status, %ProducerStatus{status: :up}}
-    refute Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+    refute Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
 
     assert :ok = ProducerMonitor.recover(m, 1, [])
     assert_receive {:recover_called, "pre", incremental}
@@ -712,7 +712,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert :ok = ProducerMonitor.recover(m, 1, full: true)
     assert_receive {:recover_called, "pre", first}
     refute Keyword.has_key?(first, :after)
-    assert Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+    assert Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
 
     assert :ok = stop_supervised(ProducerMonitor)
     restarted = start_monitor(clock)
@@ -733,7 +733,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     assert_receive {:recover_called, "pre", replacement}
     refute Keyword.has_key?(replacement, :after)
-    assert Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+    assert Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
   end
 
   test "manual recovery is persisted but waits for the restored session", %{clock: clock} do
@@ -1743,7 +1743,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     report_active_state(m, :passive)
 
     # Another owner completed its work and requested a manual full recovery.
-    update_stored_progress(1, &%{&1 | synchronized: false, full_recovery_pending: true})
+    update_stored_progress(1, &%{&1 | pending_recovery: :full})
 
     report_active_state(m, :active)
     ProducerMonitor.observe_consumer_tag(m, "s1")
@@ -1753,11 +1753,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.snapshot_complete(m, 1, old_request[:request_id])
     sync(m)
-    assert Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+    assert Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
 
     ProducerMonitor.snapshot_complete(m, 1, replacement[:request_id])
     assert_receive {:status, %ProducerStatus{status: :up}}
-    refute Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+    refute Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
   end
 
   test "a retry timer firing while passive waits for promotion", %{clock: clock} do

@@ -430,6 +430,7 @@ readiness or prove that handlers have completed their work.
 | `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session readiness, persists transitions, publishes status callbacks | Its own process |
 | `ProducerMonitor.Producer` | Per-producer state machine: health, recovery jobs, cooldowns, and request attempts; `advance/1` decides when a request is due | The monitor; each HTTP request runs in a linked task |
 | `ProducerMonitor.Session` | Tracks the upstream consumer tag, independently of producer state | The monitor |
+| `ProducerMonitor.Descriptions` | Loads producer descriptions from the UOF API, falling back to stored and then configured ones | The monitor; reloads run in a linked task |
 | `ProducerMonitor.Snapshot` | The persisted state and its encoding | The monitor |
 | `ProducerMonitor.Store` | Persistence behaviour; `Store.ETS` is the default | The monitor; a store with `child_spec/1` also runs its own process |
 

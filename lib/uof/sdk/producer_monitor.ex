@@ -27,6 +27,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   use GenServer
 
+  alias UOF.SDK.ProducerMonitor.Descriptions
   alias UOF.SDK.ProducerMonitor.Producer
   alias UOF.SDK.ProducerMonitor.Session
   alias UOF.SDK.ProducerMonitor.Snapshot
@@ -164,7 +165,7 @@ defmodule UOF.SDK.ProducerMonitor do
   def init(opts) do
     monitor_store = Keyword.get(opts, :monitor_store, {UOF.SDK.ProducerMonitor.Store.ETS, []})
     snapshot = load_snapshot(monitor_store)
-    {descriptions, source} = load_descriptions(opts, snapshot)
+    {descriptions, source} = Descriptions.load(opts, snapshot.descriptions)
 
     producers =
       Map.new(descriptions, fn description ->
@@ -399,7 +400,7 @@ defmodule UOF.SDK.ProducerMonitor do
   # request timeout. An exception from the fetcher still crashes the monitor.
   def handle_info(:refresh_descriptions, state) do
     opts = state.producer_opts
-    task = Task.async(fn -> fetch_descriptions(opts) end)
+    task = Task.async(fn -> Descriptions.fetch(opts) end)
 
     {:noreply,
      %{
@@ -422,7 +423,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state =
       case result do
         {:ok, descriptions} ->
-          state |> apply_descriptions(descriptions) |> tap(fn _ -> emit_loaded(descriptions, :api) end)
+          state |> apply_descriptions(descriptions) |> tap(fn _ -> Descriptions.emit_loaded(descriptions, :api) end)
 
         {:error, reason} ->
           Logger.warning("UOF.SDK.ProducerMonitor: reloading producer descriptions failed: #{inspect(reason)}")
@@ -514,63 +515,6 @@ defmodule UOF.SDK.ProducerMonitor do
     if Snapshot.resumable?(snapshot, producer.id), do: %{producer | status: :resuming}, else: producer
   end
 
-  # The API is authoritative. When it fails, the descriptions stored by a
-  # previous run, or else the configured ones, let the monitor start; it keeps
-  # retrying the API. With no source at all, startup fails: running without
-  # known producers would silently disable health tracking and recovery.
-  defp load_descriptions(opts, snapshot) do
-    case fetch_descriptions(opts) do
-      {:ok, descriptions} ->
-        emit_loaded(descriptions, :api)
-        {descriptions, :api}
-
-      {:error, reason} ->
-        fall_back(reason, snapshot.descriptions, Keyword.get(opts, :producers, []))
-    end
-  end
-
-  defp fall_back(reason, [_ | _] = stored, _configured), do: degraded(reason, stored, :snapshot)
-  defp fall_back(reason, [], [_ | _] = configured), do: degraded(reason, configured, :config)
-
-  defp fall_back(reason, [], []) do
-    raise RuntimeError,
-          "could not load UOF producers: #{inspect(reason)}; no stored or configured producer descriptions"
-  end
-
-  defp degraded(reason, descriptions, source) do
-    Logger.warning(
-      "UOF.SDK.ProducerMonitor: could not load producer descriptions from the UOF API (#{inspect(reason)}); " <>
-        "starting from #{source} descriptions and retrying"
-    )
-
-    emit_loaded(descriptions, source)
-    {descriptions, source}
-  end
-
-  defp fetch_descriptions(opts) do
-    fetcher = Keyword.get(opts, :producer_fetcher, &UOF.API.Descriptions.producers/0)
-
-    case fetcher.() do
-      {:ok, %{producer: descriptions}} when is_list(descriptions) ->
-        {:ok, descriptions |> Enum.filter(& &1.active) |> Enum.map(&description/1)}
-
-      {:error, reason} ->
-        {:error, reason}
-
-      other ->
-        {:error, {:unexpected_response, other}}
-    end
-  end
-
-  defp description(api_description) do
-    %{
-      id: api_description.id,
-      name: api_description.name,
-      product: product_segment(api_description.api_url),
-      recovery_window_minutes: api_description.stateful_recovery_window_in_minutes
-    }
-  end
-
   defp new_producer(description, opts) do
     Producer |> struct(description) |> Producer.configure_recovery(opts)
   end
@@ -601,16 +545,6 @@ defmodule UOF.SDK.ProducerMonitor do
     delay = max((state.next_refresh_at || 0) - state.now_fun.(), 0)
     Process.send_after(self(), :refresh_descriptions, delay)
     %{state | refresh_scheduled?: true}
-  end
-
-  defp emit_loaded(descriptions, source) do
-    :telemetry.execute([:uof_sdk, :producers, :loaded], %{count: length(descriptions)}, %{source: source})
-  end
-
-  defp product_segment(nil), do: nil
-
-  defp product_segment(api_url) do
-    api_url |> to_string() |> String.trim_trailing("/") |> String.split("/") |> List.last()
   end
 
   defp notify(state, %ProducerStatus{} = producer) do

@@ -96,13 +96,6 @@ subscription, and `node_id`. Additional transport options are passed to
 `:conn_opts` configures the shared client. The SDK owns the two subscription types and the
 system consumer's ownership callback.
 
-The system subscription is the only control plane: it sees every message on the topic, so
-producer status, checkpoints, and recovery follow feed continuity on the topic rather than
-content processing. A producer is never `:delayed`, and `:up` does not mean the content
-subscription has caught up. A new content subscription starts at the earliest retained
-message, so a fresh deployment first processes the retained backlog. See
-[feed continuity](docs/architecture.md#feed-continuity).
-
 A message that fails to decode or process is not retried: about a second later it is
 diverted to a dead-letter topic named `<topic>-<subscription>-DLQ`, one for each of the
 `-content` and `-system` subscriptions. The broker must allow those topics to be created
@@ -111,7 +104,7 @@ so a failure doesn't redeliver the rest of its batch; Pulsar 4.2 brokers enable 
 default (`acknowledgmentAtBatchIndexLevelEnabled`).
 
 See the [architecture guide](docs/architecture.md#pulsar) for the connector contract,
-key-based batching, failover, and node isolation.
+key-based batching, failover, feed continuity, and node isolation.
 
 ## Quick start
 

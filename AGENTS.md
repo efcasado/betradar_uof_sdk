@@ -89,9 +89,8 @@ the runtime suites. Report what was tested and any checks that were not run.
 - Prioritize concrete correctness risks in supported configurations. Explain the
   trigger, affected behavior, and consequence; distinguish verified failures from
   hypotheses. Consult dependency source when a finding depends on its semantics.
-- Check the architecture guide's invariants, particularly the system subscription
-  as the sole control plane, active-only recovery, persisted recovery intent, and
-  atomic monitor snapshots.
+- Check every change against the architecture guide's
+  [design invariants](docs/architecture.md#design-invariants).
 - Check the [connector contract](docs/architecture.md#connector-contract):
   routing decisions read the `__rabbitmq_routing_key` property, the message key is
   the ordering scope (event URN or `system`) and relies on key-based batching, and

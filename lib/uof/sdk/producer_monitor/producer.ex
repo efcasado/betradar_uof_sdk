@@ -7,9 +7,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   history, and an optional pending or in-flight job. `UOF.SDK.ProducerMonitor`
   supplies global inputs such as session readiness and control-plane
   ownership. This module starts per-producer recovery HTTP requests in tasks
-  linked to the monitor and handles their responses, and owns timers,
-  logging, and telemetry; the monitor retains event routing, durable
-  persistence, and callbacks.
+  linked to the monitor and handles their responses, and owns logging and
+  telemetry; the monitor retains event routing, durable persistence, and
+  callbacks.
 
   `status` holds health state only. `UOF.SDK.ProducerMonitor` reports a
   producer with a recovery job as `:recovering` in `UOF.SDK.ProducerStatus`,
@@ -17,24 +17,26 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   ## Recovery sequencing
 
-  Preparing a recovery and issuing its HTTP request are deliberately separate.
-  `UOF.SDK.ProducerMonitor` first calls `prepare_recovery/2`, durably marks the
-  producer as requiring recovery, and publishes the `:recovering` transition.
-  Only then does it call `initiate_recovery/1`. This ordering guarantees that a
-  crash after issuing the request cannot restart from stale synchronized state.
+  Recording a recovery and issuing its HTTP request are deliberately separate.
+  Events only change the job: `prepare_recovery/3` records a pending one, and
+  failures, demotion, session changes, and interrupted completions return a job
+  to pending. `advance/1` is the only place a request is issued: the monitor
+  calls it for every producer after each event and on every tick, but only
+  while it may issue (it owns the control plane and the upstream session is
+  confirmed). The monitor persists recovery intent before it calls `advance/1`,
+  so a crash after a request cannot restart from stale synchronized state.
 
-  A heartbeat timeout prepares its job awaiting an alive. Recovery requests
-  issued while the producer is silent fail and count against Betradar's rate
-  limit, so `observe_alive/4` reports the next alive and the monitor releases
-  the job then, recomputing its replay timestamp.
+  `advance/1` issues a pending job once the cooldown since the last attempt
+  has passed, unless the job waits for the producer's alives: a heartbeat
+  timeout prepares its job awaiting an alive, because Betradar rejects
+  recovery for a silent producer and failed requests count against its rate
+  limit. It reissues an accepted request that has gone without
+  `snapshot_complete` for longer than `max_recovery_ms`. There are no timers,
+  so no timer can outlive the job or the gates it was scheduled under.
 
-  A reconnect is different: the session change is saved before
-  the producers are visited, so `restart_recovery/2` can replace an in-flight
-  job and initiate it immediately. Failed requests, stalls, and ownership
-  demotion all return a job to pending state, but their callers intentionally
-  choose different reissue times. The job retains its original timestamp; each
-  HTTP attempt starts 60 seconds before it and is bounded by the producer's
-  current recovery window with a 10-minute safety margin.
+  The job retains its original timestamp; each HTTP attempt starts 60 seconds
+  before it and is bounded by the producer's current recovery window with a
+  10-minute safety margin.
 
   ## Interrupted recoveries
 
@@ -65,7 +67,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           after_ts: integer() | nil,
           attempt_after_ts: integer() | nil,
           request_id: integer() | nil,
-          generation: reference(),
           awaiting_alive: boolean(),
           task: reference() | nil,
           interrupted: boolean(),
@@ -196,7 +197,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       after_ts: after_ts,
       attempt_after_ts: nil,
       request_id: nil,
-      generation: make_ref(),
       awaiting_alive: awaiting_alive,
       task: nil,
       interrupted: false,
@@ -214,16 +214,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     %{producer | recovery: %{recovery | job: %{job | after_ts: after_ts, awaiting_alive: false}}}
   end
 
-  # A session change is already durable when this is called, so the
-  # replacement may proceed directly through cooldown and HTTP issuance.
-  @doc false
-  @spec restart_recovery(t(), integer() | nil) :: t()
-  def restart_recovery(%__MODULE__{} = producer, after_ts) do
-    producer |> repeat_recovery(after_ts) |> initiate_recovery()
-  end
-
-  # Replaces the job with a pending one replaying from `after_ts`. The caller
-  # initiates it, subject to its own gates.
+  # Replaces the job with a pending one replaying from `after_ts`; `advance/1`
+  # issues it once the gates and cooldown allow.
   @doc false
   @spec repeat_recovery(t(), integer() | nil) :: t()
   def repeat_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
@@ -231,16 +223,13 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     mark_recovery_pending(%{producer | recovery: %{recovery | job: job}})
   end
 
-  # This transition intentionally performs no I/O: stalls reissue immediately,
-  # request failures wait for the retry interval, and demotion waits for
-  # promotion.
+  # A pending job performs no I/O; `advance/1` issues it.
   @spec mark_recovery_pending(t()) :: t()
   defp mark_recovery_pending(%__MODULE__{recovery: recovery} = producer) do
     job = %{
       recovery.job
       | attempt_after_ts: nil,
         request_id: nil,
-        generation: make_ref(),
         task: nil,
         interrupted: false,
         resume_ts: nil
@@ -304,48 +293,41 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def recovery_pending?(%__MODULE__{recovery: %{job: %{request_id: nil}}}), do: true
   def recovery_pending?(%__MODULE__{}), do: false
 
-  @doc false
-  @spec initiate_recovery(t()) :: t()
-  def initiate_recovery(%__MODULE__{recovery: recovery} = producer) do
-    remaining =
-      case recovery.last_issued_at do
-        nil -> 0
-        last -> max(recovery.min_interval_ms - (recovery.monotonic_fun.() - last), 0)
-      end
+  @doc """
+  Issue or reissue the producer's recovery request if it is due.
 
-    case remaining do
-      0 -> issue_recovery(producer)
-      milliseconds -> defer_recovery(producer, milliseconds)
+  Called by the monitor only while it may issue. A pending job is issued once
+  the cooldown since the last attempt has passed, unless it waits for the
+  producer's alives. An accepted request without `snapshot_complete` for longer
+  than `max_recovery_ms` is reissued from its original timestamp. A request
+  whose HTTP response has not arrived yet is left alone.
+  """
+  @spec advance(t()) :: t()
+  def advance(%__MODULE__{recovery: %{job: nil}} = producer), do: producer
+  def advance(%__MODULE__{recovery: %{job: %{awaiting_alive: true}}} = producer), do: producer
+
+  def advance(%__MODULE__{recovery: %{job: %{request_id: nil}} = recovery} = producer) do
+    if elapsed_since_issue(recovery) >= recovery.min_interval_ms, do: issue_recovery(producer), else: producer
+  end
+
+  def advance(%__MODULE__{recovery: %{job: %{task: nil, request_id: request_id}} = recovery} = producer) do
+    if elapsed_since_issue(recovery) > recovery.max_recovery_ms do
+      Logger.warning(
+        "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} stalled: " <>
+          "no snapshot_complete within #{recovery.max_recovery_ms}ms; reissuing"
+      )
+
+      emit(producer, :stalled, %{}, %{request_id: request_id})
+      producer |> mark_recovery_pending() |> issue_recovery()
+    else
+      producer
     end
   end
 
-  @doc false
-  @spec handle_retry(t(), reference()) :: t()
-  def handle_retry(%__MODULE__{recovery: %{job: %{request_id: nil, generation: generation}}} = producer, generation),
-    do: issue_recovery(producer)
+  def advance(%__MODULE__{} = producer), do: producer
 
-  def handle_retry(%__MODULE__{} = producer, _generation), do: producer
-
-  @doc false
-  @spec handle_stall(t(), integer()) :: t()
-  def handle_stall(%__MODULE__{recovery: %{job: %{request_id: request_id}}} = producer, request_id)
-      when not is_nil(request_id) do
-    Logger.warning(
-      "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} stalled: " <>
-        "no snapshot_complete within #{producer.recovery.max_recovery_ms}ms; reissuing"
-    )
-
-    emit(producer, :stalled, %{}, %{request_id: request_id})
-    producer |> mark_recovery_pending() |> issue_recovery()
-  end
-
-  def handle_stall(%__MODULE__{} = producer, _request_id), do: producer
-
-  defp defer_recovery(producer, remaining) do
-    Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery deferred for #{remaining}ms")
-    schedule({:retry, producer.id, producer.recovery.job.generation}, remaining)
-    producer
-  end
+  defp elapsed_since_issue(%{last_issued_at: nil}), do: :infinity
+  defp elapsed_since_issue(%{last_issued_at: last} = recovery), do: recovery.monotonic_fun.() - last
 
   defp issue_recovery(%__MODULE__{recovery: %{job: job} = recovery} = producer) do
     after_ts = recovery_after(job.after_ts, producer.recovery_window_minutes, recovery.now_fun.())
@@ -392,9 +374,10 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     case result do
       :ok ->
         emit_initiated(producer, job.request_id, job.attempt_after_ts)
-        schedule({:stall, producer.id, job.request_id}, recovery.max_recovery_ms)
         producer
 
+      # The retry waits a full cooldown from the failure, however long the
+      # request took.
       {:error, reason} ->
         emit(producer, :failed, %{}, %{request_id: job.request_id, reason: reason, retry_in_ms: recovery.min_interval_ms})
 
@@ -403,9 +386,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
             "retrying in #{recovery.min_interval_ms}ms"
         )
 
-        producer = mark_recovery_pending(producer)
-        schedule({:retry, producer.id, producer.recovery.job.generation}, recovery.min_interval_ms)
         producer
+        |> mark_recovery_pending()
+        |> put_in([Access.key!(:recovery), :last_issued_at], recovery.monotonic_fun.())
     end
   end
 
@@ -485,11 +468,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       Map.merge(%{producer_id: producer.id, product: producer.product}, metadata)
     )
   end
-
-  # Producer functions execute inside the ProducerMonitor process, so these
-  # messages return to that GenServer without introducing a process per
-  # producer.
-  defp schedule(message, timeout), do: Process.send_after(self(), message, timeout)
 
   defp mark_up(%__MODULE__{} = producer), do: %{producer | status: :up}
 

@@ -556,7 +556,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       {:ok, :accepted}
     end
 
-    m = start_monitor([recover_fun: recover_fun, min_interval_ms: 50], clock)
+    m = start_monitor([tick_ms: 5, recover_fun: recover_fun, min_interval_ms: 50], clock)
 
     # first recovery for this producer is never throttled
     ProducerMonitor.alive(m, 1, 1_000, true)
@@ -588,7 +588,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     # a generous interval so the synchronous re-triggers below cannot race the
     # deferred-reissue timer
-    m = start_monitor([recover_fun: recover_fun, min_interval_ms: 300], clock)
+    m = start_monitor([tick_ms: 5, recover_fun: recover_fun, min_interval_ms: 300], clock)
 
     ProducerMonitor.alive(m, 1, 1_000, true)
     rid1 = assert_recovery_triggered()
@@ -615,7 +615,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   test "recovery cooldown is unaffected by a backward wall-clock adjustment", %{clock: clock} do
-    m = start_monitor([min_interval_ms: 50], clock)
+    m = start_monitor([tick_ms: 5, min_interval_ms: 50], clock)
 
     ProducerMonitor.alive(m, 1, 1_000, true)
     first_request_id = assert_recovery_triggered()
@@ -780,7 +780,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       if n == 0, do: {:error, :boom}, else: {:ok, :accepted}
     end
 
-    m = start_monitor([recover_fun: flaky, min_interval_ms: 10], clock)
+    m = start_monitor([tick_ms: 5, recover_fun: flaky, min_interval_ms: 10], clock)
     ProducerMonitor.alive(m, 1, 1_000, true)
 
     assert_receive {:recover_called, "pre", _}, 200
@@ -803,7 +803,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       end
     end
 
-    m = start_monitor([recover_fun: throttled, min_interval_ms: 10], clock)
+    m = start_monitor([tick_ms: 5, recover_fun: throttled, min_interval_ms: 10], clock)
     ProducerMonitor.alive(m, 1, 1_000, true)
 
     assert_receive {:recover_called, "pre", first}, 200
@@ -902,7 +902,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       end
     end
 
-    m = start_monitor([recover_fun: flaky, min_interval_ms: 10, now_fun: fn -> @now end], clock)
+    m = start_monitor([tick_ms: 5, recover_fun: flaky, min_interval_ms: 10, now_fun: fn -> @now end], clock)
     ProducerMonitor.alive(m, 1, 1_000, true)
 
     assert_receive {:recover_called, "pre", first}, 200
@@ -924,7 +924,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       {:ok, %UOF.Schemas.Common.Response{response_code: response_code, message: "max requests exceeded"}}
     end
 
-    m = start_monitor([recover_fun: throttled, min_interval_ms: 10], clock)
+    m = start_monitor([tick_ms: 5, recover_fun: throttled, min_interval_ms: 10], clock)
     ProducerMonitor.alive(m, 1, 1_000, true)
 
     # rejected request must not count as in-flight: no snapshot_complete is
@@ -973,7 +973,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
 
     test "a stalled request is reported before it is reissued", %{clock: clock} do
-      m = start_monitor([max_recovery_ms: 20], clock)
+      m = start_monitor([tick_ms: 5, max_recovery_ms: 20], clock)
 
       ProducerMonitor.alive(m, 1, 1_000, true)
       rid = assert_recovery_triggered()
@@ -1009,7 +1009,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   test "stall guard reissues with the original :after timestamp", %{clock: clock} do
     put_checkpoint(1, @now - 60_000)
-    m = start_monitor([now_fun: fn -> @now end, max_recovery_ms: 20], clock)
+    m = start_monitor([tick_ms: 5, now_fun: fn -> @now end, max_recovery_ms: 20], clock)
     ProducerMonitor.alive(m, 1, 1_000, true)
 
     assert_receive {:recover_called, "pre", first}
@@ -1092,7 +1092,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
 
     test "a reissued request covers an earlier interruption", %{clock: clock} do
-      m = start_monitor([now_fun: fn -> @now end, max_recovery_ms: 20], clock)
+      m = start_monitor([tick_ms: 5, now_fun: fn -> @now end, max_recovery_ms: 20], clock)
 
       ProducerMonitor.alive(m, 1, 1_000, true)
       first = assert_recovery_triggered()
@@ -1671,7 +1671,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_recovery_triggered()
   end
 
-  test "a retry timer from before demotion waits for the session after promotion", %{clock: clock} do
+  test "a recovery due before demotion waits for the session after promotion", %{clock: clock} do
     monotonic = start_supervised!(%{id: :monotonic, start: {Agent, :start_link, [fn -> 0 end]}})
 
     m =
@@ -1684,18 +1684,17 @@ defmodule UOF.SDK.ProducerMonitorTest do
     report_active_state(m, :active)
     ProducerMonitor.observe_consumer_tag(m, "s1")
 
-    # A manual recovery within the cooldown is deferred to a retry timer.
+    # A manual recovery within the cooldown stays pending.
     assert :ok = ProducerMonitor.recover(m, 1, [])
     sync(m)
     refute_received {:recover_called, _product, _opts}
+
     report_active_state(m, :passive)
     report_active_state(m, :active)
-    %{recovery: %{job: %{generation: generation}}} = :sys.get_state(m).producers[1]
 
-    # Promotion closed the session gate; the timer must not issue before it reopens.
+    # The cooldown has passed, but promotion closed the session gate.
     Agent.update(monotonic, fn _ -> 60_000 end)
-    send(m, {:retry, 1, generation})
-    sync(m)
+    tick(m)
     refute_received {:recover_called, _product, _opts}
 
     ProducerMonitor.observe_consumer_tag(m, "s1")
@@ -1966,21 +1965,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_recovery_triggered()
     sync(m)
     assert stored_snapshot().consumer_tag == "s2"
-  end
-
-  test "a stale retry timer does not issue recovery for a healthy producer", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    send(m, {:retry, 1, nil})
-    sync(m)
-
-    refute_receive {:recover_called, _product, _opts}
-    assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
   end
 
   test "a nil alive timestamp does not clobber the checkpoint", %{clock: clock} do

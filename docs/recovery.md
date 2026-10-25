@@ -172,7 +172,7 @@ deadlines: checks run on the monitor's tick.
 
 `UOF.SDK.recover/2` asks the monitor to recover a producer. It follows exactly the same path
 as an automatic recovery: persisted intent, the cooldown, the `:recovering` status, completion
-by `snapshot_complete`, interruption handling, and the stall timer.
+by `snapshot_complete`, interruption handling, and the stall check.
 
 ```elixir
 UOF.SDK.recover(1)

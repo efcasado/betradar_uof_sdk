@@ -1735,6 +1735,32 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{status: :up}}
   end
 
+  test "promotion upgrades a parked incremental job to another owner's pending full recovery", %{clock: clock} do
+    m = start_up_with_checkpoint(clock)
+
+    assert :ok = ProducerMonitor.recover(m, 1, [])
+    assert_receive {:recover_called, "pre", old_request}
+    assert old_request[:after] == @now - 120_000
+    report_active_state(m, :passive)
+
+    # Another owner completed its work and requested a manual full recovery.
+    update_stored_progress(1, &%{&1 | synchronized: false, full_recovery_pending: true})
+
+    report_active_state(m, :active)
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    assert_receive {:recover_called, "pre", replacement}
+    refute Keyword.has_key?(replacement, :after)
+    assert replacement[:request_id] != old_request[:request_id]
+
+    ProducerMonitor.snapshot_complete(m, 1, old_request[:request_id])
+    sync(m)
+    assert Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+
+    ProducerMonitor.snapshot_complete(m, 1, replacement[:request_id])
+    assert_receive {:status, %ProducerStatus{status: :up}}
+    refute Snapshot.progress(stored_snapshot(), 1).full_recovery_pending
+  end
+
   test "a retry timer firing while passive waits for promotion", %{clock: clock} do
     test_pid = self()
     attempts = start_supervised!(%{id: :ownership_retry_attempts, start: {Agent, :start_link, [fn -> 0 end]}})

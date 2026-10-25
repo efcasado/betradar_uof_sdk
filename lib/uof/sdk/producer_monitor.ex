@@ -801,8 +801,9 @@ defmodule UOF.SDK.ProducerMonitor do
 
   # The stored snapshot is the subscription's state, possibly written by the
   # previous owner while this instance was passive. Producers without a
-  # recovery job are restored from it as on a restart; this instance keeps the
-  # descriptions it loaded itself.
+  # recovery job are restored from it as on a restart. A retained job must
+  # honor a full recovery requested by another owner while this instance was
+  # passive; this instance keeps the descriptions it loaded itself.
   defp reload_snapshot(state) do
     snapshot = %{load_snapshot(state.monitor_store) | descriptions: state.snapshot.descriptions}
 
@@ -811,7 +812,11 @@ defmodule UOF.SDK.ProducerMonitor do
       %{state | snapshot: snapshot, session: Session.new(snapshot.consumer_tag)},
       fn {_id, producer}, state ->
         if Producer.recovering?(producer) do
-          state
+          if Snapshot.progress(snapshot, producer.id).full_recovery_pending do
+            put_producer(state, Producer.repeat_recovery(producer, nil))
+          else
+            state
+          end
         else
           restored = restore_producer(%{producer | status: :down, last_alive_at: nil, resuming_since: nil}, snapshot)
           state = put_producer(state, restored)

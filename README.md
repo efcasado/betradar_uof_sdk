@@ -1,13 +1,15 @@
 # Betradar UOF SDK
 
 > [!IMPORTANT]
-> This is an **unofficial Elixir SDK** for Betradar's Unified Odds Feed (UOF).
+> This is an **opinionated, unofficial Elixir SDK** for Betradar's
+> [Unified Odds Feed](https://docs.betradar.com/) (UOF). It
+> [consumes the feed through Pulsar](docs/architecture.md#why-a-pulsar-topic)
+> instead of directly over AMQP, making restarts and scale-out easier while
+> reducing recovery requests. It requires Pulsar and a RabbitMQ source connector.
 > Betradar offers official Java and .NET SDKs at <https://sdk.sportradar.com>.
 
-An Elixir SDK for Betradar's [Unified Odds Feed](https://docs.betradar.com/)
-(UOF). It consumes the feed from an Apache Pulsar topic, decodes XML messages into
-structs, sends those messages to a handler you implement, and keeps each producer in
-sync with automatic recovery.
+The SDK decodes XML messages into structs, sends them to a handler you
+implement, and keeps each producer in sync with automatic recovery.
 
 The SDK is built on [Broadway](https://hexdocs.pm/broadway) and
 [`off_broadway_pulsar`](https://hex.pm/packages/off_broadway_pulsar), and depends on
@@ -30,24 +32,6 @@ Your application handles:
 - Idempotency for replayed or duplicated messages.
 - [Persistent checkpoint storage](docs/deployment.md#monitor-store) in
   production.
-
-## Why Pulsar
-
-The official SDKs consume Betradar's AMQP feed directly. This SDK reads it from a Pulsar
-topic instead, filled by a RabbitMQ source connector that holds the Betradar session:
-
-- **Restarts and deploys without recoveries.** The topic keeps the backlog while SDK
-  instances restart, so an unchanged upstream session resumes where it left off instead of
-  requesting a recovery. Betradar's AMQP queues are deleted on disconnect, so a direct
-  consumer recovers every producer after every restart.
-- **Horizontal scaling.** Instances sharing a subscription divide the content by sport
-  event, keeping each event's messages in order. Direct AMQP consumers each receive the
-  whole feed.
-- **Fewer recovery requests.** Recoveries happen only when the feed actually had a gap, which
-  keeps clear of Betradar's rate limits.
-
-The cost is operating Pulsar and the connector. The
-[architecture guide](docs/architecture.md#why-a-pulsar-topic) compares both approaches.
 
 ## Guides
 

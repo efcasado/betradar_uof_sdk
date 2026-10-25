@@ -1466,10 +1466,9 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_recovery_triggered()
   end
 
-  test "passive suppresses alive-gap recovery; promotion recovers from checkpoint", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.alive(m, 1, 1_000, true)
+  # Brings producer 1 up in session "s1" with checkpoint 2_000, then demotes.
+  defp up_then_passive(m) do
+    ProducerMonitor.observe_consumer_tag(m, "s1")
     rid = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %ProducerStatus{status: :up}}
@@ -1479,21 +1478,120 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert checkpoint(1) == {:ok, 2_000}
 
     report_active_state(m, :passive)
+    flush_statuses()
+  end
+
+  test "passive suppresses alive-gap recovery; promotion resumes in an unchanged session", %{clock: clock} do
+    m = start_monitor(clock)
+    up_then_passive(m)
+
     set_clock(clock, 1_000 + @inactivity + 1)
     tick(m)
-
     refute_receive {:recover_called, _product, _opts}
     assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
 
+    # Promotion restores the producer from the stored snapshot, as a restart does.
     report_active_state(m, :active)
+    assert_receive {:status, %ProducerStatus{status: :resuming}}
+
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    ProducerMonitor.alive(m, 1, 3_000, true)
     tick(m)
 
-    assert_receive {:status, %ProducerStatus{status: :down}}
+    assert_receive {:status, %ProducerStatus{status: :up}}
+    refute_received {:recover_called, _product, _opts}
+  end
+
+  test "a promoted instance resumes from the snapshot the previous owner wrote", %{clock: clock} do
+    # This instance starts passive with nothing stored, as a newly deployed one does.
+    m = start_monitor([ownership: :passive], clock)
+    assert {:ok, %ProducerStatus{status: :down}} = ProducerMonitor.producer(m, 1)
+
+    # Meanwhile the active instance, sharing the store key, keeps the snapshot current.
+    save_state(%{1 => 5_000}, [1], "s1")
+
+    report_active_state(m, :active)
+    assert_receive {:status, %ProducerStatus{status: :resuming}}
+
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    ProducerMonitor.alive(m, 1, 6_000, true)
+    tick(m)
+
+    assert_receive {:status, %ProducerStatus{status: :up}}
+    refute_received {:recover_called, _product, _opts}
+  end
+
+  # An unsubscribed alive acknowledged by the previous owner while it was being
+  # demoted never reaches this instance, and the shared snapshot still says
+  # synchronized. Betradar repeats subscribed=0 until a recovery is requested.
+  test "after promotion, the next unsubscribed alive recovers despite a synchronized snapshot", %{clock: clock} do
+    save_state(%{1 => 5_000}, [1], "s1")
+    m = start_monitor([ownership: :passive], clock)
+
+    report_active_state(m, :active)
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    ProducerMonitor.alive(m, 1, 6_000, false)
+
+    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 5_000
+    refute_received {:status, %ProducerStatus{status: :up}}
+    refute resumable?(1)
+  end
+
+  test "a passive instance does not write the snapshot", %{clock: clock} do
+    m = start_monitor([ownership: :passive, monitor_store: {RecordingStore, pid: self()}], clock)
+
+    # Neither startup descriptions nor recovery intent are written while passive.
+    ProducerMonitor.alive(m, 1, 1_000, false)
+    sync(m)
+    refute_received {:saved, _snapshot}
+
+    # Once active, the first change is written with the descriptions it loaded.
+    report_active_state(m, :active)
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    assert_receive {:saved, %Snapshot{consumer_tag: "s1", descriptions: [%{id: 1}]}}
+    assert_recovery_triggered()
+  end
+
+  test "a retry timer from before demotion waits for the session after promotion", %{clock: clock} do
+    monotonic = start_supervised!(%{id: :monotonic, start: {Agent, :start_link, [fn -> 0 end]}})
+
+    m =
+      start_monitor(
+        [min_interval_ms: 60_000, monotonic_fun: fn -> Agent.get(monotonic, & &1) end],
+        clock
+      )
+
+    up_then_passive(m)
+    report_active_state(m, :active)
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+
+    # A manual recovery within the cooldown is deferred to a retry timer.
+    assert :ok = ProducerMonitor.recover(m, 1, [])
+    sync(m)
+    refute_received {:recover_called, _product, _opts}
+    report_active_state(m, :passive)
+    report_active_state(m, :active)
+    %{recovery: %{job: %{generation: generation}}} = :sys.get_state(m).producers[1]
+
+    # Promotion closed the session gate; the timer must not issue before it reopens.
+    Agent.update(monotonic, fn _ -> 60_000 end)
+    send(m, {:retry, 1, generation})
+    sync(m)
     refute_received {:recover_called, _product, _opts}
 
-    flush_statuses()
-    ProducerMonitor.alive(m, 1, 3_000, true)
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    assert_recovery_triggered()
+  end
+
+  test "promotion recovers from the stored checkpoint when the session changed", %{clock: clock} do
+    m = start_monitor(clock)
+    up_then_passive(m)
+
+    report_active_state(m, :active)
+    ProducerMonitor.observe_consumer_tag(m, "s2")
+
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 2_000
   end
@@ -1574,9 +1672,12 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute_receive {:recover_called, _product, _opts}
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
-    refute resumable?(1)
+    # A passive instance does not write the shared snapshot.
+    assert resumable?(1)
 
+    # Promotion makes the recorded intent durable before any request.
     report_active_state(m, :active)
+    refute resumable?(1)
     refute_received {:recover_called, _, _}
 
     ProducerMonitor.observe_consumer_tag(m, "ctag-sys")

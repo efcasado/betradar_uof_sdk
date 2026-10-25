@@ -127,10 +127,12 @@ see [monitor store](deployment.md#monitor-store).
 
 ## Control-plane ownership
 
-Only the instance that owns the Failover system subscription issues recovery requests. The
-others process their share of content and keep their producers as they are. When ownership
-moves, in-flight recoveries on the demoted instance are parked and the promoted instance
-starts from its own snapshot. See [scaling and rolling deploys](deployment.md#scaling-and-rolling-deploys).
+Only the instance that owns the Failover system subscription issues recovery requests and
+writes the snapshot. The others process their share of content. When ownership moves,
+in-flight recoveries on the demoted instance are parked, and the promoted instance reloads the
+snapshot and restores producers from it as on a [restart](#restarts): in an unchanged upstream
+session it resumes without recovery. This needs a store shared by the instances; see
+[monitor store](deployment.md#monitor-store).
 
 ## Time controls
 

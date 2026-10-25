@@ -5,11 +5,11 @@ defmodule UOF.SDK.ProducerMonitor.Store do
   The monitor owns the snapshot's contents and encoding
   (`UOF.SDK.ProducerMonitor.Snapshot`); a store only keeps the latest binary.
   Configure a store as `module` or `{module, opts}`; `opts` is passed to every
-  callback, for example to select a backend key.
+  callback.
 
-  Each stored snapshot has exactly one writer: its `UOF.SDK.ProducerMonitor`.
-  Monitors sharing a backend, including SDK instances on one Pulsar
-  subscription, must use distinct keys that stay stable across restarts.
+  A store keeps one snapshot. All SDK instances of a deployment use the same
+  store and therefore share it: only the instance that owns the system
+  subscription writes it, and a promoted instance reloads it.
 
   Let backend failures raise or exit. Returning `nil` for a failed read, or
   `:ok` for a failed write, would give the monitor an incorrect recovery

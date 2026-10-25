@@ -29,7 +29,7 @@ producers synchronized.
 - [ ] The SDK's subscriptions created before the first start, or topic retention.
 - [ ] Dead-letter topics that can be created automatically, or created in advance.
 - [ ] One `node_id` per base subscription, shared by its instances.
-- [ ] A persistent monitor store, with one stable key per instance.
+- [ ] A persistent monitor store that all instances reach.
 - [ ] `:uof_api` configured for the same Betradar environment as the connector.
 
 ## Source connector
@@ -202,13 +202,18 @@ checkpoint and whether it is synchronized. With it, a restarted instance whose u
 session has not changed resumes from the topic backlog without recovery, and otherwise
 recovers incrementally instead of requesting a full snapshot.
 
-The default ETS store does not survive a VM restart. In production, implement a persistent
-store; the [architecture guide](architecture.md#implementing-a-store) describes the contract
-and includes a PostgreSQL example. Each instance needs its own key, stable across restarts,
-such as a StatefulSet pod name:
+The snapshot belongs to the subscription, not to an instance: the system subscription's
+position is shared, so its feed continuity is too. All instances use the same store, which
+keeps that one snapshot, and only the active instance writes it. When ownership moves, the
+promoted instance reloads the snapshot and carries on where the previous owner left off.
+
+The default ETS store is local to a VM and does not survive a VM restart. In production,
+implement a persistent store that all instances reach; the
+[architecture guide](architecture.md#implementing-a-store) describes the contract and includes
+a PostgreSQL example:
 
 ```elixir
-config :uof_sdk, monitor_store: {MyApp.MonitorStore, repo: MyApp.Repo, key: "uof-sdk-0"}
+config :uof_sdk, monitor_store: {MyApp.MonitorStore, repo: MyApp.Repo}
 ```
 
 ## Scaling and rolling deploys
@@ -217,11 +222,16 @@ Instances with the same topic, base subscription, and `node_id` share the work: 
 divides content by sport event, and Failover makes one instance the control plane. Start one
 SDK instance per VM.
 
-Each instance keeps its own snapshot. When the active instance stops, the broker promotes
-another one, which resumes from its own snapshot if it has one for the current upstream
-session, and otherwise recovers; without a checkpoint that is a full recovery. A rolling
-deploy that restarts the active instance can therefore trigger recoveries, which count
+When the active instance stops, the broker promotes another one. With a shared
+[monitor store](#monitor-store), the promoted instance reloads the snapshot and, if the
+upstream session has not changed, resumes without recovery, so a rolling deploy does not cost
+recoveries. With the ETS store, which is local to each VM, it starts from its own snapshot,
+which may be stale or missing, and recovers; without a checkpoint that is a full recovery, counting
 against Betradar's [rate limits](recovery.md#rate-limits).
+
+Ownership reports are not fencing tokens. While ownership moves, both instances can briefly
+act as the owner and write the snapshot. The new owner's in-memory state is unaffected; a
+stale write matters only if the new owner also crashes before its next write.
 
 ## Verifying a deployment
 

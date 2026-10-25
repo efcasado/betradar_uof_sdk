@@ -124,8 +124,9 @@ The supported topic has a single partition. Failover ownership is assigned per p
 the system subscription has one active owner.
 
 The monitor starts passive and waits for the broker's ownership report. The active owner runs
-periodic health checks and issues recovery requests. Passive instances continue their content
-processing. Demotion parks in-flight recoveries; promotion permits pending work to resume.
+periodic health checks, issues recovery requests, and writes the snapshot. Passive instances
+continue their content processing. Demotion parks in-flight recoveries; promotion reloads the
+snapshot, restores producers from it as a restart does, and permits pending work to resume.
 Ownership reports are coordination signals, not fencing tokens: brief overlap during failover
 can issue duplicate recovery requests, which are harmless beyond quota.
 
@@ -296,7 +297,7 @@ A store implements `load(opts)` and `save(snapshot, opts)`, and optionally `chil
 Configure it as a module or `{module, opts}`; `opts` is passed to every callback:
 
 ```elixir
-config :uof_sdk, monitor_store: {MyApp.MonitorStore, repo: MyApp.Repo, key: "uof-node-a"}
+config :uof_sdk, monitor_store: {MyApp.MonitorStore, repo: MyApp.Repo}
 ```
 
 `save/2` must replace the snapshot atomically and return `:ok` only once the write is durable.
@@ -306,16 +307,18 @@ write. Callbacks run in the monitor, so a slow backend delays health checks and
 and a backend that stays unavailable eventually stops `UOF.SDK` through supervisor restart
 limits.
 
-Each snapshot has exactly one writer. Monitors sharing a backend, including SDK instances on
-one subscription, need distinct keys that are stable across restarts, such as a StatefulSet
-pod name. A key that changes on restart never resumes.
+A store keeps one snapshot. All SDK instances of a deployment use the same store and share
+it; only the instance that owns the system subscription writes it, and a passive instance's
+copy is stale and changes only in memory until promotion reloads the stored one. Two
+deployments sharing a database need separate storage, for example a table each through the
+store's options.
 
 For example, a PostgreSQL store using Ecto:
 
 ```elixir
 # migration
-create table(:uof_sdk_monitor_snapshots, primary_key: false) do
-  add :key, :string, primary_key: true
+create table(:uof_sdk_monitor_snapshot, primary_key: false) do
+  add :name, :string, primary_key: true
   add :snapshot, :binary, null: false
 end
 ```
@@ -326,22 +329,24 @@ defmodule MyApp.MonitorStore do
 
   import Ecto.Query
 
-  @table "uof_sdk_monitor_snapshots"
+  @table "uof_sdk_monitor_snapshot"
+  # The store keeps one snapshot, in a single row.
+  @name "snapshot"
 
   @impl true
   def load(opts) do
-    {repo, key} = {Keyword.fetch!(opts, :repo), Keyword.fetch!(opts, :key)}
-    repo.one(from(s in @table, where: s.key == ^key, select: s.snapshot), timeout: 2_000)
+    repo = Keyword.fetch!(opts, :repo)
+    repo.one(from(s in @table, where: s.name == @name, select: s.snapshot), timeout: 2_000)
   end
 
   @impl true
   def save(snapshot, opts) do
-    {repo, key} = {Keyword.fetch!(opts, :repo), Keyword.fetch!(opts, :key)}
+    repo = Keyword.fetch!(opts, :repo)
 
     {1, _} =
-      repo.insert_all(@table, [%{key: key, snapshot: snapshot}],
+      repo.insert_all(@table, [%{name: @name, snapshot: snapshot}],
         on_conflict: {:replace, [:snapshot]},
-        conflict_target: :key,
+        conflict_target: :name,
         timeout: 2_000
       )
 
@@ -354,7 +359,7 @@ Start the repo before the SDK. A store that owns a process implements `child_spe
 starts `{module, opts}` as its first child, and a store-process restart also restarts the
 monitor and consumers through `:rest_for_one`.
 
-Test a persistent store for an empty load, replacement, key isolation, and visible failures.
+Test a persistent store for an empty load, replacement, and visible failures.
 The [ETS store tests](../test/uof/sdk/producer_monitor/store/ets_test.exs) show the contract.
 
 ## Observability
@@ -428,8 +433,9 @@ Changes must preserve these rules; each links to the section that explains it.
    from stale synchronized state. See [snapshot contents](#snapshot-contents).
 5. **Checkpoints only move forward**, so an out-of-order heartbeat cannot move one back and
    cause needless replays and writes. See [snapshot contents](#snapshot-contents).
-6. **Monitor state is one snapshot, replaced atomically**, and an unreadable snapshot fails
-   startup rather than discarding checkpoints. See [persistence](#persistence).
+6. **Monitor state is one snapshot per subscription, replaced atomically and written only by
+   the active owner**, and an unreadable snapshot fails startup rather than discarding
+   checkpoints. A passive instance's copy is stale. See [persistence](#persistence).
 7. **A recovery completes only on a `snapshot_complete` matching its active request ID.**
    Completions for older, superseded, or foreign requests are ignored. See
    [how a recovery runs](recovery.md#how-a-recovery-runs).

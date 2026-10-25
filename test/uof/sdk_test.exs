@@ -5,6 +5,7 @@ defmodule UOF.SDKTest do
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.LogHandler
+  alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerMonitor.Store
   alias UOF.SDK.SystemPipeline
 
@@ -60,6 +61,22 @@ defmodule UOF.SDKTest do
     assert content_producer_opts[:connection] == system_producer_opts[:connection]
   end
 
+  test "child_specs connects the content pipeline to the monitor only when the transport monitors it" do
+    assert [{SystemPipeline, amqp_system}, {ContentPipeline, amqp_content}] =
+             UOF.SDK.child_specs(Config.load(handler: LogHandler))
+
+    assert amqp_system[:monitor] == ProducerMonitor
+    assert amqp_content[:monitor] == ProducerMonitor
+
+    pulsar = {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
+
+    assert [{SystemPipeline, pulsar_system}, {ContentPipeline, pulsar_content}] =
+             UOF.SDK.child_specs(Config.load(handler: LogHandler, transport: pulsar))
+
+    assert pulsar_system[:monitor] == ProducerMonitor
+    assert pulsar_content[:monitor] == nil
+  end
+
   test "child_specs passes node_id to both pipelines" do
     config = Config.load(handler: LogHandler, node_id: 7)
 
@@ -102,7 +119,7 @@ defmodule UOF.SDKTest do
 
     assert Enum.map(children, & &1.id) == [
              UOF.SDK.ProducerMonitor.Store.ETS,
-             UOF.SDK.ProducerMonitor,
+             ProducerMonitor,
              Connection,
              SystemPipeline,
              ContentPipeline

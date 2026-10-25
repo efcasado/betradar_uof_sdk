@@ -38,8 +38,24 @@ defmodule UOF.SDK.ProducerMonitor do
   `:up` therefore means the feed confirmed synchronization (`snapshot_complete`
   or continuing heartbeats) and content processing is within
   `max_processing_delay_ms`. A recovery replay still being processed shows
-  as `:delayed` once it lags beyond that threshold. With several instances on
-  one Pulsar subscription, each monitor sees only its own share of content.
+  as `:delayed` once it lags beyond that threshold.
+
+  ## Monitored pipelines
+
+  `:pipelines` names the pipelines whose observations decide feed continuity.
+  The transport chooses them:
+
+    * `[:system, :content]` (AMQP): content still queued when its channel drops
+      is lost, so the content consume session and content processing lag are
+      monitored as above.
+    * `[:system]` (Pulsar): both subscriptions read one durable topic, and the
+      system subscription receives every message on it. Content not yet
+      processed stays in the content subscription's backlog, so continuity
+      depends only on the upstream session the system pipeline observes.
+      Content lag is not tracked: `:up` means the topic carries a continuous
+      feed, never `:delayed`, and a resuming producer does not wait for
+      content. With several instances on one subscription, each would see
+      only its own share of content anyway.
 
   ## Recovery orchestration
 
@@ -47,7 +63,9 @@ defmodule UOF.SDK.ProducerMonitor do
   `alive` heartbeats advance the checkpoint only after the producer is already
   up. Incremental recovery subtracts `recovery_overlap_ms` from the stored
   checkpoint, intentionally replaying a bounded window to cover concurrent
-  processing and distributed-consumer skew.
+  processing and distributed-consumer skew. When content is monitored, a
+  `:delayed` producer stops advancing the checkpoint, and the overlap must
+  exceed the processing threshold.
 
   A delivery gap marks the producer `:recovering`. The request is issued after
   the per-producer cooldown with a fresh `request_id` and a checkpoint-derived
@@ -74,18 +92,20 @@ defmodule UOF.SDK.ProducerMonitor do
   ## Restart resume
 
   The monitor saves its state as one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`):
-  the committed consumer tags of both pipelines and, per producer, a checkpoint and
+  the committed consumer tags of the monitored pipelines and, per producer, a checkpoint and
   whether it is synchronized with those sessions. A producer may resume only
   when it is synchronized and has a checkpoint. At startup that state is
   restored:
 
     * A resumable producer with a checkpoint starts as `:resuming`. It becomes
-      `:up` after processing catches up, an `alive` is heard, and both pipeline
-      connections are observed in the current process.
+      `:up` after an `alive` is heard, the monitored pipeline connections are
+      observed in the current process, and, when content is monitored,
+      processing catches up.
     * Persisted consumer tags are comparison baselines, not evidence that
-      the current pipelines are ready. Recovery HTTP waits until both pipelines
-      are observed. If that does not happen within one alive-inactivity
-      interval, the monitor crashes so supervision restarts both pipelines.
+      the current pipelines are ready. Recovery HTTP waits until the monitored
+      pipelines are observed. If that does not happen within one
+      alive-inactivity interval, the monitor crashes so supervision restarts
+      the pipelines.
       Once ready, a changed consumer tag is saved together with every producer marked
       unsynchronized, and recovery starts.
     * A resumable producer gets one alive-inactivity interval to provide a
@@ -106,8 +126,8 @@ defmodule UOF.SDK.ProducerMonitor do
   cannot observe the `snapshot_complete` for a request it issued, so issuing
   from standby burns recovery quota in a stall-reissue loop. An explicit
   recovery-required alive racing demotion is nevertheless persisted and
-  remains pending for promotion. Content progress observations continue while
-  passive.
+  remains pending for promotion. The content pipeline does not report to the
+  monitor.
 
   Demotion drops in-flight recovery correlation (the completion will go to the
   new owner); affected producers stay `:recovering` and are reissued on
@@ -153,7 +173,7 @@ defmodule UOF.SDK.ProducerMonitor do
           monitor_store: {module(), keyword()},
           readiness_deadline_at: integer() | nil,
           inactivity_ms: non_neg_integer(),
-          max_processing_delay_ms: non_neg_integer(),
+          max_processing_delay_ms: non_neg_integer() | nil,
           tick_ms: pos_integer(),
           recovery_overlap_ms: non_neg_integer(),
           in_flight: %{optional(pid()) => {integer(), integer()} | nil},
@@ -277,10 +297,10 @@ defmodule UOF.SDK.ProducerMonitor do
   @doc """
   Observe a pipeline connection as `{namespace, consumer_tag}`.
 
-  Startup recovery waits until both the system and content connection namespaces
-  have been observed, so replay starts only after both consumers are ready. After
-  startup, a consumer tag change in any namespace recovers every producer to close the
-  message-gap a reconnect leaves behind.
+  Startup recovery waits until every monitored namespace has been observed, so
+  replay starts only after those consumers are ready. After startup, a consumer
+  tag change in any namespace recovers every producer to close the message-gap a
+  reconnect leaves behind.
   """
   def observe_connection(server \\ __MODULE__, connection) do
     GenServer.cast(server, {:observe_connection, connection})
@@ -293,6 +313,7 @@ defmodule UOF.SDK.ProducerMonitor do
     monitor_store = Keyword.get(opts, :monitor_store, {UOF.SDK.ProducerMonitor.Store.ETS, []})
     snapshot = load_snapshot(monitor_store)
     {descriptions, source} = load_descriptions(opts, snapshot)
+    pipelines = Keyword.get(opts, :pipelines, [:system, :content])
 
     producers =
       Map.new(descriptions, fn description ->
@@ -303,14 +324,14 @@ defmodule UOF.SDK.ProducerMonitor do
     state = %__MODULE__{
       producers: producers,
       snapshot: snapshot,
-      connections: Connections.new(snapshot.consumer_tags),
+      connections: Connections.new(snapshot.consumer_tags, pipelines),
       ownership: Keyword.get(opts, :ownership, {:failover, :passive}),
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
       monitor_store: monitor_store,
       readiness_deadline_at: nil,
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
-      max_processing_delay_ms: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms),
+      max_processing_delay_ms: max_processing_delay_ms(opts, pipelines),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
       recovery_overlap_ms: Keyword.get(opts, :recovery_overlap_ms, @default_recovery_overlap_ms),
       producer_opts: opts,
@@ -479,8 +500,8 @@ defmodule UOF.SDK.ProducerMonitor do
         in_flight = oldest_in_flight(state)
         Enum.reduce(Map.values(state.producers), state, &check(&2, &1, now, Map.get(in_flight, &1.id)))
       else
-        # A passive instance sees no system alives and only a partial content
-        # view, so status transitions here would be noise; healing happens on
+        # A passive instance sees no system alives, so status transitions here
+        # would be noise; healing happens on
         # promotion when the checks resume against the then-stale timestamps.
         state
       end
@@ -657,8 +678,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   # Resuming safely requires both durable eligibility and a checkpoint. The
   # current-session heartbeat, connection, and content catch-up gates live in
-  # Producer.check/6. The checkpoint is not content evidence: catching up
-  # requires content processed in this session.
+  # Producer.check/6. The checkpoint is not content evidence: when content is
+  # monitored, catching up requires content processed in this session.
   defp restore_producer(producer, snapshot) do
     if Snapshot.resumable?(snapshot, producer.id), do: %{producer | status: :resuming}, else: producer
   end
@@ -1042,6 +1063,12 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp observe_message(state, id, gen_ts) do
     with_producer(state, id, fn p -> put_producer(state, Producer.observe_message(p, gen_ts)) end)
+  end
+
+  # Content lag is tracked only when the content pipeline is monitored; nil
+  # disables the processing checks in Producer.
+  defp max_processing_delay_ms(opts, pipelines) do
+    if :content in pipelines, do: Keyword.get(opts, :max_processing_delay_ms, @default_max_processing_delay_ms)
   end
 
   defp schedule_tick(state), do: Process.send_after(self(), :tick, state.tick_ms)

@@ -96,6 +96,13 @@ subscription, and `node_id`. Additional transport options are passed to
 `:conn_opts` configures the shared client. The SDK owns the two subscription types and the
 system consumer's ownership callback.
 
+The system subscription is the only control plane: it sees every message on the topic, so
+producer status, checkpoints, and recovery follow feed continuity on the topic rather than
+content processing. A producer is never `:delayed`, and `:up` does not mean the content
+subscription has caught up. A new content subscription starts at the earliest retained
+message, so a fresh deployment first processes the retained backlog. See
+[feed continuity](docs/architecture.md#feed-continuity).
+
 A message that fails to decode or process is not retried: about a second later it is
 diverted to a dead-letter topic named `<topic>-<subscription>-DLQ`, one for each of the
 `-content` and `-system` subscriptions. The broker must allow those topics to be created
@@ -210,10 +217,10 @@ loads producer descriptions and recovery uses the HTTP API.
 | `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | `module` or `{module, opts}` persisting restart state; see [implementing a store](docs/architecture.md#implementing-a-store) |
 | `:concurrency` | `10` | Number of content processors in each SDK instance |
 | `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
-| `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound |
+| `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound; not used by Pulsar |
 | `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
 | `:max_recovery_time` | `3600` | Wait for recovery completion before reissuing a stalled request |
-| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery; must exceed `:max_processing_delay_seconds` |
+| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery; with AMQP, must exceed `:max_processing_delay_seconds` |
 | `:producers` | `[]` | Fallback producer descriptions (`[id: 1, product: "liveodds", recovery_window_minutes: 4320]`), used only if the UOF API is unavailable at startup and no previous run stored any |
 
 Public durations are in seconds. Recovery throttling defaults follow the official SDK

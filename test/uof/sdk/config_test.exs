@@ -126,6 +126,29 @@ defmodule UOF.SDK.ConfigTest do
     end
   end
 
+  test "the Pulsar content subscription starts at the earliest retained message by default" do
+    pulsar = [host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"]
+    config = Config.load(handler: LogHandler, transport: {:pulsar, pulsar})
+
+    {Producer, content_opts} = config.content_producer
+    {Producer, system_opts} = config.system_producer
+    assert content_opts[:consumer_opts][:initial_position] == :earliest
+    refute Keyword.has_key?(system_opts[:consumer_opts], :initial_position)
+
+    overridden =
+      Config.load(handler: LogHandler, transport: {:pulsar, pulsar ++ [consumer_opts: [initial_position: :latest]]})
+
+    {Producer, content_opts} = overridden.content_producer
+    assert content_opts[:consumer_opts][:initial_position] == :latest
+  end
+
+  test "transports declare the pipelines the monitor observes" do
+    assert Config.load(handler: LogHandler).monitored_pipelines == [:system, :content]
+
+    pulsar = {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
+    assert Config.load(handler: LogHandler, transport: pulsar).monitored_pipelines == [:system]
+  end
+
   test "user consumer options override the Pulsar failure defaults" do
     config =
       Config.load(
@@ -268,6 +291,13 @@ defmodule UOF.SDK.ConfigTest do
     end
 
     assert Config.load(handler: LogHandler, recovery_overlap_seconds: 21).recovery_overlap_seconds == 21
+  end
+
+  test "does not bound the recovery overlap by the processing delay for Pulsar" do
+    pulsar = {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
+    config = Config.load(handler: LogHandler, transport: pulsar, recovery_overlap_seconds: 20)
+
+    assert config.recovery_overlap_seconds == 20
   end
 
   test "normalizes configured fallback producers" do

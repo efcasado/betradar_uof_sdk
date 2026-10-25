@@ -387,6 +387,13 @@ defmodule UOF.SDK.ProducerMonitor do
           Logger.info("UOF.SDK.ProducerMonitor: producer #{id} recovery #{request_id} complete")
           commit_producer_transition(state, producer)
 
+        # The producer stays :recovering and already requires recovery durably,
+        # so the repeat needs no new transition or write.
+        {:repeat, producer, resume_ts} ->
+          after_ts = resume_ts && clamp_to_window(resume_ts, producer, state.now_fun.())
+          producer = Producer.repeat_recovery(producer, after_ts)
+          state |> put_producer(producer) |> maybe_initiate(producer)
+
         :stale ->
           state
       end
@@ -519,6 +526,9 @@ defmodule UOF.SDK.ProducerMonitor do
 
       {:transition, producer} ->
         commit_producer_transition(state, producer)
+
+      {:interrupted, producer} ->
+        put_producer(state, producer)
 
       :unchanged ->
         state

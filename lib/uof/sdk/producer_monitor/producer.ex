@@ -33,6 +33,16 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   job and initiate it immediately. Failed requests, stalls, and ownership
   demotion all return a job to pending state, but their callers intentionally
   choose different reissue times.
+
+  ## Interrupted recoveries
+
+  An unsubscribed alive or a heartbeat gap while a request is in flight
+  interrupts the job: the producer may have lost messages that the running
+  replay does not cover. The job keeps waiting for its `snapshot_complete`,
+  which then repeats the recovery from the last subscribed alive seen before
+  the interruption instead of marking the producer `:up`, as the official SDKs
+  do. A job reissued from its original timestamp (stall, failure, demotion,
+  session change) covers any interruption, so reissuing clears it.
   """
 
   alias UOF.Schemas.Common.Response
@@ -40,7 +50,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   require Logger
 
   @default_min_interval_ms 30_000
-  @default_max_recovery_ms 60 * 60_000
+  @default_max_recovery_ms 10 * 60_000
   @max_request_id 1_000_000
 
   @type status :: :down | :up | :resuming
@@ -50,7 +60,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           request_id: integer() | nil,
           generation: reference(),
           awaiting_alive: boolean(),
-          task: reference() | nil
+          task: reference() | nil,
+          interrupted: boolean(),
+          resume_ts: integer() | nil
         }
 
   @type recovery_state :: %{
@@ -84,6 +96,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @type check_result ::
           :unchanged
           | {:transition, t()}
+          | {:interrupted, t()}
           | {:recovery_needed, t(), :alive_timeout}
 
   defstruct [
@@ -123,6 +136,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       awaiting_alive?(producer) ->
         {:alive_resumed, observed}
 
+      recovery_in_flight?(producer) ->
+        {:ok, observe_alive_in_flight(observed, gen_timestamp, subscribed?)}
+
       recovering?(producer) ->
         {:ok, observed}
 
@@ -144,6 +160,10 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @spec check(t(), integer(), non_neg_integer(), boolean()) :: check_result()
   def check(producer, now, inactivity_ms, session_ready?) do
     cond do
+      recovery_in_flight?(producer) and not producer.recovery.job.interrupted and
+          alive_violation?(producer, now, inactivity_ms) ->
+        {:interrupted, interrupt(producer, :alive_timeout)}
+
       recovering?(producer) ->
         :unchanged
 
@@ -161,7 +181,16 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @doc false
   @spec prepare_recovery(t(), integer() | nil, boolean()) :: t()
   def prepare_recovery(%__MODULE__{recovery: recovery} = producer, after_ts, awaiting_alive \\ false) do
-    job = %{after_ts: after_ts, request_id: nil, generation: make_ref(), awaiting_alive: awaiting_alive, task: nil}
+    job = %{
+      after_ts: after_ts,
+      request_id: nil,
+      generation: make_ref(),
+      awaiting_alive: awaiting_alive,
+      task: nil,
+      interrupted: false,
+      resume_ts: nil
+    }
+
     %{producer | recovery: %{recovery | job: job}}
   end
 
@@ -177,10 +206,17 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   # replacement may proceed directly through cooldown and HTTP issuance.
   @doc false
   @spec restart_recovery(t(), integer() | nil) :: t()
-  def restart_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
-    job = %{recovery.job | after_ts: after_ts, request_id: nil, generation: make_ref(), task: nil}
-    producer = %{producer | recovery: %{recovery | job: job}}
-    initiate_recovery(producer)
+  def restart_recovery(%__MODULE__{} = producer, after_ts) do
+    producer |> repeat_recovery(after_ts) |> initiate_recovery()
+  end
+
+  # Replaces the job with a pending one replaying from `after_ts`. The caller
+  # initiates it, subject to its own gates.
+  @doc false
+  @spec repeat_recovery(t(), integer() | nil) :: t()
+  def repeat_recovery(%__MODULE__{recovery: recovery} = producer, after_ts) do
+    job = %{recovery.job | after_ts: after_ts}
+    mark_recovery_pending(%{producer | recovery: %{recovery | job: job}})
   end
 
   # This transition intentionally performs no I/O: stalls reissue immediately,
@@ -188,12 +224,28 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   # promotion.
   @spec mark_recovery_pending(t()) :: t()
   defp mark_recovery_pending(%__MODULE__{recovery: recovery} = producer) do
-    job = %{recovery.job | request_id: nil, generation: make_ref(), task: nil}
+    job = %{recovery.job | request_id: nil, generation: make_ref(), task: nil, interrupted: false, resume_ts: nil}
     %{producer | recovery: %{recovery | job: job}}
   end
 
   @doc false
-  @spec complete_recovery(t(), integer(), integer()) :: {:ok, t()} | :stale
+  @spec complete_recovery(t(), integer(), integer()) :: {:ok, t()} | {:repeat, t(), integer() | nil} | :stale
+  def complete_recovery(
+        %__MODULE__{recovery: %{job: %{request_id: request_id, interrupted: true} = job}} = producer,
+        request_id,
+        now
+      )
+      when not is_nil(request_id) do
+    resume_ts = job.resume_ts || job.after_ts
+
+    Logger.info(
+      "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} completed after an interruption; " <>
+        "repeating from #{inspect(resume_ts)}"
+    )
+
+    {:repeat, %{producer | last_alive_at: now}, resume_ts}
+  end
+
   def complete_recovery(%__MODULE__{recovery: %{job: %{request_id: request_id}} = recovery} = producer, request_id, now)
       when not is_nil(request_id) do
     emit(producer, :completed, %{duration_ms: recovery.monotonic_fun.() - recovery.last_issued_at}, %{
@@ -220,6 +272,11 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @spec awaiting_alive?(t()) :: boolean()
   def awaiting_alive?(%__MODULE__{recovery: %{job: %{awaiting_alive: true}}}), do: true
   def awaiting_alive?(%__MODULE__{}), do: false
+
+  @doc false
+  @spec recovery_in_flight?(t()) :: boolean()
+  def recovery_in_flight?(%__MODULE__{recovery: %{job: %{request_id: request_id}}}) when not is_nil(request_id), do: true
+  def recovery_in_flight?(%__MODULE__{}), do: false
 
   @doc false
   @spec recovery_pending?(t()) :: boolean()
@@ -252,7 +309,11 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @spec handle_stall(t(), integer()) :: t()
   def handle_stall(%__MODULE__{recovery: %{job: %{request_id: request_id}}} = producer, request_id)
       when not is_nil(request_id) do
-    Logger.warning("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} stalled; reissuing")
+    Logger.warning(
+      "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} stalled: " <>
+        "no snapshot_complete within #{producer.recovery.max_recovery_ms}ms; reissuing"
+    )
+
     emit(producer, :stalled, %{}, %{request_id: request_id})
     producer |> mark_recovery_pending() |> issue_recovery()
   end
@@ -394,6 +455,28 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   defp schedule(message, timeout), do: Process.send_after(self(), message, timeout)
 
   defp mark_up(%__MODULE__{} = producer), do: %{producer | status: :up}
+
+  # Subscribed alives mark how far the feed is known to be continuous while the
+  # request runs. After an interruption they no longer prove that.
+  defp observe_alive_in_flight(%__MODULE__{recovery: %{job: %{interrupted: true}}} = producer, _gen_ts, _subscribed?),
+    do: producer
+
+  defp observe_alive_in_flight(%__MODULE__{} = producer, _gen_ts, false), do: interrupt(producer, :unsubscribed)
+
+  defp observe_alive_in_flight(%__MODULE__{} = producer, gen_ts, true) when is_integer(gen_ts),
+    do: put_in(producer.recovery.job.resume_ts, gen_ts)
+
+  defp observe_alive_in_flight(%__MODULE__{} = producer, nil, true), do: producer
+
+  defp interrupt(%__MODULE__{recovery: %{job: job}} = producer, reason) do
+    Logger.warning(
+      "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{job.request_id} interrupted (#{reason}); " <>
+        "repeating it once it completes"
+    )
+
+    emit(producer, :interrupted, %{}, %{request_id: job.request_id, reason: reason})
+    put_in(producer.recovery.job.interrupted, true)
+  end
 
   # A resuming producer that has not heard a heartbeat since this instance took
   # control gets one interval, measured from `resuming_since`.

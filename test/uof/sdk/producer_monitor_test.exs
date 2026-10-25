@@ -940,6 +940,108 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert second[:request_id] != first[:request_id]
   end
 
+  describe "interrupted recoveries" do
+    setup do
+      attach_telemetry([[:uof_sdk, :recovery, :interrupted], [:uof_sdk, :recovery, :completed]])
+    end
+
+    test "an unsubscribed alive repeats the recovery from the last subscribed alive", %{clock: clock} do
+      m = start_monitor(clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      rid1 = assert_recovery_triggered()
+      assert_receive {:status, %ProducerStatus{status: :recovering}}
+
+      ProducerMonitor.alive(m, 1, 2_000, true)
+      ProducerMonitor.alive(m, 1, 3_000, false)
+      # After the interruption, subscribed alives no longer prove continuity.
+      ProducerMonitor.alive(m, 1, 4_000, true)
+      sync(m)
+
+      assert_receive {:telemetry, [:uof_sdk, :recovery, :interrupted], _, %{request_id: ^rid1, reason: :unsubscribed}}
+
+      ProducerMonitor.snapshot_complete(m, 1, rid1)
+      assert_receive {:recover_called, "pre", opts}
+      assert opts[:after] == 2_000
+      refute_received {:status, _producer}
+      refute_received {:telemetry, [:uof_sdk, :recovery, :completed], _, _}
+      assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
+
+      ProducerMonitor.snapshot_complete(m, 1, opts[:request_id])
+      assert_receive {:status, %ProducerStatus{status: :up}}
+    end
+
+    test "a heartbeat gap repeats the recovery from its original timestamp", %{clock: clock} do
+      put_checkpoint(1, 500)
+      m = start_monitor(clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      assert_receive {:recover_called, "pre", first}
+      assert first[:after] == 500
+
+      set_clock(clock, 1_000 + @inactivity + 1)
+      tick(m)
+      tick(m)
+
+      assert_receive {:telemetry, [:uof_sdk, :recovery, :interrupted], _, %{reason: :alive_timeout}}
+      refute_received {:telemetry, [:uof_sdk, :recovery, :interrupted], _, _}
+      assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
+
+      ProducerMonitor.snapshot_complete(m, 1, first[:request_id])
+      assert_receive {:recover_called, "pre", second}
+      assert second[:after] == 500
+
+      ProducerMonitor.snapshot_complete(m, 1, second[:request_id])
+      assert_receive {:status, %ProducerStatus{status: :up}}
+    end
+
+    test "a repeated recovery is clamped to the recovery window", %{clock: clock} do
+      m = start_monitor([producers: [%Producer{id: 1, product: "pre", recovery_window_minutes: 60}]], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      rid = assert_recovery_triggered()
+      ProducerMonitor.alive(m, 1, 2_000, true)
+      ProducerMonitor.alive(m, 1, 3_000, false)
+
+      now = 3 * 60 * 60_000
+      set_clock(clock, now)
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+
+      assert_receive {:recover_called, "pre", opts}
+      assert opts[:after] == now - 60 * 60_000
+    end
+
+    test "a reissued request covers an earlier interruption", %{clock: clock} do
+      m = start_monitor([now_fun: fn -> @now end, max_recovery_ms: 20], clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      first = assert_recovery_triggered()
+      ProducerMonitor.alive(m, 1, 2_000, false)
+
+      # The stall reissues the request from its original timestamp.
+      assert_receive {:recover_called, "pre", second}, 500
+      assert second[:request_id] != first
+
+      ProducerMonitor.snapshot_complete(m, 1, second[:request_id])
+      assert_receive {:status, %ProducerStatus{status: :up}}
+    end
+
+    test "an unsubscribed alive before the request is issued does not interrupt it", %{clock: clock} do
+      save_state(%{}, [], "ctag-sys")
+      m = start_monitor(clock)
+
+      # Recovery waits for the session; the request is not in flight yet.
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      ProducerMonitor.alive(m, 1, 2_000, false)
+      ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
+      rid = assert_recovery_triggered()
+
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+      assert_receive {:status, %ProducerStatus{status: :up}}
+      refute_received {:telemetry, [:uof_sdk, :recovery, :interrupted], _, _}
+    end
+  end
+
   ## Restart resume -------------------------------------------------------------
 
   # Persist the state of a producer that was up, with a checkpoint and the

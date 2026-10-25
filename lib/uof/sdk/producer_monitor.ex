@@ -490,9 +490,12 @@ defmodule UOF.SDK.ProducerMonitor do
 
   # A timer that outlives a completed or superseded recovery no longer matches
   # the canonical job generation and must not issue.
+  # A retry skipped while the session is unconfirmed (after a restart or
+  # promotion) leaves its job pending; readiness then issues it through
+  # maybe_initiate/2.
   def handle_info({:retry, id, generation}, state) do
     state =
-      if owns_control?(state) do
+      if may_issue?(state) do
         with_producer(state, id, fn producer ->
           put_producer(state, Producer.handle_retry(producer, generation))
         end)
@@ -882,12 +885,10 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   defp maybe_initiate(state, producer) do
-    if owns_control?(state) and not Session.awaiting_readiness?(state.session) do
-      initiate(state, producer)
-    else
-      state
-    end
+    if may_issue?(state), do: initiate(state, producer), else: state
   end
+
+  defp may_issue?(state), do: owns_control?(state) and not Session.awaiting_readiness?(state.session)
 
   defp after_from_checkpoint(state, producer) do
     case Snapshot.progress(state.snapshot, producer.id).checkpoint do

@@ -1536,6 +1536,37 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_recovery_triggered()
   end
 
+  test "a retry timer from before demotion waits for the session after promotion", %{clock: clock} do
+    monotonic = start_supervised!(%{id: :monotonic, start: {Agent, :start_link, [fn -> 0 end]}})
+
+    m =
+      start_monitor(
+        [min_interval_ms: 60_000, monotonic_fun: fn -> Agent.get(monotonic, & &1) end],
+        clock
+      )
+
+    up_then_passive(m)
+    report_active_state(m, :active)
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+
+    # A manual recovery within the cooldown is deferred to a retry timer.
+    assert :ok = ProducerMonitor.recover(m, 1, [])
+    sync(m)
+    refute_received {:recover_called, _product, _opts}
+    report_active_state(m, :passive)
+    report_active_state(m, :active)
+    %{recovery: %{job: %{generation: generation}}} = :sys.get_state(m).producers[1]
+
+    # Promotion closed the session gate; the timer must not issue before it reopens.
+    Agent.update(monotonic, fn _ -> 60_000 end)
+    send(m, {:retry, 1, generation})
+    sync(m)
+    refute_received {:recover_called, _product, _opts}
+
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    assert_recovery_triggered()
+  end
+
   test "promotion recovers from the stored checkpoint when the session changed", %{clock: clock} do
     m = start_monitor(clock)
     up_then_passive(m)

@@ -1,4 +1,4 @@
-defmodule UOF.SDK.PulsarIntegrationTest do
+defmodule UOF.SDK.FeedIntegrationTest do
   use ExUnit.Case, async: false
 
   alias UOF.Schemas.Feed
@@ -7,6 +7,9 @@ defmodule UOF.SDK.PulsarIntegrationTest do
   alias UOF.SDK.SystemPipeline
   alias UOF.SDK.TestSupport
 
+  # End to end through the feed path the SDK depends on: messages published to
+  # RabbitMQ pass through the real source connector into Pulsar and reach the
+  # SDK's system and content pipelines.
   @moduletag :integration
   @pulsar_port System.get_env("PULSAR_BROKER_PORT", "16650")
   @rabbitmq_port "RABBITMQ_AMQP_PORT" |> System.get_env("15672") |> String.to_integer()

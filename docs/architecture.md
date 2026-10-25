@@ -375,8 +375,22 @@ Rejected or failed HTTP requests (an API error, an HTTP transport error, or a no
 response) are retried after the recovery interval. An exception raised while issuing the
 request is not treated as a rejection: it fails the monitor, and the persisted recovery
 intent makes the restarted monitor recover again. A stall timer reissues a request
-whose completion has not arrived, retaining its original recovery timestamp. Superseded retry
-messages are ignored using recovery-job generations.
+whose completion has not arrived within `max_recovery_time`, retaining its original recovery
+timestamp, and logs a warning. Superseded retry messages are ignored using recovery-job
+generations.
+
+An unsubscribed `alive`, or a heartbeat gap, while a request is in flight interrupts it: the
+producer may have lost messages that the running replay does not cover. The recovery keeps
+waiting for its `snapshot_complete`, which then repeats it from the last subscribed `alive`
+seen before the interruption, clamped to the recovery window, instead of marking the producer
+`:up`. Without such an alive it repeats from the original timestamp. This follows the
+official SDKs: Java marks the recovery interrupted and repeats it on completion
+([`RecoveryManagerImpl`](https://github.com/sportradar/UnifiedOddsSdkJava/blob/e677b9222bf59b770384379f62f789778ddc8053/sdk-core/src/main/java/com/sportradar/unifiedodds/sdk/internal/impl/recovery/RecoveryManagerImpl.java#L271)),
+as does .NET for unsubscribed alives
+([`ProducerRecoveryManager`](https://github.com/sportradar/UnifiedOddsSdkNetCore/blob/a6045c1d255c0b1510a0e70f0696b7e140645303/src/Sportradar.OddsFeed.SDK/API/Internal/Managers/ProducerRecoveryManager.cs)).
+A stalled, failed, demoted, or session-restarted request is reissued from its original
+timestamp, which covers any interruption, so reissuing clears it. An interrupted recovery
+that never completes is reissued by the stall timer.
 
 `snapshot_complete` marks the feed's completion of a recovery replay. Content callbacks run
 on their own processors, so this system observation is separate from application processing
@@ -442,7 +456,7 @@ cooldown uses monotonic time.
 | --- | --- | --- |
 | `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Records recovery on an observed heartbeat timeout and requests it once the producer's alives resume; also bounds session-readiness waiting |
 | `min_interval_between_recoveries` | Per-producer recovery-request cooldown and delay after a failed request | Defers requests or retries while recovery remains pending |
-| `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp |
+| `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp; the official SDKs allow 600–3600 s, and lower values risk aborting recoveries that are still replaying |
 
 These controls have distinct purposes: a stalled recovery is not a heartbeat failure, and
 a recovery cooldown does not cancel pending intent. Health checks and timer messages are handled by the
@@ -580,6 +594,7 @@ message diagnostics to investigate why progress has stopped.
 | `[:uof_sdk, :recovery, :completed]` | A matching `snapshot_complete`, with `duration_ms` since the completed request was issued |
 | `[:uof_sdk, :recovery, :failed]` | A rejected or failed recovery request, with its reason and `retry_in_ms` |
 | `[:uof_sdk, :recovery, :stalled]` | A request with no `snapshot_complete` within `max_recovery_time`, emitted before it is reissued |
+| `[:uof_sdk, :recovery, :interrupted]` | An unsubscribed `alive` or heartbeat gap while a request is in flight, with `reason` (`:unsubscribed` or `:alive_timeout`); the recovery repeats once it completes |
 | `[:uof_sdk, :producer, :status]` | A reported producer status transition, emitted whether or not a handler is configured |
 | `[:uof_sdk, :producers, :loaded]` | Producer descriptions loaded, with `count` and `source` (`:api`, `:snapshot`, or `:config`); a fallback source means the API was unavailable |
 | `[:uof_sdk, :message, :other_node]` | A message addressed to another `node_id`, acknowledged without processing; expected when subscriptions share an access token |

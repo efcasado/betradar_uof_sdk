@@ -47,7 +47,7 @@ defmodule UOF.SDK.Config do
     ],
     max_recovery_time: [
       type: :pos_integer,
-      default: 3600,
+      default: 600,
       doc: "Wait for recovery completion before reissuing a stalled request."
     ],
     producers: [

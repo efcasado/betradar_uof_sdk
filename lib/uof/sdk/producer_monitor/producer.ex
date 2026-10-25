@@ -32,7 +32,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   the producers are visited, so `restart_recovery/2` can replace an in-flight
   job and initiate it immediately. Failed requests, stalls, and ownership
   demotion all return a job to pending state, but their callers intentionally
-  choose different reissue times.
+  choose different reissue times. The job retains its original timestamp; each
+  HTTP attempt starts 60 seconds before it and is bounded by the producer's
+  current recovery window with a 10-minute safety margin.
 
   ## Interrupted recoveries
 
@@ -52,6 +54,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @default_min_interval_ms 30_000
   @default_max_recovery_ms 10 * 60_000
   @max_request_id 1_000_000
+  @recovery_overlap_ms 60_000
+  @recovery_window_margin_ms 10 * 60_000
 
   @type status :: :down | :up | :resuming
 
@@ -71,6 +75,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           request: (term(), keyword() -> term()),
           next_request_id: pos_integer(),
           monotonic_fun: (-> integer()),
+          now_fun: (-> integer()),
           node_id: integer() | nil,
           min_interval_ms: non_neg_integer(),
           max_recovery_ms: pos_integer()
@@ -121,6 +126,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       request: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
       next_request_id: Keyword.get_lazy(opts, :request_id_start, fn -> :rand.uniform(@max_request_id) end),
       monotonic_fun: Keyword.get(opts, :monotonic_fun, &monotonic_ms/0),
+      now_fun: Keyword.get(opts, :now_fun, fn -> System.system_time(:millisecond) end),
       node_id: Keyword.get(opts, :node_id),
       min_interval_ms: Keyword.get(opts, :min_interval_ms, @default_min_interval_ms),
       max_recovery_ms: Keyword.get(opts, :max_recovery_ms, @default_max_recovery_ms)
@@ -196,8 +202,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     %{producer | recovery: %{recovery | job: job}}
   end
 
-  # The checkpoint is frozen while recovering, but the recovery window moves:
-  # the caller recomputes the replay timestamp for the moment of issue.
+  # The checkpoint is frozen while recovering. The recovery window moves, so
+  # the effective replay timestamp is calculated at each HTTP attempt.
   @doc false
   @spec release_recovery(t(), integer() | nil) :: t()
   def release_recovery(%__MODULE__{recovery: %{job: job} = recovery} = producer, after_ts) do
@@ -329,7 +335,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   defp issue_recovery(%__MODULE__{recovery: %{job: job} = recovery} = producer) do
-    after_ts = job.after_ts
+    after_ts = recovery_after(job.after_ts, producer.recovery_window_minutes, recovery.now_fun.())
     request_id = recovery.next_request_id
     opts = build_opts(after_ts, request_id, recovery.node_id)
     job = %{job | request_id: request_id}
@@ -429,6 +435,22 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     [request_id: request_id]
     |> maybe_put(:node_id, node_id)
     |> maybe_put(:after, after_ts)
+  end
+
+  defp recovery_after(nil, _window_minutes, _now), do: nil
+
+  defp recovery_after(timestamp, window_minutes, now) do
+    replay_from = max(timestamp - @recovery_overlap_ms, 0)
+
+    case window_minutes do
+      nil ->
+        replay_from
+
+      minutes ->
+        window_ms = minutes * 60_000
+        margin_ms = min(@recovery_window_margin_ms, div(window_ms, 2))
+        max(replay_from, now - window_ms + margin_ms)
+    end
   end
 
   defp maybe_put(opts, _key, nil), do: opts

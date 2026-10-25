@@ -67,13 +67,18 @@ Automatic recovery normally needs no application involvement. The SDK starts one
 5. A `snapshot_complete` carrying the request ID ends the recovery, and the producer is `:up`.
 
 **Incremental or full.** While a producer is `:up`, each subscribed system `alive` advances
-its checkpoint. A recovery replays everything generated after the checkpoint. Without a
-checkpoint, for example on a first start with an empty store, it requests a full odds
-recovery: the current odds, rather than a message history.
+its stored checkpoint. Each incremental request starts 60 seconds before that timestamp to
+allow for short publication reorderings in key-based Pulsar batches. The checkpoint itself
+does not move back. The overlap can replay duplicates; it cannot guarantee recovery of every
+message delayed longer than 60 seconds. Without a checkpoint, for example on a first start
+with an empty store, the SDK requests a full odds recovery: the current odds, rather than a
+message history. [Betradar's recovery API](https://docs.sportradar.com/uof/error-handling/recovery-using-api)
+may send only the latest odds change for an event.
 
 **Recovery window.** Each producer limits how far back a recovery may reach (its stateful
-recovery window, from the producer descriptions). A checkpoint older than that is clamped to
-the start of the window, so messages generated before it are not replayed. Use
+recovery window, from the producer descriptions). At each request attempt, including retries,
+the SDK moves an `after` timestamp near the window edge to 10 minutes inside the limit to
+allow for clock skew and request latency. Older messages then fall outside the replay. Use
 [per-event recovery](#recovering-a-single-event) for events you know were affected.
 
 **Request IDs** come from a per-producer sequence starting at a random offset, so a completion
@@ -179,9 +184,9 @@ UOF.SDK.recover(1, full: true)
 | `{:error, :passive}` | This instance does not own the control plane; call it on the active instance |
 | `{:error, :unknown_producer}` | No such producer in the loaded descriptions |
 
-By default, a manual recovery is incremental from the producer's checkpoint, clamped to its
-recovery window, like an automatic one. Use it when you suspect the SDK missed messages that
-it did not detect on its own.
+By default, a manual recovery uses the same 60-second overlap and recovery-window bound as an
+automatic one. Use it when you suspect the SDK missed messages that it did not detect on its
+own.
 
 ### Forcing a full recovery
 

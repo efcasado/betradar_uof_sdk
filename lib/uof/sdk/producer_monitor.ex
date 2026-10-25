@@ -334,6 +334,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
           true ->
             after_ts = if !opts[:full], do: after_from_checkpoint(state, producer)
+            state = if opts[:full], do: require_recovery(state, id, true), else: state
             {:reply, :ok, request_recovery(state, producer, after_ts)}
         end
     end
@@ -459,7 +460,7 @@ defmodule UOF.SDK.ProducerMonitor do
         # The producer stays :recovering and already requires recovery durably,
         # so the repeat needs no new transition or write.
         {:repeat, producer, resume_ts} ->
-          producer = Producer.repeat_recovery(producer, resume_ts)
+          producer = Producer.repeat_recovery(producer, preserve_full_recovery(state, producer, resume_ts))
           state |> put_producer(producer) |> maybe_initiate(producer)
 
         :stale ->
@@ -938,11 +939,15 @@ defmodule UOF.SDK.ProducerMonitor do
   # the producer checkpoint and its synchronization flag.
   defp persist_producer_progress(state, after_) do
     synchronized? = after_.status == :up
-    update_progress(state, after_.id, &%{&1 | synchronized: synchronized?})
+    update_progress(state, after_.id, &%{&1 | synchronized: synchronized?, full_recovery_pending: false})
   end
 
-  defp require_recovery(state, id) do
-    update_progress(state, id, &%{&1 | synchronized: false})
+  defp require_recovery(state, id, full_recovery? \\ false) do
+    update_progress(
+      state,
+      id,
+      &%{&1 | synchronized: false, full_recovery_pending: &1.full_recovery_pending or full_recovery?}
+    )
   end
 
   defp initiate(state, producer) do
@@ -956,7 +961,12 @@ defmodule UOF.SDK.ProducerMonitor do
   defp may_issue?(state), do: owns_control?(state) and not Session.awaiting_readiness?(state.session)
 
   defp after_from_checkpoint(state, producer) do
-    Snapshot.progress(state.snapshot, producer.id).checkpoint
+    progress = Snapshot.progress(state.snapshot, producer.id)
+    if progress.full_recovery_pending, do: nil, else: progress.checkpoint
+  end
+
+  defp preserve_full_recovery(state, producer, after_ts) do
+    if Snapshot.progress(state.snapshot, producer.id).full_recovery_pending, do: nil, else: after_ts
   end
 
   defp put_producer(state, %Producer{} = producer) do

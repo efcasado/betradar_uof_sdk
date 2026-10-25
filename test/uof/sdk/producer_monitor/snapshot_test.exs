@@ -8,7 +8,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
     consumer_tag: "ctag-s",
     producers: %{
       1 => %Progress{checkpoint: 2_000, synchronized: true},
-      3 => %Progress{checkpoint: nil, synchronized: false}
+      3 => %Progress{checkpoint: nil, synchronized: false, full_recovery_pending: true}
     }
   }
 
@@ -23,6 +23,11 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
 
     unchecked = Snapshot.put_progress(@snapshot, 4, %Progress{synchronized: true})
     refute Snapshot.resumable?(unchecked, 4)
+
+    pending =
+      Snapshot.put_progress(@snapshot, 1, %Progress{checkpoint: 2_000, synchronized: true, full_recovery_pending: true})
+
+    refute Snapshot.resumable?(pending, 1)
   end
 
   test "a session change unsynchronizes every producer and keeps checkpoints" do
@@ -30,7 +35,18 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
 
     assert changed.consumer_tag == "ctag-s2"
     assert Snapshot.progress(changed, 1) == %Progress{checkpoint: 2_000, synchronized: false}
+    assert Snapshot.progress(changed, 3).full_recovery_pending
     refute Snapshot.resumable?(changed, 1)
+  end
+
+  test "reads the previous snapshot format without full recovery intent" do
+    previous =
+      :erlang.term_to_binary(
+        {:uof_sdk_monitor_snapshot, 1, %{consumer_tag: "ctag-s", producers: %{1 => {2_000, true}}, descriptions: []}}
+      )
+
+    assert %Progress{checkpoint: 2_000, synchronized: true, full_recovery_pending: false} =
+             previous |> Snapshot.decode!() |> Snapshot.progress(1)
   end
 
   test "rejects binaries that are not external terms" do
@@ -42,8 +58,8 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
       Snapshot.decode!(:erlang.term_to_binary(%{consumer_tag: nil}))
     end
 
-    assert_raise ArgumentError, ~r/unsupported producer monitor snapshot version: 2/, fn ->
-      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 2, %{}}))
+    assert_raise ArgumentError, ~r/unsupported producer monitor snapshot version: 3/, fn ->
+      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 3, %{}}))
     end
   end
 

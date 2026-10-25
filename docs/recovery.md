@@ -97,7 +97,8 @@ means the producer may have lost messages the running replay does not cover. The
 `[:uof_sdk, :recovery, :interrupted]`, lets the recovery finish, and then repeats it from the
 last subscribed `alive` seen before the interruption, or from the original start if there was
 none. The producer stays `:recovering` until a recovery completes without interruption.
-This follows the official SDKs.
+For a pending full recovery, the repeat remains full. The incremental behavior follows the
+official SDKs.
 
 **Stalled.** A request with no `snapshot_complete` within `max_recovery_time` is reissued from
 its original start, with a warning log and `[:uof_sdk, :recovery, :stalled]`. Reissuing also
@@ -114,8 +115,8 @@ order, so a late message from an old session is not a change.
 
 ## Restarts
 
-The monitor persists the last consumer tag and, per producer, its checkpoint and whether it
-was synchronized. After a restart:
+The monitor persists the last consumer tag and, per producer, its checkpoint, whether it was
+synchronized, and whether a full recovery is pending. After a restart:
 
 - A synchronized producer with a checkpoint starts `:resuming`. It becomes `:up` once the
   system pipeline reports the same consumer tag and an `alive` generated within
@@ -123,10 +124,12 @@ was synchronized. After a restart:
   is complete and no recovery is needed. Older alives drained from the backlog keep the
   producer alive but do not count, so a session change or unsubscribed alive still queued
   behind them is read before the producer is reported `:up`.
-- A different consumer tag means the session broke while the SDK was down; every producer
-  recovers incrementally from its checkpoint.
+- A different consumer tag means the session broke while the SDK was down; each producer
+  recovers from its checkpoint unless a full recovery is pending.
 - A producer without a synchronized checkpoint starts `:down` and recovers on its first
   `alive`.
+- A pending full recovery remains full, even if the producer has an older checkpoint. It is
+  cleared only after a matching `snapshot_complete` completes the recovery.
 - Recovery requests wait until the system pipeline reports a consumer tag. If none arrives
   within `inactivity_seconds`, the monitor crashes so supervision restarts the pipelines.
 
@@ -194,7 +197,9 @@ own.
 producer, not the messages since a point in time. Use it when your application's own state no
 longer matches the feed and you need to rebuild it from current odds, for example after
 restoring your database from an older backup or after fixing a handler bug that corrupted
-stored odds.
+stored odds. The full request is repeated as full if it is interrupted by a consume-session
+change or monitor restart; it is not converted to an incremental request from an older
+checkpoint.
 
 Betradar describes this as a recovery of odds; for the settlements, cancellations, and
 rollbacks of specific events, use [stateful message recovery](#recovering-a-single-event).

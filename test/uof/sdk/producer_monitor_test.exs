@@ -341,7 +341,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       ProducerMonitor.alive(m, 1, now, true)
 
       assert_receive {:recover_called, "pre", opts}
-      assert opts[:after] == now - 60 * 60_000
+      assert opts[:after] == now - 50 * 60_000
     end
   end
 
@@ -495,17 +495,19 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute Keyword.has_key?(opts, :after)
   end
 
-  test "incremental recovery uses the checkpoint as :after", %{clock: clock} do
+  test "incremental recovery starts 60 seconds before the stored checkpoint", %{clock: clock} do
     put_checkpoint(1, @now - 60_000)
     ## Recovery orchestration ----------------------------------------------------
     m = start_monitor([now_fun: fn -> @now end], clock)
     ProducerMonitor.alive(m, 1, 1_000, true)
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == @now - 60_000
+    assert opts[:after] == @now - 120_000
+    assert checkpoint(1) == {:ok, @now - 60_000}
   end
 
-  test "clamps :after to the producer's recovery window", %{clock: clock} do
-    # checkpoint is 2 h old, window is 60 min -> clamp to now - 60 min
+  test "clamps :after ten minutes inside the producer's recovery window", %{clock: clock} do
+    # checkpoint is 2 h old, window is 60 min -> clamp to now - 50 min
+    attach_telemetry([[:uof_sdk, :recovery, :initiated]])
     put_checkpoint(1, @now - 2 * 60 * 60_000)
 
     m =
@@ -517,9 +519,18 @@ defmodule UOF.SDK.ProducerMonitorTest do
         clock
       )
 
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == @now - 60 * 60_000
+    expected_after = @now - 50 * 60_000
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        ProducerMonitor.alive(m, 1, 1_000, true)
+        assert_receive {:recover_called, "pre", opts}
+        assert opts[:after] == expected_after
+        assert_receive {:telemetry, [:uof_sdk, :recovery, :initiated], _, %{recovery_from: ^expected_after}}
+        sync(m)
+      end)
+
+    assert log =~ "after=#{expected_after}"
   end
 
   test "keeps a single in-flight recovery per producer", %{clock: clock} do
@@ -637,7 +648,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert :ok = ProducerMonitor.recover(m, 1, [])
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == @now - 60_000
+    assert opts[:after] == @now - 120_000
 
     # a second trigger while one is in flight is refused
     assert {:error, :already_recovering} = ProducerMonitor.recover(m, 1, [])
@@ -669,7 +680,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.observe_consumer_tag(m, "s1")
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == 1_000
+    assert opts[:after] == 0
   end
 
   test "manual recovery completion establishes the alive timeout anchor", %{clock: clock} do
@@ -830,7 +841,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:recover_called, "pre", first}, 200
     assert_receive {:recover_called, "pre", second}, 500
 
-    assert first[:after] == @now - 60_000
+    assert first[:after] == @now - 120_000
     assert second[:after] == first[:after]
   end
 
@@ -946,23 +957,24 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
 
     test "an unsubscribed alive repeats the recovery from the last subscribed alive", %{clock: clock} do
+      set_clock(clock, @now)
       m = start_monitor(clock)
 
-      ProducerMonitor.alive(m, 1, 1_000, true)
+      ProducerMonitor.alive(m, 1, @now, true)
       rid1 = assert_recovery_triggered()
       assert_receive {:status, %ProducerStatus{status: :recovering}}
 
-      ProducerMonitor.alive(m, 1, 2_000, true)
-      ProducerMonitor.alive(m, 1, 3_000, false)
+      ProducerMonitor.alive(m, 1, @now + 1_000, true)
+      ProducerMonitor.alive(m, 1, @now + 2_000, false)
       # After the interruption, subscribed alives no longer prove continuity.
-      ProducerMonitor.alive(m, 1, 4_000, true)
+      ProducerMonitor.alive(m, 1, @now + 3_000, true)
       sync(m)
 
       assert_receive {:telemetry, [:uof_sdk, :recovery, :interrupted], _, %{request_id: ^rid1, reason: :unsubscribed}}
 
       ProducerMonitor.snapshot_complete(m, 1, rid1)
       assert_receive {:recover_called, "pre", opts}
-      assert opts[:after] == 2_000
+      assert opts[:after] == @now - 59_000
       refute_received {:status, _producer}
       refute_received {:telemetry, [:uof_sdk, :recovery, :completed], _, _}
       assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
@@ -972,14 +984,15 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
 
     test "a heartbeat gap repeats the recovery from its original timestamp", %{clock: clock} do
-      put_checkpoint(1, 500)
+      put_checkpoint(1, @now - 120_000)
+      set_clock(clock, @now)
       m = start_monitor(clock)
 
-      ProducerMonitor.alive(m, 1, 1_000, true)
+      ProducerMonitor.alive(m, 1, @now, true)
       assert_receive {:recover_called, "pre", first}
-      assert first[:after] == 500
+      assert first[:after] == @now - 180_000
 
-      set_clock(clock, 1_000 + @inactivity + 1)
+      set_clock(clock, @now + @inactivity + 1)
       tick(m)
       tick(m)
 
@@ -989,7 +1002,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
       ProducerMonitor.snapshot_complete(m, 1, first[:request_id])
       assert_receive {:recover_called, "pre", second}
-      assert second[:after] == 500
+      assert second[:after] == first[:after]
 
       ProducerMonitor.snapshot_complete(m, 1, second[:request_id])
       assert_receive {:status, %ProducerStatus{status: :up}}
@@ -1008,7 +1021,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       ProducerMonitor.snapshot_complete(m, 1, rid)
 
       assert_receive {:recover_called, "pre", opts}
-      assert opts[:after] == now - 60 * 60_000
+      assert opts[:after] == now - 50 * 60_000
     end
 
     test "a reissued request covers an earlier interruption", %{clock: clock} do
@@ -1152,7 +1165,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.alive(m, 1, 2_000, true)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == 1_000
+    assert opts[:after] == 0
   end
 
   test "session startup has a bounded readiness deadline", %{clock: clock} do
@@ -1176,7 +1189,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == 1_000
+    assert opts[:after] == 0
   end
 
   test "a session change saved before a restart leaves producers unsynchronized", %{clock: clock} do
@@ -1197,7 +1210,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
 
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == 1_000
+    assert opts[:after] == 0
   end
 
   test "recovery intent is saved before the recovery request", %{clock: clock} do
@@ -1411,7 +1424,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     # must nevertheless issue the recovery remembered from subscribed=0.
     ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == 1_000
+    assert opts[:after] == 0
 
     tick(m)
     assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
@@ -1571,7 +1584,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == 5_000
+    assert opts[:after] == 0
     refute_received {:status, %ProducerStatus{status: :up}}
     refute resumable?(1)
   end
@@ -1630,7 +1643,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.observe_consumer_tag(m, "s2")
 
     assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == 2_000
+    assert opts[:after] == 0
   end
 
   test "demotion parks an in-flight recovery; promotion reissues it", %{clock: clock} do

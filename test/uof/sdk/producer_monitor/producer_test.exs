@@ -3,6 +3,8 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
   alias UOF.SDK.ProducerMonitor.Producer
 
+  @now 1_000_000_000_000
+
   test "a first subscribed alive requests initial synchronization" do
     producer = %Producer{id: 1, status: :down}
 
@@ -110,7 +112,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
     producer = Producer.initiate_recovery(producer)
     assert_receive {:recover_called, nil, request}
-    assert request == [after: 500, node_id: 7, request_id: 42]
+    assert request == [after: 0, node_id: 7, request_id: 42]
     refute Producer.recovery_pending?(producer)
     assert %Producer{recovery: %{job: %{request_id: 42}, last_issued_at: 1_000}} = producer
 
@@ -118,5 +120,76 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     refute Producer.recovering?(producer)
     assert producer.status == :up
     assert producer.last_alive_at == 2_000
+  end
+
+  test "a stalled request is reclamped when the recovery window moves" do
+    test_pid = self()
+    now = start_supervised!({Agent, fn -> @now end})
+    telemetry_id = make_ref()
+
+    :ok =
+      :telemetry.attach(
+        telemetry_id,
+        [:uof_sdk, :recovery, :initiated],
+        fn _event, _measurements, metadata, _config -> send(test_pid, {:initiated, metadata}) end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+    producer =
+      %Producer{id: 1, recovery_window_minutes: 60}
+      |> Producer.configure_recovery(
+        recover_fun: fn _, opts ->
+          send(test_pid, {:recover_called, opts})
+          {:ok, :accepted}
+        end,
+        now_fun: fn -> Agent.get(now, & &1) end
+      )
+      |> Producer.prepare_recovery(@now - 2 * 60 * 60_000)
+      |> Producer.initiate_recovery()
+
+    assert_receive {:recover_called, first}
+    assert first[:after] == @now - 50 * 60_000
+    producer = Producer.handle_response(producer, :ok)
+    assert_receive {:initiated, %{recovery_from: first_after}}
+    assert first_after == first[:after]
+
+    Agent.update(now, &(&1 + 20 * 60_000))
+    producer = Producer.handle_stall(producer, first[:request_id])
+
+    assert_receive {:recover_called, second}
+    assert second[:after] == @now - 30 * 60_000
+    Producer.handle_response(producer, :ok)
+    assert_receive {:initiated, %{recovery_from: second_after}}
+    assert second_after == second[:after]
+  end
+
+  test "a failed request is reclamped on retry" do
+    test_pid = self()
+    now = start_supervised!({Agent, fn -> @now end})
+
+    producer =
+      %Producer{id: 1, recovery_window_minutes: 60}
+      |> Producer.configure_recovery(
+        recover_fun: fn _, opts ->
+          send(test_pid, {:recover_called, opts})
+          {:ok, :accepted}
+        end,
+        now_fun: fn -> Agent.get(now, & &1) end,
+        min_interval_ms: 0
+      )
+      |> Producer.prepare_recovery(@now - 2 * 60 * 60_000)
+      |> Producer.initiate_recovery()
+
+    assert_receive {:recover_called, first}
+    assert first[:after] == @now - 50 * 60_000
+
+    producer = Producer.handle_response(producer, {:error, :unavailable})
+    Agent.update(now, &(&1 + 20 * 60_000))
+    Producer.handle_retry(producer, producer.recovery.job.generation)
+
+    assert_receive {:recover_called, second}
+    assert second[:after] == @now - 30 * 60_000
   end
 end

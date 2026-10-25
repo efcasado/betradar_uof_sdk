@@ -35,12 +35,14 @@ defmodule UOF.SDK.ProducerMonitor do
 
   Recovery checkpoints are owned here, not by the Broadway pipeline. Subscribed
   `alive` heartbeats advance the checkpoint only after the producer is already
-  up. Incremental recovery replays from the stored checkpoint, as the official
-  SDKs do: everything before it is already on the topic.
+  up. Incremental recovery starts one minute before the stored checkpoint to
+  cover short publication reorderings across Pulsar message keys. The replay
+  timestamp is bounded by the producer's recovery window when each request is
+  issued, including retries.
 
   A delivery gap marks the producer `:recovering`. The request is issued after
   the per-producer cooldown with a fresh `request_id` and a checkpoint-derived
-  `after:` timestamp, clamped to the producer's recovery window. A heartbeat
+  `after:` timestamp. A heartbeat
   timeout records the recovery immediately but issues it only once the
   producer's alives resume: Betradar rejects recovery while a producer is
   silent, and failed requests count against its rate limit. Until then the
@@ -457,8 +459,7 @@ defmodule UOF.SDK.ProducerMonitor do
         # The producer stays :recovering and already requires recovery durably,
         # so the repeat needs no new transition or write.
         {:repeat, producer, resume_ts} ->
-          after_ts = resume_ts && clamp_to_window(resume_ts, producer, state.now_fun.())
-          producer = Producer.repeat_recovery(producer, after_ts)
+          producer = Producer.repeat_recovery(producer, resume_ts)
           state |> put_producer(producer) |> maybe_initiate(producer)
 
         :stale ->
@@ -955,13 +956,7 @@ defmodule UOF.SDK.ProducerMonitor do
   defp may_issue?(state), do: owns_control?(state) and not Session.awaiting_readiness?(state.session)
 
   defp after_from_checkpoint(state, producer) do
-    case Snapshot.progress(state.snapshot, producer.id).checkpoint do
-      timestamp when is_integer(timestamp) ->
-        clamp_to_window(timestamp, producer, state.now_fun.())
-
-      nil ->
-        nil
-    end
+    Snapshot.progress(state.snapshot, producer.id).checkpoint
   end
 
   defp put_producer(state, %Producer{} = producer) do
@@ -1001,13 +996,6 @@ defmodule UOF.SDK.ProducerMonitor do
   defp save_snapshot(%{monitor_store: {store, store_opts}} = state, snapshot) do
     if owns_control?(state), do: :ok = store.save(Snapshot.encode(snapshot), store_opts)
     %{state | snapshot: snapshot}
-  end
-
-  defp clamp_to_window(timestamp, %Producer{recovery_window_minutes: nil}, _now), do: timestamp
-
-  defp clamp_to_window(timestamp, %Producer{recovery_window_minutes: minutes}, now) do
-    earliest = now - minutes * 60_000
-    max(timestamp, earliest)
   end
 
   ## Helpers ------------------------------------------------------------------

@@ -170,8 +170,10 @@ Producer status therefore describes feed continuity on the topic, not applicatio
   content anyway. Use handler timestamps or the content subscription's backlog statistics to
   measure processing lag across instances.
 - The checkpoint advances with subscribed system heartbeats while `:up`, regardless of how far
-  content processing has got. A recovery after a session change replays from there;
-  everything earlier is already on the topic.
+  content processing has got. An incremental recovery starts 60 seconds before that
+  checkpoint to cover short publication reorderings between system and event keys in the
+  connector's key-based batches. The overlap is a mitigation, not a bound on how old an
+  unpublished event can be; see [recovery windows](recovery.md#how-a-recovery-runs).
 
 This relies on the content cursor never losing a message the system subscription has seen.
 Once the content subscription exists, its backlog holds everything it has not acknowledged.
@@ -188,8 +190,8 @@ uses the oldest alive seen on the user sessions. The
 [recovery documentation](https://docs.sportradar.com/uof/sdk/features/recovery) recommends
 storing the last processed message timestamp, and states that slow processing marks a producer
 down without issuing recovery. All three consume AMQP directly, where unprocessed content is
-lost with its queue. The protocol only requires recovering from a timestamp before which
-nothing was missed; here that boundary is the topic, not processing.
+lost with its queue. Here the checkpoint tracks feed continuity on the topic rather than
+application processing; the recovery overlap allows for short cross-key publication delays.
 
 ### Node Isolation
 

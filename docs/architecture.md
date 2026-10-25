@@ -10,7 +10,8 @@ them. The [deployment guide](deployment.md) covers what to set up, and the
 - [Producer monitor](#producer-monitor): the control plane
 - [Persistence](#persistence): the monitor snapshot and store contract
 - [Observability](#observability): health and telemetry signals
-- [Contributing](#contributing): internals and design invariants
+- [Internals](#internals): modules and where they run
+- [Design invariants](#design-invariants): the rules changes must preserve
 
 ## Overview
 
@@ -383,33 +384,57 @@ Message-failure logs include routing context and a truncated payload. Unexpected
 exits also appear through process failure reports. A quiet error log alone does not establish
 readiness or prove that handlers have completed their work.
 
-## Contributing
+## Internals
 
-`ProducerMonitor` is the coordination GenServer. It routes observations, applies ownership and
-session readiness, persists transitions, and publishes producer-status callbacks.
-`ProducerMonitor.Producer` owns per-producer health transitions, recovery jobs, cooldowns,
-HTTP attempts, and timers. These functions execute in the monitor process, except the HTTP
-request itself, which runs in a linked task whose response returns as a message; a response
-for a job completed, parked, or replaced meanwhile is dropped. Such a superseded request is
-left to finish rather than shut down: it has usually reached Betradar already, and a duplicate
-request is harmless beyond quota.
+| Module | Responsibility | Runs in |
+| --- | --- | --- |
+| `UOF.SDK` | Supervisor and public API | The host application's supervisor |
+| `UOF.SDK.Config` | Validates configuration and derives the Pulsar wiring | The caller, at startup |
+| `UOF.SDK.Pulsar` | Builds the shared client and the two subscription specs from `:pulsar` | The caller, at startup |
+| `UOF.SDK.SystemPipeline` | Reads the system subscription: `alive`, `snapshot_complete`, and consumer tags go to the monitor; event content is acknowledged undecoded | Broadway, one processor |
+| `UOF.SDK.ContentPipeline` | Reads the content subscription: decodes event messages and calls the handler | Broadway, `:concurrency` processors |
+| `UOF.SDK.MessageMetadata` | Reads the connector's message properties | The pipelines |
+| `UOF.SDK.RoutingKey` | Parses routing keys: message type, event identity, node filtering | The pipelines |
+| `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session readiness, persists transitions, publishes status callbacks | Its own process |
+| `ProducerMonitor.Producer` | Per-producer state machine: health, recovery jobs, cooldowns, request attempts, and timers | The monitor; each HTTP request runs in a linked task |
+| `ProducerMonitor.Session` | Tracks the upstream consumer tag, independently of producer state | The monitor |
+| `ProducerMonitor.Snapshot` | The persisted state and its encoding | The monitor |
+| `ProducerMonitor.Store` | Persistence behaviour; `Store.ETS` is the default | The monitor; a store with `child_spec/1` also runs its own process |
 
-`ProducerMonitor.Session` tracks the upstream consumer tag independently of producer state.
-`UOF.SDK.Pulsar` derives the two producer specifications and the shared Pulsar client from the
-`:pulsar` configuration. `MessageMetadata` reads the connector's message properties, and
-`RoutingKey` supplies routing and event identity. The pipelines own decoding and dispatch
-rather than recovery policy.
+A recovery request's response returns to the monitor as a message. A response for a job
+completed, parked, or replaced meanwhile is dropped, and the superseded request is left to
+finish rather than shut down: it has usually reached Betradar already, and a duplicate request
+is harmless beyond quota.
 
 Useful entry points are the [SDK supervisor](../lib/uof/sdk.ex),
 [Pulsar wiring](../lib/uof/sdk/pulsar.ex),
 [producer monitor](../lib/uof/sdk/producer_monitor.ex), and
 [store behaviour](../lib/uof/sdk/producer_monitor/store.ex).
 
-### Design Invariants
+## Design Invariants
 
-1. The monitor starts before the consumers that report sessions or ownership to it.
-2. The system subscription is the only control plane; the content pipeline never reports to the monitor.
-3. Only the active system-subscription owner issues recovery requests.
-4. Recovery intent is persisted before its HTTP request is issued.
-5. Monitor state is persisted as one snapshot, replaced atomically; an unreadable snapshot fails startup.
-6. Content callbacks own application effects; the SDK owns feed delivery and recovery orchestration.
+Changes must preserve these rules; each links to the section that explains it.
+
+1. **The monitor starts before the consumers that report to it.** Consumers report ownership
+   and sessions to its registered name, and `:rest_for_one` restarts them with a restarted
+   monitor so it receives fresh reports. See [the supervision tree](#the-supervision-tree).
+2. **The system subscription is the only control plane.** Only the system pipeline reports to
+   the monitor; the content pipeline never does. See [feed continuity](#feed-continuity).
+3. **Only the active system-subscription owner issues recovery requests.** A passive instance
+   never sees the `snapshot_complete` for a request it issued, so it would burn recovery quota
+   reissuing it on every stall.
+   See [ownership and failover](#ownership-and-failover).
+4. **Recovery intent is persisted before its request is issued**, so a crash cannot resume
+   from stale synchronized state. See [snapshot contents](#snapshot-contents).
+5. **Checkpoints only move forward**, so an out-of-order heartbeat cannot move one back and
+   cause needless replays and writes. See [snapshot contents](#snapshot-contents).
+6. **Monitor state is one snapshot, replaced atomically**, and an unreadable snapshot fails
+   startup rather than discarding checkpoints. See [persistence](#persistence).
+7. **A recovery completes only on a `snapshot_complete` matching its active request ID.**
+   Completions for older, superseded, or foreign requests are ignored. See
+   [how a recovery runs](recovery.md#how-a-recovery-runs).
+8. **The content subscription exists before the first recovery.** This is a deployment
+   requirement the SDK relies on, not one it can enforce. See
+   [subscriptions](deployment.md#subscriptions).
+9. **Content callbacks own application effects; the SDK owns feed delivery and recovery
+   orchestration.** See [handler execution and delivery](#handler-execution-and-delivery).

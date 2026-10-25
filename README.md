@@ -33,12 +33,12 @@ Your application handles:
 
 ## Guides
 
+- [Architecture](docs/architecture.md): components, feed topology, message processing,
+  persistence, and design invariants.
 - [Deployment](docs/deployment.md): the source connector, topic, subscriptions, and
   scaling.
 - [Recovery](docs/recovery.md): producer status, automatic recovery, manual and full
   recoveries, and what to monitor.
-- [Architecture](docs/architecture.md): components, feed topology, message processing,
-  persistence, and design invariants.
 
 ## Installation
 

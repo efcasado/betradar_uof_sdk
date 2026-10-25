@@ -223,13 +223,44 @@ Producer status describes feed continuity on the topic, not application progress
   everything earlier is already on the topic.
 
 This relies on the content cursor never losing a message the system subscription has
-seen. The SDK starts a new content subscription at the earliest retained message
-(`initial_position: :earliest`, overridable through `:consumer_opts`): Pulsar subscribes
-asynchronously, and a content subscription created after the first recovery request would
-otherwise miss its replay. A new deployment therefore first processes the retained
-backlog. Deployments must also keep the content backlog from being discarded: see
-[backlog and restart continuity](#backlog-and-restart-continuity), and do not skip, reset,
-or expire the content subscription's cursor.
+seen. Once the content subscription exists, its backlog holds everything it has not
+acknowledged: see [backlog and restart continuity](#backlog-and-restart-continuity), and do
+not skip, reset, or expire its cursor.
+
+Before the content subscription exists, nothing protects the messages the system
+subscription acknowledges. Pulsar subscribes asynchronously, so on a first start, or after
+the content subscription is deleted, the system pipeline can request a recovery while the
+content consumer is still connecting. If the topic has no retention (the broker default),
+messages acknowledged by every existing subscription can be deleted once their ledger rolls
+over, and a content subscription created afterwards misses part of the replay while the
+monitor sees it complete. Use one of these:
+
+- **Create both subscriptions before the SDK first starts** (recommended). The content
+  cursor then exists before any recovery, whatever the retention. For
+  `subscription: "uof-sdk"`:
+
+  ```sh
+  pulsar-admin topics create-subscription persistent://public/default/uof-feed \
+    --subscription uof-sdk-content --messageId earliest
+  pulsar-admin topics create-subscription persistent://public/default/uof-feed \
+    --subscription uof-sdk-system
+  ```
+
+- **Or set a retention time on the topic** longer than the content subscription can take to
+  be created after the SDK starts, for example one hour. Topic policies must be enabled on
+  the broker; `pulsar-admin namespaces set-retention` sets the same policy for a namespace:
+
+  ```sh
+  pulsar-admin topicPolicies set-retention persistent://public/default/uof-feed \
+    --time 1h --size -1
+  ```
+
+  The SDK starts a new content subscription at the earliest retained message
+  (`initial_position: :earliest`, overridable through `:consumer_opts`), so it still reads
+  what the system subscription has acknowledged. Retention also sets how much a new content
+  subscription processes before it reaches current traffic: one hour covers a consumer in
+  connection backoff, while a day of retention means a new deployment replays a day of
+  feed. The producers' recovery windows do not bound this interval.
 
 This differs from the official SDKs, which tie the checkpoint to content progress. The
 Java SDK ([`e677b92`](https://github.com/sportradar/UnifiedOddsSdkJava/tree/e677b9222bf59b770384379f62f789778ddc8053))
@@ -270,8 +301,8 @@ does not necessarily restart the upstream AMQP session. A durable subscription c
 messages while that instance is offline; retention settings must preserve the backlog needed
 for the deployment's restart behaviour. Disable message TTL or set it above the worst-case
 downtime, and use a `producer_exception` backlog quota policy to prevent eviction.
-Retention also bounds what a new content subscription reads when it starts at the earliest
-retained message.
+Retention, which keeps messages after every subscription has acknowledged them, is
+separate; see [feed continuity](#feed-continuity) for when it is needed.
 
 ## Message Processing
 

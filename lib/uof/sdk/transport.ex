@@ -76,9 +76,10 @@ defmodule UOF.SDK.Transport do
   # subscribes asynchronously and starts a new subscription at the latest
   # message by default: a content consumer still connecting would miss the
   # replay the system pipeline sees complete. Starting at the earliest
-  # retained message means the content subscription can never begin after
-  # the system one, including when it is recreated later. A new deployment
-  # first processes the retained backlog.
+  # retained message lets it read what the system subscription has already
+  # acknowledged, provided the topic retains acknowledged messages. Deployments
+  # without retention create the subscriptions in advance instead; see the
+  # architecture guide's feed continuity section.
   @content_consumer_defaults [initial_position: :earliest]
 
   defp pulsar_producers(opts) do

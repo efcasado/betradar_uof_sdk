@@ -95,16 +95,21 @@ defmodule UOF.SDK.ProducerMonitor do
   recovery requests or runs periodic health transitions — a demoted instance
   cannot observe the `snapshot_complete` for a request it issued, so issuing
   from standby burns recovery quota in a stall-reissue loop. An explicit
-  recovery-required alive racing demotion is nevertheless persisted and
-  remains pending for promotion.
+  recovery-required alive racing demotion is nevertheless kept as a pending
+  job for promotion.
+
+  The snapshot belongs to the subscription: instances sharing a store key
+  share it, and only the active instance writes it, since a passive copy is
+  stale. Promotion reloads it and restores producers without a recovery job
+  as a restart does, so a promoted instance in an unchanged upstream session
+  resumes instead of recovering. Recovery intent recorded while passive is
+  made durable before it is reissued.
 
   Demotion drops in-flight recovery correlation (the completion will go to the
   new owner); affected producers stay `:recovering` and are reissued on
-  promotion. Producers that were `:up` heal through the normal alive-gap check
-  after promotion, replaying from their checkpoint. Consume-session
-  observations are ignored entirely while passive: the owner heals the shared
-  feed, and a session change missed while passive leaves a stale committed
-  baseline that re-detects the change — and recovers — on promotion. Reports
+  promotion. Consume-session observations are ignored entirely while passive:
+  the owner heals the shared feed, and promotion compares the next tag with
+  the stored one. Reports
   are best-effort and may repeat; they are not a fencing mechanism, so
   briefly-overlapping actives can duplicate a recovery request — duplicates
   are correlated by `request_id` and harmless beyond quota.
@@ -367,7 +372,11 @@ defmodule UOF.SDK.ProducerMonitor do
 
       state =
         if active? do
-          state |> start_active_monitoring() |> resume_pending_recoveries()
+          state
+          |> reload_snapshot()
+          |> start_active_monitoring()
+          |> persist_pending_recoveries()
+          |> resume_pending_recoveries()
         else
           state |> Map.put(:readiness_deadline_at, nil) |> park_recoveries()
         end
@@ -721,6 +730,37 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
+  # The stored snapshot is the subscription's state, possibly written by the
+  # previous owner while this instance was passive. Producers without a
+  # recovery job are restored from it as on a restart; this instance keeps the
+  # descriptions it loaded itself.
+  defp reload_snapshot(state) do
+    snapshot = %{load_snapshot(state.monitor_store) | descriptions: state.snapshot.descriptions}
+
+    Enum.reduce(
+      state.producers,
+      %{state | snapshot: snapshot, session: Session.new(snapshot.consumer_tag)},
+      fn {_id, producer}, state ->
+        if Producer.recovering?(producer) do
+          state
+        else
+          restored = restore_producer(%{producer | status: :down, last_alive_at: nil, resuming_since: nil}, snapshot)
+          state = put_producer(state, restored)
+          if restored.status != producer.status, do: notify(state, reported_producer(restored))
+          state
+        end
+      end
+    )
+  end
+
+  # Recovery intent recorded while passive was not written; it must be durable
+  # before the recovery is issued.
+  defp persist_pending_recoveries(state) do
+    Enum.reduce(state.producers, state, fn {id, producer}, state ->
+      if Producer.recovering?(producer), do: require_recovery(state, id), else: state
+    end)
+  end
+
   # A job awaiting an alive stays parked: the producer's next alive releases it.
   defp resume_pending_recoveries(state) do
     Enum.reduce(state.producers, state, fn {_id, producer}, state ->
@@ -884,8 +924,11 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp save_snapshot(%{snapshot: snapshot} = state, snapshot), do: state
 
+  # Instances of one subscription may share a snapshot, which the active
+  # instance owns. A passive instance's copy is stale, so it changes only in
+  # memory; promotion reloads the stored one.
   defp save_snapshot(%{monitor_store: {store, store_opts}} = state, snapshot) do
-    :ok = store.save(Snapshot.encode(snapshot), store_opts)
+    if owns_control?(state), do: :ok = store.save(Snapshot.encode(snapshot), store_opts)
     %{state | snapshot: snapshot}
   end
 

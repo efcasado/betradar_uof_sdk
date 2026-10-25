@@ -124,8 +124,9 @@ The supported topic has a single partition. Failover ownership is assigned per p
 the system subscription has one active owner.
 
 The monitor starts passive and waits for the broker's ownership report. The active owner runs
-periodic health checks and issues recovery requests. Passive instances continue their content
-processing. Demotion parks in-flight recoveries; promotion permits pending work to resume.
+periodic health checks, issues recovery requests, and writes the snapshot. Passive instances
+continue their content processing. Demotion parks in-flight recoveries; promotion reloads the
+snapshot, restores producers from it as a restart does, and permits pending work to resume.
 Ownership reports are coordination signals, not fencing tokens: brief overlap during failover
 can issue duplicate recovery requests, which are harmless beyond quota.
 
@@ -306,9 +307,11 @@ write. Callbacks run in the monitor, so a slow backend delays health checks and
 and a backend that stays unavailable eventually stops `UOF.SDK` through supervisor restart
 limits.
 
-Each snapshot has exactly one writer. Monitors sharing a backend, including SDK instances on
-one subscription, need distinct keys that are stable across restarts, such as a StatefulSet
-pod name. A key that changes on restart never resumes.
+A snapshot belongs to a subscription. SDK instances on one subscription share its key, and
+only the instance that owns the system subscription writes it; a passive instance's copy is
+stale and changes only in memory until promotion reloads the stored one. Distinct
+subscriptions sharing a backend need distinct keys. A key that changes on restart never
+resumes.
 
 For example, a PostgreSQL store using Ecto:
 
@@ -428,8 +431,9 @@ Changes must preserve these rules; each links to the section that explains it.
    from stale synchronized state. See [snapshot contents](#snapshot-contents).
 5. **Checkpoints only move forward**, so an out-of-order heartbeat cannot move one back and
    cause needless replays and writes. See [snapshot contents](#snapshot-contents).
-6. **Monitor state is one snapshot, replaced atomically**, and an unreadable snapshot fails
-   startup rather than discarding checkpoints. See [persistence](#persistence).
+6. **Monitor state is one snapshot per subscription, replaced atomically and written only by
+   the active owner**, and an unreadable snapshot fails startup rather than discarding
+   checkpoints. A passive instance's copy is stale. See [persistence](#persistence).
 7. **A recovery completes only on a `snapshot_complete` matching its active request ID.**
    Completions for older, superseded, or foreign requests are ignored. See
    [how a recovery runs](recovery.md#how-a-recovery-runs).

@@ -188,7 +188,7 @@ loads producer descriptions and recovery uses the HTTP API.
 | `:concurrency` | `10` | Number of content processors in each SDK instance |
 | `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
 | `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
-| `:max_recovery_time` | `3600` | Wait for recovery completion before reissuing a stalled request |
+| `:max_recovery_time` | `600` | Wait for recovery completion before reissuing a stalled request; a reissue is logged as a warning |
 | `:producers` | `[]` | Fallback producer descriptions (`[id: 1, product: "liveodds", recovery_window_minutes: 4320]`), used only if the UOF API is unavailable at startup and no previous run stored any |
 
 Public durations are in seconds. Recovery throttling defaults follow the official SDK

@@ -140,6 +140,7 @@ defmodule UOF.SDK.ConfigTest do
   test "defaults the health thresholds" do
     defaults = load()
     assert defaults.inactivity_seconds == 20
+    assert defaults.max_recovery_time == 600
   end
 
   test "defaults concurrency to 10 and accepts an override" do

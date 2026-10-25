@@ -928,6 +928,12 @@ defmodule UOF.SDK.ProducerMonitor do
   # Instances of one subscription may share a snapshot, which the active
   # instance owns. A passive instance's copy is stale, so it changes only in
   # memory; promotion reloads the stored one.
+  #
+  # Recovery intent from an unsubscribed alive that races demotion therefore
+  # stays in the demoted instance. The new owner still learns of it: Betradar
+  # keeps sending subscribed=0 until a recovery is requested, and a passive
+  # instance never requests one, so the producer's next alive is unsubscribed
+  # too.
   defp save_snapshot(%{monitor_store: {store, store_opts}} = state, snapshot) do
     if owns_control?(state), do: :ok = store.save(Snapshot.encode(snapshot), store_opts)
     %{state | snapshot: snapshot}

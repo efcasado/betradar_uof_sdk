@@ -1521,6 +1521,24 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute_received {:recover_called, _product, _opts}
   end
 
+  # An unsubscribed alive acknowledged by the previous owner while it was being
+  # demoted never reaches this instance, and the shared snapshot still says
+  # synchronized. Betradar repeats subscribed=0 until a recovery is requested.
+  test "after promotion, the next unsubscribed alive recovers despite a synchronized snapshot", %{clock: clock} do
+    save_state(%{1 => 5_000}, [1], "s1")
+    m = start_monitor([ownership: :passive], clock)
+
+    report_active_state(m, :active)
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    ProducerMonitor.alive(m, 1, 6_000, false)
+
+    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 5_000
+    refute_received {:status, %ProducerStatus{status: :up}}
+    refute resumable?(1)
+  end
+
   test "a passive instance does not write the snapshot", %{clock: clock} do
     m = start_monitor([ownership: :passive, monitor_store: {RecordingStore, pid: self()}], clock)
 

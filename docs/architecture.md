@@ -380,6 +380,7 @@ diagnostics to investigate why progress has stopped.
 | `[:uof_sdk, :recovery, :stalled]` | A request with no `snapshot_complete` within `max_recovery_time`, emitted before it is reissued |
 | `[:uof_sdk, :recovery, :interrupted]` | An unsubscribed `alive` or heartbeat gap while a request is in flight, with `reason` (`:unsubscribed` or `:alive_timeout`); the recovery repeats once it completes |
 | `[:uof_sdk, :producer, :status]` | A reported producer status transition, emitted whether or not a handler is configured |
+| `[:uof_sdk, :producer, :alive]` | A system `alive` was read, with `delay_ms`: its observation time minus its generation timestamp, including clock skew with Betradar. Also reported as `ProducerStatus.alive_delay` |
 | `[:uof_sdk, :producers, :loaded]` | Producer descriptions loaded, with `count` and `source` (`:api`, `:snapshot`, or `:config`); a fallback source means the API was unavailable |
 | `[:uof_sdk, :message, :other_node]` | A message addressed to another `node_id`, acknowledged without processing; expected when subscriptions share an access token |
 | `[:pulsar, :consumer, ...]` | Consumer events from the `pulsar` client, such as nacks, redelivery requests, and dead-letter diversions |

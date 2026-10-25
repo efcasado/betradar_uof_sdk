@@ -508,6 +508,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp on_alive(state, producer, gen_ts, subscribed?) do
     result = Producer.observe_alive(producer, gen_ts, subscribed?, state.now_fun.())
+    emit_alive(result, subscribed?)
 
     case result do
       {:recovery_needed, producer, _cause} ->
@@ -966,8 +967,21 @@ defmodule UOF.SDK.ProducerMonitor do
       product: producer.product,
       recovery_window_minutes: producer.recovery_window_minutes,
       status: status,
-      last_alive_at: producer.last_alive_at
+      last_alive_at: producer.last_alive_at,
+      alive_delay: producer.alive_delay
     }
+  end
+
+  defp emit_alive(result, subscribed?) do
+    producer = elem(result, 1)
+
+    if is_integer(producer.alive_delay) do
+      :telemetry.execute([:uof_sdk, :producer, :alive], %{delay_ms: producer.alive_delay}, %{
+        producer_id: producer.id,
+        product: producer.product,
+        subscribed: subscribed?
+      })
+    end
   end
 
   defp recovery_in_flight?(producer) do

@@ -113,8 +113,11 @@ The monitor persists the last consumer tag and, per producer, its checkpoint and
 was synchronized. After a restart:
 
 - A synchronized producer with a checkpoint starts `:resuming`. It becomes `:up` once the
-  system pipeline reports the same consumer tag and a heartbeat arrives: the upstream session
-  never broke, so the backlog on the topic is complete and no recovery is needed.
+  system pipeline reports the same consumer tag and an `alive` generated within
+  `inactivity_seconds` arrives: the upstream session never broke, so the backlog on the topic
+  is complete and no recovery is needed. Older alives drained from the backlog keep the
+  producer alive but do not count, so a session change or unsubscribed alive still queued
+  behind them is read before the producer is reported `:up`.
 - A different consumer tag means the session broke while the SDK was down; every producer
   recovers incrementally from its checkpoint.
 - A producer without a synchronized checkpoint starts `:down` and recovers on its first
@@ -237,7 +240,10 @@ initiation, failures, interruptions, stalls, and completion can be correlated:
 | `[:uof_sdk, :recovery, :interrupted]` | An unsubscribed `alive` or heartbeat gap while a request was in flight; includes `reason` |
 | `[:uof_sdk, :recovery, :stalled]` | No `snapshot_complete` within `max_recovery_time`; emitted before the reissue |
 | `[:uof_sdk, :producer, :status]` | A producer's status changed |
+| `[:uof_sdk, :producer, :alive]` | A system `alive` was read; `delay_ms` is how late, which shows how far behind the system pipeline reads the topic |
 
 Alert on a producer that stays `:recovering` or `:down`, on recoveries without `:completed`,
-and on repeated `:failed`, `:interrupted`, or `:stalled` events. The
+and on repeated `:failed`, `:interrupted`, or `:stalled` events. A growing alive `delay_ms`
+means the control plane is falling behind the topic, which delays heartbeat and recovery
+detection. The
 [architecture guide](architecture.md#observability) lists every signal the SDK emits.

@@ -1068,6 +1068,37 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute_received {:recover_called, _, _}
   end
 
+  test "resumed producer waits for an alive generated within the heartbeat interval", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 50_000)
+    m = start_monitor(clock)
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
+
+    # Draining retained backlog: alives keep the producer alive, but a session
+    # change or unsubscribed alive may still be queued behind them.
+    ProducerMonitor.alive(m, 1, 50_000 - @inactivity - 1, true)
+    tick(m)
+    refute_received {:status, %ProducerStatus{status: :up}}
+    assert {:ok, %ProducerStatus{status: :resuming, alive_delay: delay}} = ProducerMonitor.producer(m, 1)
+    assert delay == @inactivity + 1
+
+    ProducerMonitor.alive(m, 1, 49_000, true)
+    tick(m)
+    assert_receive {:status, %ProducerStatus{status: :up, alive_delay: 1_000}}
+    refute_received {:recover_called, _, _}
+  end
+
+  test "each alive reports how late it was read", %{clock: clock} do
+    attach_telemetry([[:uof_sdk, :producer, :alive]])
+    set_clock(clock, 5_000)
+    m = start_monitor(clock)
+
+    ProducerMonitor.alive(m, 1, 4_200, false)
+    sync(m)
+
+    assert_receive {:telemetry, [:uof_sdk, :producer, :alive], %{delay_ms: 800}, %{producer_id: 1, subscribed: false}}
+  end
+
   test "resumed producer stays resuming until the consumer tag is observed", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 1_500)

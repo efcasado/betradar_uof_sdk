@@ -43,12 +43,21 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert :unchanged = Producer.check(%{stale_alive | last_alive_at: 1_000}, 1_001, 900, true)
   end
 
-  test "a resuming producer becomes up only after heartbeat and session gates" do
-    producer = %Producer{id: 1, status: :resuming, last_alive_at: 1_000}
+  test "a resuming producer becomes up only after a current heartbeat and the session gate" do
+    producer = %Producer{id: 1, status: :resuming, last_alive_at: 1_000, alive_delay: 0}
 
     assert :unchanged = Producer.check(producer, 1_001, 900, false)
     assert :unchanged = Producer.check(%{producer | last_alive_at: nil}, 1_001, 900, true)
     assert {:transition, %Producer{status: :up}} = Producer.check(producer, 1_001, 900, true)
+
+    # An alive drained from backlog keeps the producer alive but is not current.
+    stale = %{producer | alive_delay: 901}
+    assert :unchanged = Producer.check(stale, 1_001, 900, true)
+  end
+
+  test "an alive records how late it was read" do
+    assert %Producer{alive_delay: 250} = elem(Producer.observe_alive(%Producer{id: 1, status: :up}, 750, true, 1_000), 1)
+    assert %Producer{alive_delay: nil} = elem(Producer.observe_alive(%Producer{id: 1, status: :up}, nil, true, 1_000), 1)
   end
 
   @tag :capture_log

@@ -1,39 +1,40 @@
 # Working on this SDK
 
 This is a thin, unofficial Elixir SDK for Betradar's Unified Odds Feed (UOF).
-It owns feed consumption, decoding, producer health, and recovery orchestration.
+It consumes the feed from Pulsar, fed by a RabbitMQ source connector, and owns
+decoding, producer health, and recovery orchestration.
 Applications own business logic, message effects, and their persistence.
 Keep new features within that scope unless the task explicitly expands it.
 
 ## Start here
 
-- Read the [architecture guide](docs/architecture.md) before changing transport,
+- Read the [architecture guide](docs/architecture.md) before changing Pulsar consumption,
   supervision, message processing, recovery, or persistence behavior. It describes
   how the SDK works: component responsibilities, process boundaries, the monitor
   store contract, and the design invariants.
-- Use the [README](README.md) for the public surface: installation, transport
-  choice and configuration, configuration options, handler callbacks, and testing.
+- Use the [README](README.md) for the public surface: installation, Pulsar and
+  connector setup, configuration options, handler callbacks, and testing.
 - Update those documents when a change alters the behavior they describe.
 
 ## Implementation conventions
 
 - Prefer idiomatic Elixir: pattern matching, explicit contracts, small functions,
   and OTP supervision. Let invalid internal states and programming errors fail
-  visibly; handle expected transport failures through the appropriate backoff.
+  visibly; handle expected broker failures through the appropriate backoff.
 - Catch failures only where there is a concrete recovery or cleanup responsibility.
   Preserve the original cause. Cleanup must respect shared resource ownership.
 - Keep state transitions in their owning component. Follow the architecture guide
-  when deciding whether a change belongs in a pipeline, transport, or monitor.
+  when deciding whether a change belongs in a pipeline, the Pulsar wiring, or the monitor.
 - Reuse `uof_api` for HTTP API access and `uof_schemas` for XML decoding and feed
-  structs. Preserve the ability to install only the chosen transport dependency.
+  structs.
 - Inspect the installed dependency source before relying on adapter behavior.
   Document why private APIs or unusual lifecycle mechanisms are necessary, and
   include compatibility validation when changing those dependencies.
 - Prefer a focused change over speculative abstractions or configuration options.
 - The SDK is unreleased. Do not add backwards-compatibility fallbacks for older
   connectors, producers, or configuration; change the contract and its callers.
-- Keep each PR to one concern. Split unrelated cleanups, such as an AMQP change
-  found while working on Pulsar, into their own PR.
+- Keep each PR to one concern. Split unrelated cleanups, such as a connector
+  contract change found while working on recovery, into their own PR.
 
 ## Validate UOF behavior against upstream
 
@@ -67,7 +68,7 @@ mix format --check-formatted
 mix test
 ```
 
-For transport or lifecycle changes, also run `make test-integration`. It uses
+For Pulsar consumption or lifecycle changes, also run `make test-integration`. It uses
 Docker for RabbitMQ and Pulsar and builds the RabbitMQ source connector when
 needed; see the [README](README.md#testing) and Makefile for prerequisites and
 overrides.
@@ -85,15 +86,16 @@ the runtime suites. Report what was tested and any checks that were not run.
 - Prioritize concrete correctness risks in supported configurations. Explain the
   trigger, affected behavior, and consequence; distinguish verified failures from
   hypotheses. Consult dependency source when a finding depends on its semantics.
-- Check the architecture guide's invariants, particularly shared AMQP ownership,
-  active-only Pulsar recovery, persisted recovery intent, and atomic monitor snapshots.
-- For Pulsar, check the [connector contract](docs/architecture.md#connector-contract):
+- Check the architecture guide's invariants, particularly the system subscription
+  as the sole control plane, active-only recovery, persisted recovery intent, and
+  atomic monitor snapshots.
+- Check the [connector contract](docs/architecture.md#connector-contract):
   routing decisions read the `__rabbitmq_routing_key` property, the message key is
   the ordering scope (event URN or `system`) and relies on key-based batching, and
   `node_id` identifies a subscription shared by all of its instances.
 - Check recovery completion against the active producer/request and treat stale
   observations explicitly. Feed synchronization, application processing, and
-  transport acknowledgement are distinct boundaries.
+  Pulsar acknowledgement are distinct boundaries.
 - Do not request generic error catches, extra retries, or forced process termination
   without showing how they preserve the relevant failure and ownership contracts.
 - Keep mechanical formatting checks in tooling. Avoid turning internal contracts

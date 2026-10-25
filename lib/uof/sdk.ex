@@ -17,7 +17,7 @@ defmodule UOF.SDK do
   override per start.
 
   It supervises (in order, with `:rest_for_one`) an optional monitor-state store,
-  producer monitor, a shared transport client, a system-message pipeline,
+  producer monitor, a shared Pulsar client, a system-message pipeline,
   and a content-message pipeline. Runtime state is held directly by the
   `UOF.SDK.ProducerMonitor` GenServer — no separate registry process is needed.
   """
@@ -50,10 +50,10 @@ defmodule UOF.SDK do
   recovering and the request is correlated with its `snapshot_complete` and
   stall-guarded, healing exactly like an automatic recovery. During restart,
   the recovery intent is persisted immediately but HTTP waits until the
-  monitored pipelines are ready. Pass `full: true` to ignore the
+  system pipeline reports its consumer tag. Pass `full: true` to ignore the
   checkpoint and request a full snapshot. Refused with
   `{:error, :passive}` on an instance that does not currently own the system
-  subscription (multi-instance Pulsar) — issue it on the active instance.
+  subscription — issue it on the active instance.
   """
   @spec recover(integer(), keyword()) ::
           :ok | {:error, :already_recovering | :passive | :unknown_producer}
@@ -69,50 +69,37 @@ defmodule UOF.SDK do
           {ProducerMonitor,
            handler: config.handler,
            inactivity_ms: config.inactivity_seconds * 1_000,
-           max_processing_delay_ms: config.max_processing_delay_seconds * 1_000,
-           ownership: config.ownership,
-           pipelines: config.monitored_pipelines,
            node_id: config.node_id,
            monitor_store: config.monitor_store,
            min_interval_ms: config.min_interval_between_recoveries * 1_000,
            max_recovery_ms: config.max_recovery_time * 1_000,
-           recovery_overlap_ms: config.recovery_overlap_seconds * 1_000,
            producers: config.producers}
         ]
 
     # Strategy and ordering are load-bearing: the monitor must start before
-    # the transport client and pipelines so its registered name exists when
+    # the Pulsar client and pipelines so its registered name exists when
     # consumers report failover ownership, and :rest_for_one must take the
     # client and pipelines down with a crashed monitor so re-subscribing Pulsar
     # consumers deliver a fresh ownership report to its restarted passive
-    # state. AMQP shares a connection child without an ownership callback and
-    # is configured permanently active by the transport.
-    Supervisor.init(lifecycle ++ config.transport_children ++ child_specs(config), strategy: :rest_for_one)
+    # state.
+    Supervisor.init(lifecycle ++ [config.pulsar_client | child_specs(config)], strategy: :rest_for_one)
   end
 
   @doc """
   Build the feed pipeline child specs for a resolved `config`. Exposed so the
-  normalized transport wiring can be inspected/tested without connecting.
+  normalized Pulsar wiring can be inspected/tested without connecting.
   """
   @spec child_specs(Config.t()) :: [Supervisor.child_spec()]
   def child_specs(%Config{} = config) do
     [
       {SystemPipeline,
-       name: SystemPipeline,
-       producer: config.system_producer,
-       node_id: config.node_id,
-       metadata_adapter: config.metadata_adapter,
-       routing_key_metadata_key: config.routing_key_metadata_key,
-       monitor: ProducerMonitor},
+       name: SystemPipeline, producer: config.system_producer, node_id: config.node_id, monitor: ProducerMonitor},
       {ContentPipeline,
        name: ContentPipeline,
        handler: config.handler,
        concurrency: config.concurrency,
        producer: config.content_producer,
-       node_id: config.node_id,
-       metadata_adapter: config.metadata_adapter,
-       routing_key_metadata_key: config.routing_key_metadata_key,
-       monitor: if(:content in config.monitored_pipelines, do: ProducerMonitor)}
+       node_id: config.node_id}
     ]
   end
 

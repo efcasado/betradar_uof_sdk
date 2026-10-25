@@ -70,12 +70,10 @@ defmodule UOF.SDK.ProducerMonitorTest do
       end,
       now_fun: fn -> Agent.get(clock, & &1) end,
       inactivity_ms: @inactivity,
-      max_processing_delay_ms: @inactivity,
       tick_ms: 60_000,
-      recovery_overlap_ms: 0,
       # Most unit tests start with control authority. Ownership-specific tests
-      # override this; configured Pulsar monitors start passive.
-      ownership: {:failover, :active},
+      # override this; configured monitors start passive.
+      ownership: :active,
       # Disable the recovery cooldown by default so lifecycle tests can drive
       # back-to-back recoveries on a frozen clock; the throttle has its own test.
       min_interval_ms: 0
@@ -121,9 +119,9 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
   end
 
-  defp save_state(checkpoints, synchronized_producers, consumer_tags \\ %{}) do
-    if map_size(consumer_tags) > 0 do
-      store_snapshot(Snapshot.change_session(stored_snapshot(), consumer_tags))
+  defp save_state(checkpoints, synchronized_producers, consumer_tag \\ nil) do
+    if consumer_tag do
+      store_snapshot(Snapshot.change_session(stored_snapshot(), consumer_tag))
     end
 
     ## Health monitoring ---------------------------------------------------------
@@ -195,7 +193,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     monitor = start_monitor(clock)
 
     assert %ProducerMonitor{
-             ownership: {:failover, :active},
+             ownership: :active,
              producers: %{1 => %Producer{}},
              snapshot: %Snapshot{}
            } = :sys.get_state(monitor)
@@ -302,8 +300,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     test "a reconnect while waiting does not issue the request", %{clock: clock} do
       m = start_monitor(clock)
 
-      ProducerMonitor.observe_connection(m, {:system, :system_a})
-      ProducerMonitor.observe_connection(m, {:content, :content_a})
+      ProducerMonitor.observe_consumer_tag(m, :system_a)
       rid = assert_recovery_triggered()
       ProducerMonitor.snapshot_complete(m, 1, rid)
       assert_receive {:status, %ProducerStatus{status: :up}}
@@ -313,7 +310,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
       assert_receive {:status, %ProducerStatus{status: :down}}
       flush_statuses()
 
-      ProducerMonitor.observe_connection(m, {:content, :content_b})
+      ProducerMonitor.observe_consumer_tag(m, :system_b)
       sync(m)
       refute_received {:recover_called, _product, _opts}
       refute_received {:status, _producer}
@@ -371,160 +368,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
   end
 
-  test "processing lag marks down + delayed without recovering", %{clock: clock} do
-    m = start_monitor(clock)
-
-    # bring it up first
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    # Local clock jumps to 20_000, but the newest message the content pipeline
-    # processed was generated back at 1_000. A fresh system alive keeps the
-    # alive-interval path quiet, so the processing check is what trips.
-    set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 20_000, true)
-    ProducerMonitor.message(m, 1, 1_000)
-    sync(m)
-
-    tick(m)
-    assert_receive {:status, %ProducerStatus{status: :delayed}}
-
-    refute_received {:recover_called, _, _}
-
-    # content progress generated at ~now arrives -> caught up -> stabilized
-    ProducerMonitor.message(m, 1, 20_000)
-    tick(m)
-
-    assert_receive {:status, %ProducerStatus{status: :up}}
-  end
-
-  describe "content lag from in-flight messages" do
-    # Below the heartbeat interval, so lag is checked before an alive timeout.
-    @lag 5_000
-
-    test "a recovery completing while content is known to lag reports delayed, not up", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      test_pid = self()
-
-      ProducerMonitor.alive(m, 1, 1_000, true)
-      rid = assert_recovery_triggered()
-
-      stuck =
-        spawn_link(fn ->
-          ProducerMonitor.track_processing(1, 1_000, fn ->
-            send(test_pid, :handling)
-
-            receive do
-              :finish -> :ok
-            end
-          end)
-        end)
-
-      assert_receive :handling
-      set_clock(clock, 1_000 + @lag + 1)
-      ProducerMonitor.snapshot_complete(m, 1, rid)
-
-      assert_receive {:status, %ProducerStatus{status: :delayed, processing_queue_delay: delay}}
-      assert delay == @lag + 1
-      refute_received {:status, %ProducerStatus{status: :up}}
-
-      # Once fresh content is processed, the producer catches up.
-      send(stuck, :finish)
-      wait_until_idle(stuck)
-      ProducerMonitor.message(m, 1, 1_000 + @lag + 1)
-      tick(m)
-      assert_receive {:status, %ProducerStatus{status: :up}}
-    end
-
-    test "a stuck processor is not hidden by fresher completed messages", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      bring_up(m)
-
-      test_pid = self()
-
-      stuck =
-        spawn_link(fn ->
-          ProducerMonitor.track_processing(1, 1_000, fn ->
-            send(test_pid, :handling)
-
-            receive do
-              :finish -> :ok
-            end
-          end)
-        end)
-
-      assert_receive :handling
-
-      # Another processor completes a fresh message while the first is stuck.
-      set_clock(clock, 1_000 + @lag + 1)
-      ProducerMonitor.message(m, 1, 1_000 + @lag + 1)
-      tick(m)
-
-      assert_receive {:status, %ProducerStatus{status: :delayed, processing_queue_delay: delay}}
-      assert delay == @lag + 1
-
-      send(stuck, :finish)
-      wait_until_idle(stuck)
-      tick(m)
-      assert_receive {:status, %ProducerStatus{status: :up}}
-    end
-
-    test "a completed message records its timestamp", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      bring_up(m)
-
-      ProducerMonitor.track_processing(1, 4_000, fn -> :ok end)
-      sync(m)
-
-      assert {:ok, %ProducerStatus{last_message_timestamp: 4_000}} = ProducerMonitor.producer(m, 1)
-    end
-
-    test "a raising handler's message counts as processed, not in flight", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      bring_up(m)
-
-      assert_raise RuntimeError, fn ->
-        ProducerMonitor.track_processing(1, 1_000, fn -> raise "handler failed" end)
-      end
-
-      # The pipeline has moved past a failed message, so it advances freshness.
-      sync(m)
-      assert {:ok, %ProducerStatus{last_message_timestamp: 1_000}} = ProducerMonitor.producer(m, 1)
-
-      set_clock(clock, 2_000)
-      ProducerMonitor.message(m, 1, 2_000)
-      tick(m)
-      refute_received {:status, %ProducerStatus{status: :delayed}}
-    end
-
-    test "a processor that dies mid-message is not counted", %{clock: clock} do
-      m = start_monitor([max_processing_delay_ms: @lag], clock)
-      bring_up(m)
-
-      pid = spawn(fn -> ProducerMonitor.track_processing(1, 1_000, fn -> Process.sleep(:infinity) end) end)
-      wait_until(fn -> Map.has_key?(:sys.get_state(m).in_flight, pid) end)
-      Process.exit(pid, :kill)
-      wait_until(fn -> not Map.has_key?(:sys.get_state(m).in_flight, pid) end)
-
-      set_clock(clock, 1_000 + @lag + 1)
-      ProducerMonitor.message(m, 1, 1_000 + @lag + 1)
-      tick(m)
-      refute_received {:status, %ProducerStatus{status: :delayed}}
-    end
-  end
-
   defp bring_up(m) do
     ProducerMonitor.alive(m, 1, 1_000, true)
     rid = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %ProducerStatus{status: :up}}
-  end
-
-  defp wait_until_idle(pid) do
-    ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
   end
 
   defp wait_until(fun, attempts \\ 100) do
@@ -535,97 +383,46 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
   end
 
-  test "content-session alive freshness prevents quiet producers from being marked delayed", %{clock: clock} do
+  test "an up producer stays up however long content takes to process", %{clock: clock} do
     m = start_monitor(clock)
+    bring_up(m)
+    flush_statuses()
 
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    set_clock(clock, 20_000)
-
-    # System alive keeps delivery health/checkpointing fresh. The content
-    # session's own alive is queued behind content and therefore proves local
-    # content processing is not lagging, even when there are no event messages.
-    ProducerMonitor.alive(m, 1, 20_000, true)
-    ProducerMonitor.message(m, 1, 20_000)
+    # Content lag is not tracked: only heartbeats decide health.
+    set_clock(clock, 1_000 + 5 * @inactivity)
+    ProducerMonitor.alive(m, 1, 1_000 + 5 * @inactivity, true)
     tick(m)
 
-    refute_received {:status, %ProducerStatus{status: :delayed}}
+    refute_received {:status, _producer}
     refute_received {:recover_called, _, _}
     assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
   end
 
-  test "content-session alive freshness does not write checkpoints", %{clock: clock} do
+  test "the first consumer tag recovers every producer, and a new tag recovers again", %{clock: clock} do
     m = start_monitor(clock)
 
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    ProducerMonitor.message(m, 1, 2_000)
-    sync(m)
-
-    assert checkpoint(1) == :none
-  end
-
-  test "alive on a delayed producer does not trigger recovery", %{clock: clock} do
-    m = start_monitor(clock)
-
-    # bring it up
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    # drive it into processing lag: local clock at 20_000 but
-    # content progress is still back at 1_000, with a fresh alive so the
-    # alive-interval path stays quiet and the processing check is what trips.
-    set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 20_000, true)
-    ProducerMonitor.message(m, 1, 1_000)
-    sync(m)
-    tick(m)
-    assert_receive {:status, %ProducerStatus{status: :delayed}}
-
-    # another subscribed alive arrives while still delayed and still behind: the
-    # remote feed is healthy, so this must NOT issue a recovery (the flop bug
-    # re-triggered on every alive).
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    sync(m)
-    refute_received {:recover_called, _, _}
-    assert {:ok, %ProducerStatus{status: :delayed}} = ProducerMonitor.producer(m, 1)
-  end
-
-  test "startup connection recovery waits for both system and content namespaces", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.observe_connection(m, {:system, :conn_a})
-    sync(m)
-    refute_received {:recover_called, _, _}
-
-    ProducerMonitor.observe_connection(m, {:content, :conn_a})
+    ProducerMonitor.observe_consumer_tag(m, :conn_a)
     rid1 = assert_recovery_triggered()
     ProducerMonitor.snapshot_complete(m, 1, rid1)
     assert_receive {:status, %ProducerStatus{status: :up}}
 
     # same consumer tag -> deduped, no recovery
-    ProducerMonitor.observe_connection(m, {:system, :conn_a})
+    ProducerMonitor.observe_consumer_tag(m, :conn_a)
     sync(m)
     refute_received {:recover_called, _, _}
 
-    # new consumer tag (a reconnect) -> down + recover
-    ProducerMonitor.observe_connection(m, {:system, :conn_b})
+    # new consumer tag (a reconnect) -> recover
+    ProducerMonitor.observe_consumer_tag(m, :conn_b)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", _}
   end
 
-  test "startup alive records recovery but defers HTTP until both connections are ready", %{clock: clock} do
+  test "after a restart, an alive records recovery but defers HTTP until the consumer tag is observed", %{
+    clock: clock
+  } do
+    save_state(%{}, [], "ctag-sys")
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, :conn_a})
     ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
 
@@ -633,16 +430,16 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
 
-    ProducerMonitor.observe_connection(m, {:content, :conn_a})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     assert_receive {:recover_called, "pre", _}
   end
 
   test "pending startup recovery remains deferred before the readiness deadline", %{
     clock: clock
   } do
+    save_state(%{}, [], "ctag-sys")
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, :conn_a})
     ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
@@ -653,72 +450,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute_received {:recover_called, _, _}
     assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
 
-    ProducerMonitor.observe_connection(m, {:content, :conn_a})
-    assert_receive {:recover_called, "pre", _}
-  end
-
-  test "first consumer tag from the second namespace triggers one startup recovery", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.observe_connection(m, {:system, "same-ctag"})
-    sync(m)
-    refute_received {:status, %ProducerStatus{status: :recovering}}
-    refute_received {:recover_called, _, _}
-
-    ProducerMonitor.observe_connection(m, {:content, "same-ctag"})
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
-    rid1 = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid1)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-  end
-
-  test "same namespace consumer tag changes before startup is ready do not recover early", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.observe_connection(m, {:system, :system_a})
-    ProducerMonitor.observe_connection(m, {:system, :system_b})
-    sync(m)
-    refute_received {:recover_called, _, _}
-
-    ProducerMonitor.observe_connection(m, {:content, :content_a})
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
-    assert_receive {:recover_called, "pre", _}
-  end
-
-  test "startup gate requires system and content namespaces explicitly", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.observe_connection(m, {:default, :default_a})
-    ProducerMonitor.observe_connection(m, {:system, :system_a})
-    sync(m)
-    refute_received {:recover_called, _, _}
-
-    ProducerMonitor.observe_connection(m, {:content, :content_a})
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
-    assert_receive {:recover_called, "pre", _}
-  end
-
-  test "consumer tag changes in either namespace trigger recovery after startup", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.observe_connection(m, {:system, :system_a})
-    sync(m)
-    refute_received {:recover_called, _, _}
-
-    ProducerMonitor.observe_connection(m, {:content, :content_a})
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
-    rid1 = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid1)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    ProducerMonitor.observe_connection(m, {:content, :content_b})
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
-    rid2 = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid2)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    ProducerMonitor.observe_connection(m, {:system, :system_b})
-    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     assert_receive {:recover_called, "pre", _}
   end
 
@@ -728,8 +460,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.alive(m, 1, 1_000, true)
     first_request_id = assert_recovery_triggered()
 
-    ProducerMonitor.observe_connection(m, {:system, :system_a})
-    ProducerMonitor.observe_connection(m, {:content, :content_a})
+    ProducerMonitor.observe_consumer_tag(m, :system_a)
     second_request_id = assert_recovery_triggered()
     assert second_request_id != first_request_id
 
@@ -771,23 +502,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.alive(m, 1, 1_000, true)
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == @now - 60_000
-  end
-
-  test "incremental recovery subtracts configured overlap from checkpoint", %{clock: clock} do
-    put_checkpoint(1, @now - 60_000)
-
-    m =
-      start_monitor(
-        [
-          now_fun: fn -> @now end,
-          recovery_overlap_ms: 30_000
-        ],
-        clock
-      )
-
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == @now - 90_000
   end
 
   test "clamps :after to the producer's recovery window", %{clock: clock} do
@@ -879,8 +593,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     # :recovering guard, so no second defer is scheduled
     assert {:error, :already_recovering} = ProducerMonitor.recover(m, 1, [])
     ProducerMonitor.alive(m, 1, 1_000, true)
-    ProducerMonitor.observe_connection(m, {:system, :conn_a})
-    ProducerMonitor.observe_connection(m, {:content, :conn_a})
+    ProducerMonitor.observe_consumer_tag(m, :conn_a)
     sync(m)
     refute_received {:recover_called, _, _}
 
@@ -945,8 +658,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:error, :unknown_producer} = ProducerMonitor.recover(m, 99, full: true)
   end
 
-  test "manual recovery is persisted but waits for restored connections", %{clock: clock} do
-    save_state(%{1 => 1_000}, [1], %{system: "s1", content: "c1"})
+  test "manual recovery is persisted but waits for the restored session", %{clock: clock} do
+    save_state(%{1 => 1_000}, [1], "s1")
     m = start_monitor(clock)
 
     assert :ok = ProducerMonitor.recover(m, 1, [])
@@ -954,11 +667,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute_received {:recover_called, _, _}
     refute resumable?(1)
 
-    ProducerMonitor.observe_connection(m, {:system, "s1"})
-    sync(m)
-    refute_received {:recover_called, _, _}
-
-    ProducerMonitor.observe_connection(m, {:content, "c1"})
+    ProducerMonitor.observe_consumer_tag(m, "s1")
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 1_000
   end
@@ -1233,100 +942,62 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   ## Restart resume -------------------------------------------------------------
 
-  # Persist the state of a producer that was up, with a checkpoint and both
-  # namespace consumer tags — the shape a healthy shutdown leaves behind.
+  # Persist the state of a producer that was up, with a checkpoint and the
+  # consumer tag — the shape a healthy shutdown leaves behind.
   defp persist_healthy_shutdown(checkpoint) do
-    save_state(
-      %{1 => checkpoint},
-      [1],
-      %{system: "ctag-sys", content: "ctag-con"}
-    )
+    save_state(%{1 => checkpoint}, [1], "ctag-sys")
   end
 
-  test "resumed producer skips startup recovery and returns up once caught up", %{clock: clock} do
+  test "resumed producer skips startup recovery and returns up in the same session", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 50_000)
     m = start_monitor(clock)
 
-    # same consumer tags after restart -> same upstream consume session -> no recovery
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    # same consumer tag after restart -> same upstream consume session -> no recovery
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     # subscribed alive on the resuming producer -> no recovery either
     ProducerMonitor.alive(m, 1, 50_000, true)
     sync(m)
     refute_received {:recover_called, _, _}
     assert {:ok, %ProducerStatus{status: :resuming}} = ProducerMonitor.producer(m, 1)
 
-    # still draining: no content processed in this session yet
-    tick(m)
-    refute_received {:status, %ProducerStatus{status: :up}}
-
-    # backlog catches up -> stabilized -> up, without ever recovering
-    ProducerMonitor.message(m, 1, 50_000)
     tick(m)
     assert_receive {:status, %ProducerStatus{status: :up}}
     refute_received {:recover_called, _, _}
   end
 
-  test "a recent checkpoint is not content evidence for a resumed producer", %{clock: clock} do
+  test "resumed producer stays resuming until the consumer tag is observed", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 1_500)
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
-    ProducerMonitor.alive(m, 1, 1_500, true)
-    tick(m)
-
-    refute_received {:status, %ProducerStatus{status: :up}}
-    assert {:ok, %ProducerStatus{status: :resuming, last_message_timestamp: nil}} = ProducerMonitor.producer(m, 1)
-
-    ProducerMonitor.message(m, 1, 1_500)
-    tick(m)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-  end
-
-  test "resumed producer stays down until an alive and both connections are observed", %{clock: clock} do
-    # fresh content is already processed, so the heartbeat and connection gates
-    # are what must keep the producer resuming here
-    persist_healthy_shutdown(1_000)
-    set_clock(clock, 1_500)
-    m = start_monitor(clock)
-    ProducerMonitor.message(m, 1, 1_500)
-
-    tick(m)
-    refute_received {:status, %ProducerStatus{status: :up}}
-    assert {:ok, %ProducerStatus{status: :resuming}} = ProducerMonitor.producer(m, 1)
-
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
     ProducerMonitor.alive(m, 1, 1_600, true)
     sync(m)
     refute_received {:recover_called, _, _}
 
     tick(m)
     refute_received {:status, %ProducerStatus{status: :up}}
+    assert {:ok, %ProducerStatus{status: :resuming}} = ProducerMonitor.producer(m, 1)
 
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     tick(m)
     assert_receive {:status, %ProducerStatus{status: :up}}
   end
 
-  test "resumed producer stays resuming without a current alive even when both connections are ready", %{
+  test "resumed producer stays resuming without a current alive even when the consumer tag is observed", %{
     clock: clock
   } do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 1_500)
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     tick(m)
 
     refute_received {:status, %ProducerStatus{status: :up}}
     assert {:ok, %ProducerStatus{status: :resuming, last_alive_at: nil}} = ProducerMonitor.producer(m, 1)
 
     ProducerMonitor.alive(m, 1, 1_600, true)
-    ProducerMonitor.message(m, 1, 1_600)
     tick(m)
     assert_receive {:status, %ProducerStatus{status: :up, last_alive_at: 1_500}}
   end
@@ -1335,8 +1006,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     persist_healthy_shutdown(1_000)
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     sync(m)
 
     set_clock(clock, 1_000 + @inactivity + 1)
@@ -1352,33 +1022,24 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert opts[:after] == 1_000
   end
 
-  test "connection startup has a bounded readiness deadline", %{clock: clock} do
+  test "session startup has a bounded readiness deadline", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     m = start_monitor(clock)
-
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    sync(m)
     state = :sys.get_state(m)
 
     set_clock(clock, 1_000 + @inactivity + 1)
 
     assert_raise RuntimeError,
-                 "producer monitor connection readiness timed out; missing namespaces: [:content]",
+                 "producer monitor session readiness timed out; no consumer tag observed",
                  fn -> ProducerMonitor.handle_info(:tick, state) end
   end
 
-  test "resumed producer recovers incrementally when a namespace consumer tag changed across restart", %{clock: clock} do
+  test "resumed producer recovers incrementally when the consumer tag changed across restart", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     set_clock(clock, 50_000)
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys-new"})
-    sync(m)
-    refute_received {:recover_called, _, _}
-
-    # A persisted content consumer tag is only a comparison baseline. Recovery waits
-    # until the content pipeline has actually attached in this monitor session.
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys-new")
 
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     assert_receive {:recover_called, "pre", opts}
@@ -1390,7 +1051,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     # Simulate a crash after the session change is saved but before the
     # monitor visits producer 1 to prepare its recovery.
-    store_snapshot(Snapshot.change_session(stored_snapshot(), %{system: "ctag-sys", content: "ctag-con-2"}))
+    store_snapshot(Snapshot.change_session(stored_snapshot(), "ctag-sys"))
 
     m = start_monitor(clock)
     assert {:ok, %ProducerStatus{status: :down}} = ProducerMonitor.producer(m, 1)
@@ -1400,8 +1061,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     refute_received {:recover_called, _, _}
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con-2"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
 
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 1_000
@@ -1414,8 +1074,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     # Startup stores the loaded descriptions.
     assert_receive {:saved, %Snapshot{descriptions: [%{id: 1}]}}
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     ProducerMonitor.alive(m, 1, 50_000, false)
 
     # The monitor sends both messages, so mailbox order is issue order.
@@ -1444,8 +1103,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     m = start_monitor([monitor_store: {FailingStore, []}], clock)
     ref = Process.monitor(m)
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     ProducerMonitor.alive(m, 1, 50_000, false)
 
     assert_receive {:DOWN, ^ref, :process, ^m, {%RuntimeError{message: "store unavailable"}, _}}
@@ -1587,8 +1245,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
     m = start_monitor(clock)
     assert {:ok, %ProducerStatus{status: :down}} = ProducerMonitor.producer(m, 1)
     # Only the loaded descriptions are stored.
-    assert %Snapshot{consumer_tags: tags, producers: progress, descriptions: [%{id: 1}]} = stored_snapshot()
-    assert tags == %{} and progress == %{}
+    assert %Snapshot{consumer_tag: nil, producers: progress, descriptions: [%{id: 1}]} = stored_snapshot()
+    assert progress == %{}
   end
 
   test "resumed producer recovers on an unsubscribed alive", %{clock: clock} do
@@ -1596,8 +1254,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     set_clock(clock, 50_000)
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     ProducerMonitor.alive(m, 1, 50_000, false)
     assert_recovery_triggered()
 
@@ -1606,11 +1263,10 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute resumable?(1)
   end
 
-  test "unsubscribed alive remains pending until the second unchanged connection is ready", %{clock: clock} do
+  test "unsubscribed alive remains pending until the unchanged consumer tag is observed", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     m = start_monitor(clock)
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
     ProducerMonitor.alive(m, 1, 1_000, false)
     sync(m)
 
@@ -1620,7 +1276,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     # The unchanged consumer tag does not itself indicate a reconnect. Becoming ready
     # must nevertheless issue the recovery remembered from subscribed=0.
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == 1_000
 
@@ -1672,37 +1328,16 @@ defmodule UOF.SDK.ProducerMonitorTest do
     refute synchronized?(1)
   end
 
-  test "persists delayed transitions", %{clock: clock} do
+  test "persists the consumer tag as it changes", %{clock: clock} do
     m = start_monitor(clock)
 
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    rid = assert_recovery_triggered()
-    ProducerMonitor.snapshot_complete(m, 1, rid)
-    assert_receive {:status, %ProducerStatus{status: :up}}
-
-    set_clock(clock, 20_000)
-    ProducerMonitor.alive(m, 1, 20_000, true)
-    ProducerMonitor.message(m, 1, 1_000)
-    tick(m)
-    assert_receive {:status, %ProducerStatus{status: :delayed}}
-
-    assert synchronized?(1)
-  end
-
-  test "persists consumer tags as they change", %{clock: clock} do
-    m = start_monitor(clock)
-
-    ProducerMonitor.observe_connection(m, {:system, "ctag-a"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-a")
     sync(m)
-    assert stored_snapshot().consumer_tags == %{}
+    assert stored_snapshot().consumer_tag == "ctag-a"
 
-    ProducerMonitor.observe_connection(m, {:content, "ctag-b"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-b")
     sync(m)
-    assert stored_snapshot().consumer_tags == %{system: "ctag-a", content: "ctag-b"}
-
-    ProducerMonitor.observe_connection(m, {:system, "ctag-c"})
-    sync(m)
-    assert stored_snapshot().consumer_tags == %{system: "ctag-c", content: "ctag-b"}
+    assert stored_snapshot().consumer_tag == "ctag-b"
   end
 
   defp report_active_state(monitor, active_state) do
@@ -1716,8 +1351,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
     sync(monitor)
   end
 
-  test "a failover monitor starts passive until ownership is reported", %{clock: clock} do
-    m = start_monitor([ownership: {:failover, :passive}], clock)
+  test "a monitor starts passive until ownership is reported", %{clock: clock} do
+    m = start_monitor([ownership: :passive], clock)
 
     ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
@@ -1726,16 +1361,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     report_active_state(m, :active)
     ProducerMonitor.alive(m, 1, 2_000, true)
-    assert_recovery_triggered()
-  end
-
-  test "an always-active monitor ignores failover ownership reports", %{clock: clock} do
-    ## State persistence ----------------------------------------------------------
-    m = start_monitor([ownership: :always_active], clock)
-
-    report_active_state(m, :passive)
-
-    assert ProducerMonitor.recover(m, 1, full: true) == :ok
     assert_recovery_triggered()
   end
 
@@ -1831,7 +1456,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   test "unknown producer takes precedence over passive ownership", %{clock: clock} do
-    m = start_monitor([ownership: {:failover, :passive}], clock)
+    m = start_monitor([ownership: :passive], clock)
 
     assert ProducerMonitor.recover(m, 99, []) == {:error, :unknown_producer}
   end
@@ -1852,8 +1477,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     report_active_state(m, :active)
     refute_received {:recover_called, _, _}
 
-    ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-    ProducerMonitor.observe_connection(m, {:content, "ctag-con"})
+    ProducerMonitor.observe_consumer_tag(m, "ctag-sys")
     assert_recovery_triggered()
   end
 
@@ -1877,8 +1501,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   defp establish_session(m) do
-    ProducerMonitor.observe_connection(m, {:system, "s1"})
-    ProducerMonitor.observe_connection(m, {:content, "c1"})
+    ProducerMonitor.observe_consumer_tag(m, "s1")
     rid = assert_recovery_triggered()
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     ProducerMonitor.snapshot_complete(m, 1, rid)
@@ -1890,33 +1513,29 @@ defmodule UOF.SDK.ProducerMonitorTest do
     establish_session(m)
 
     # genuine reconnect: never-seen consumer tag
-    ProducerMonitor.observe_connection(m, {:content, "c2"})
+    ProducerMonitor.observe_consumer_tag(m, "s2")
     assert_recovery_triggered()
 
     # straggler from the superseded session, delivered out of order
-    ProducerMonitor.observe_connection(m, {:content, "c1"})
+    ProducerMonitor.observe_consumer_tag(m, "s1")
     sync(m)
 
     refute_receive {:recover_called, _product, _opts}
-    assert stored_snapshot().consumer_tags == %{system: "s1", content: "c2"}
+    assert stored_snapshot().consumer_tag == "s2"
   end
 
-  test "persisted consumer tags arm the restart connection gate before observations arrive", %{clock: clock} do
-    save_state(%{}, [], %{system: "old-s", content: "old-c"})
+  test "a persisted consumer tag arms the restart session gate before observations arrive", %{clock: clock} do
+    save_state(%{}, [], "old-s")
     m = start_monitor(clock)
 
-    # Persisted baselines identify a restart window. Recovery intent is durable,
-    # but HTTP must wait until both current pipelines have reattached.
+    # The persisted baseline identifies a restart window. Recovery intent is
+    # durable, but HTTP must wait until the system pipeline has reattached.
     ProducerMonitor.alive(m, 1, 1_000, true)
     sync(m)
     assert_receive {:status, %ProducerStatus{status: :recovering}}
     refute_received {:recover_called, _, _}
 
-    ProducerMonitor.observe_connection(m, {:system, "old-s"})
-    sync(m)
-    refute_received {:recover_called, _, _}
-
-    ProducerMonitor.observe_connection(m, {:content, "old-c"})
+    ProducerMonitor.observe_consumer_tag(m, "old-s")
     assert_recovery_triggered()
   end
 
@@ -1925,22 +1544,22 @@ defmodule UOF.SDK.ProducerMonitorTest do
     establish_session(m)
     report_active_state(m, :passive)
 
-    ProducerMonitor.observe_connection(m, {:content, "c2"})
+    ProducerMonitor.observe_consumer_tag(m, "s2")
     sync(m)
 
     # nothing recorded, nothing acted on: the owner heals the shared feed
     refute_receive {:recover_called, _product, _opts}
     refute_receive {:status, _producer}
     assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)
-    assert stored_snapshot().consumer_tags == %{system: "s1", content: "c1"}
+    assert stored_snapshot().consumer_tag == "s1"
     assert synchronized?(1)
 
     # the stale baseline re-detects the session change once promoted
     report_active_state(m, :active)
-    ProducerMonitor.observe_connection(m, {:content, "c2"})
+    ProducerMonitor.observe_consumer_tag(m, "s2")
     assert_recovery_triggered()
     sync(m)
-    assert stored_snapshot().consumer_tags == %{system: "s1", content: "c2"}
+    assert stored_snapshot().consumer_tag == "s2"
   end
 
   test "a stale retry timer does not issue recovery for a healthy producer", %{clock: clock} do
@@ -1975,100 +1594,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert checkpoint(1) == {:ok, 2_000}
   end
 
-  ## Connection sessions -------------------------------------------------------
+  ## Consume sessions ----------------------------------------------------------
 
   ## Timer and checkpoint hygiene ---------------------------------------------
-
-  ## System-only monitoring ----------------------------------------------------
-
-  # The Pulsar transport monitors only the system pipeline: both subscriptions
-  # read one durable topic, so the content pipeline does not report to the
-  # monitor and content lag is not tracked.
-  defp start_system_only(overrides \\ [], clock) do
-    start_monitor(Keyword.put(overrides, :pipelines, [:system]), clock)
-  end
-
-  describe "system-only monitoring" do
-    test "a restart waits only for the system consumer tag before recovering", %{clock: clock} do
-      save_state(%{}, [], %{system: "ctag-sys"})
-      m = start_system_only(clock)
-
-      ProducerMonitor.alive(m, 1, 1_000, true)
-      sync(m)
-      refute_received {:recover_called, _, _}
-
-      ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-      assert_recovery_triggered()
-    end
-
-    test "a resumed producer becomes up without content progress", %{clock: clock} do
-      save_state(%{1 => 1_000}, [1], %{system: "ctag-sys"})
-      set_clock(clock, 50_000)
-      m = start_system_only(clock)
-
-      ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
-      ProducerMonitor.alive(m, 1, 50_000, true)
-      tick(m)
-
-      assert_receive {:status, %ProducerStatus{status: :up}}
-      refute_received {:recover_called, _, _}
-    end
-
-    test "a system consumer tag change across a restart recovers from the checkpoint", %{clock: clock} do
-      save_state(%{1 => 1_000}, [1], %{system: "ctag-sys"})
-      set_clock(clock, 50_000)
-      m = start_system_only(clock)
-
-      ProducerMonitor.observe_connection(m, {:system, "ctag-sys-new"})
-
-      assert_receive {:status, %ProducerStatus{status: :recovering}}
-      assert_receive {:recover_called, "pre", opts}
-      assert opts[:after] == 1_000
-    end
-
-    test "a persisted content consumer tag neither gates readiness nor survives a session change", %{clock: clock} do
-      persist_healthy_shutdown(1_000)
-      set_clock(clock, 50_000)
-      m = start_system_only(clock)
-
-      ProducerMonitor.observe_connection(m, {:system, "ctag-sys-new"})
-      assert_receive {:recover_called, "pre", _opts}
-      sync(m)
-
-      assert stored_snapshot().consumer_tags == %{system: "ctag-sys-new"}
-    end
-
-    test "the readiness deadline names only the system namespace", %{clock: clock} do
-      save_state(%{1 => 1_000}, [1], %{system: "ctag-sys"})
-      m = start_system_only(clock)
-      state = :sys.get_state(m)
-
-      set_clock(clock, 1_000 + @inactivity + 1)
-
-      assert_raise RuntimeError,
-                   "producer monitor connection readiness timed out; missing namespaces: [:system]",
-                   fn -> ProducerMonitor.handle_info(:tick, state) end
-    end
-
-    # The content pipeline does not report on Pulsar; a stale observation is
-    # injected here to show the monitor would not act on content lag anyway.
-    test "content lag neither delays the producer nor freezes its checkpoint", %{clock: clock} do
-      m = start_system_only(clock)
-
-      ProducerMonitor.alive(m, 1, 1_000, true)
-      rid = assert_recovery_triggered()
-      assert_receive {:status, %ProducerStatus{status: :recovering}}
-      ProducerMonitor.message(m, 1, 1_000)
-      set_clock(clock, 50_000)
-      ProducerMonitor.snapshot_complete(m, 1, rid)
-      assert_receive {:status, %ProducerStatus{status: :up}}
-
-      ProducerMonitor.alive(m, 1, 50_000, true)
-      tick(m)
-
-      refute_received {:status, _}
-      assert {:ok, %ProducerStatus{status: :up, processing_queue_delay: nil}} = ProducerMonitor.producer(m, 1)
-      assert checkpoint(1) == {:ok, 50_000}
-    end
-  end
 end

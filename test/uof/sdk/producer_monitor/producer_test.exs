@@ -36,23 +36,19 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert observed.last_alive_at == 1_000
   end
 
-  test "health checks distinguish delivery gaps from local processing lag" do
-    stale_alive = %Producer{id: 1, status: :up, last_alive_at: 100, last_message_timestamp: 1_000}
+  test "a heartbeat gap requests recovery" do
+    stale_alive = %Producer{id: 1, status: :up, last_alive_at: 100}
 
-    assert {:recovery_needed, ^stale_alive, :alive_timeout} =
-             Producer.check(stale_alive, 1_001, 900, 900, true, nil)
-
-    delayed = %Producer{id: 1, status: :up, last_alive_at: 1_000, last_message_timestamp: 100}
-
-    assert {:transition, %Producer{status: :delayed, processing_queue_delay: 901}} =
-             Producer.check(delayed, 1_001, 900, 900, true, nil)
+    assert {:recovery_needed, ^stale_alive, :alive_timeout} = Producer.check(stale_alive, 1_001, 900, true)
+    assert :unchanged = Producer.check(%{stale_alive | last_alive_at: 1_000}, 1_001, 900, true)
   end
 
-  test "a resuming producer becomes up only after heartbeat, connection, and catch-up gates" do
-    producer = %Producer{id: 1, status: :resuming, last_alive_at: 1_000, last_message_timestamp: 1_000}
+  test "a resuming producer becomes up only after heartbeat and session gates" do
+    producer = %Producer{id: 1, status: :resuming, last_alive_at: 1_000}
 
-    assert :unchanged = Producer.check(producer, 1_001, 900, 900, false, nil)
-    assert {:transition, %Producer{status: :up}} = Producer.check(producer, 1_001, 900, 900, true, nil)
+    assert :unchanged = Producer.check(producer, 1_001, 900, false)
+    assert :unchanged = Producer.check(%{producer | last_alive_at: nil}, 1_001, 900, true)
+    assert {:transition, %Producer{status: :up}} = Producer.check(producer, 1_001, 900, true)
   end
 
   @tag :capture_log
@@ -109,7 +105,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     refute Producer.recovery_pending?(producer)
     assert %Producer{recovery: %{job: %{request_id: 42}, last_issued_at: 1_000}} = producer
 
-    assert {:ok, producer} = Producer.complete_recovery(producer, 42, 2_000, 20_000, nil)
+    assert {:ok, producer} = Producer.complete_recovery(producer, 42, 2_000)
     refute Producer.recovering?(producer)
     assert producer.status == :up
     assert producer.last_alive_at == 2_000

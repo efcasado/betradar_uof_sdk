@@ -1,4 +1,4 @@
-defmodule UOF.SDK.PulsarTransportIntegrationTest do
+defmodule UOF.SDK.FeedIntegrationTest do
   use ExUnit.Case, async: false
 
   alias UOF.Schemas.Feed
@@ -6,8 +6,10 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
   alias UOF.SDK.MessageHandler
   alias UOF.SDK.SystemPipeline
   alias UOF.SDK.TestSupport
-  alias UOF.SDK.Transport
 
+  # End to end through the feed path the SDK depends on: messages published to
+  # RabbitMQ pass through the real source connector into Pulsar and reach the
+  # SDK's system and content pipelines.
   @moduletag :integration
   @pulsar_port System.get_env("PULSAR_BROKER_PORT", "16650")
   @rabbitmq_port "RABBITMQ_AMQP_PORT" |> System.get_env("15672") |> String.to_integer()
@@ -34,7 +36,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     def snapshot_complete(product, request_id), do: notify({:observed_snapshot_complete, product, request_id})
 
-    def observe_connection(tag), do: notify({:observed_connection, tag})
+    def observe_consumer_tag(tag), do: notify({:observed_consumer_tag, tag})
 
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
   end
@@ -51,27 +53,18 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     # test's content pipeline also receives earlier tests' messages: assertions
     # match the messages a test publishes.
     %{
-      children: [client],
+      client: client,
       content: content_producer,
-      system: system_producer,
-      metadata_adapter: metadata_adapter
+      system: system_producer
     } = pulsar_producers(subscription)
 
     start_supervised!(client)
 
-    start_supervised!(
-      {SystemPipeline,
-       name: __MODULE__.SystemPipeline, producer: system_producer, metadata_adapter: metadata_adapter, monitor: Monitor}
-    )
+    start_supervised!({SystemPipeline, name: __MODULE__.SystemPipeline, producer: system_producer, monitor: Monitor})
 
     start_supervised!(
       {ContentPipeline,
-       name: __MODULE__.Pipeline,
-       handler: Handler,
-       concurrency: 1,
-       producer: content_producer,
-       metadata_adapter: metadata_adapter,
-       node_id: 7}
+       name: __MODULE__.Pipeline, handler: Handler, concurrency: 1, producer: content_producer, node_id: 7}
     )
 
     TestSupport.wait_for_subscription!("#{subscription}-system")
@@ -107,7 +100,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     publish_alive(channel, 42)
 
-    assert_receive {:observed_connection, {:system, consumer_tag}}, 10_000
+    assert_receive {:observed_consumer_tag, consumer_tag}, 10_000
     assert is_binary(consumer_tag) and consumer_tag != ""
     assert_receive {:observed_alive, 1, 42, true}, 10_000
   end
@@ -120,17 +113,12 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     # Delivered to the existing content subscription, so it is on the topic.
     assert_receive {:odds_change, _, %{routing_key: ^routing_key}}, 10_000
 
-    %{content: late_producer, metadata_adapter: metadata_adapter} =
+    %{content: late_producer} =
       pulsar_producers("uof-sdk-integration-late-#{System.unique_integer([:positive])}")
 
     start_supervised!(
       {ContentPipeline,
-       name: __MODULE__.LatePipeline,
-       handler: Handler,
-       concurrency: 1,
-       producer: late_producer,
-       metadata_adapter: metadata_adapter,
-       node_id: 7}
+       name: __MODULE__.LatePipeline, handler: Handler, concurrency: 1, producer: late_producer, node_id: 7}
     )
 
     assert_receive {:odds_change, _, %{routing_key: ^routing_key}}, 10_000
@@ -222,7 +210,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     publish_alive(channel, 100)
 
     assert_receive {:observed_alive, 1, 100, true}, 10_000
-    assert_receive {:observed_connection, {:system, old_consumer_tag}}, 10_000
+    assert_receive {:observed_consumer_tag, old_consumer_tag}, 10_000
 
     {:ok, old_queue} = TestSupport.source_queue()
     TestSupport.restart_source!()
@@ -233,18 +221,16 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     # The system subscription starts at the latest message, so these are the
     # only alives it receives, in topic order.
     assert_receive {:observed_alive, 1, 101, true}, 10_000
-    assert_receive {:observed_connection, {:system, new_consumer_tag}}, 10_000
+    assert_receive {:observed_consumer_tag, new_consumer_tag}, 10_000
 
     refute new_consumer_tag == old_consumer_tag
   end
 
   defp pulsar_producers(subscription) do
-    Transport.producers(
-      {:pulsar,
-       host: "pulsar://localhost:#{@pulsar_port}",
-       topic: "persistent://public/default/uof-feed",
-       subscription: subscription},
-      nil
+    UOF.SDK.Pulsar.producers(
+      host: "pulsar://localhost:#{@pulsar_port}",
+      topic: "persistent://public/default/uof-feed",
+      subscription: subscription
     )
   end
 

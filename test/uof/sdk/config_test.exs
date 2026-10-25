@@ -2,10 +2,10 @@ defmodule UOF.SDK.ConfigTest do
   use ExUnit.Case, async: true
 
   alias OffBroadway.Pulsar.Producer
-  alias UOF.SDK.AMQP.Client
-  alias UOF.SDK.AMQP.Connection
   alias UOF.SDK.Config
   alias UOF.SDK.LogHandler
+
+  @pulsar [host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"]
 
   defmodule CustomStore do
     @moduledoc false
@@ -22,66 +22,14 @@ defmodule UOF.SDK.ConfigTest do
     def load(_opts), do: nil
   end
 
-  test "builds AMQP producer specs from the transport connection" do
-    conn = [host: "stgmq.betradar.com", username: "tok", password: "", ssl_options: []]
-    config = Config.load(handler: LogHandler, transport: {:amqp, connection: conn})
-
-    assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
-    assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
-    assert content_opts[:connection] == {:custom_pool, Connection, Connection}
-    assert system_opts[:connection] == content_opts[:connection]
-    assert :consumer_tag in content_opts[:metadata]
-    assert :consumer_tag in system_opts[:metadata]
-    assert config.metadata_adapter == :amqp
-    assert config.routing_key_metadata_key == :routing_key
-    assert config.ownership == :always_active
-    assert config.transport_children == [{Connection, connection: conn}]
-    assert content_opts[:client] == Client
-    assert system_opts[:client] == Client
-  end
-
-  test "defaults to AMQP transport with empty connection and ETS monitor store" do
-    config = Config.load(handler: LogHandler)
-
-    assert config.transport == :amqp
-    assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
-    assert content_opts[:connection] == {:custom_pool, Connection, Connection}
-    assert config.transport_children == [{Connection, connection: []}]
-    assert config.monitor_store == {UOF.SDK.ProducerMonitor.Store.ETS, []}
-  end
-
-  test "scopes AMQP bindings by node_id" do
-    config = Config.load(handler: LogHandler, node_id: 42)
-
-    assert {BroadwayRabbitMQ.Producer, content_opts} = config.content_producer
-    assert {BroadwayRabbitMQ.Producer, system_opts} = config.system_producer
-
-    assert {"unifiedfeed", routing_key: "*.*.*.odds_change.*.*.*.42.#"} in content_opts[:bindings]
-    assert {"unifiedfeed", routing_key: "-.-.-.snapshot_complete.*.*.*.42.#"} in system_opts[:bindings]
-  end
-
-  test "accepts a custom monitor store" do
-    assert Config.load(handler: LogHandler, monitor_store: CustomStore).monitor_store == {CustomStore, []}
-
-    assert Config.load(handler: LogHandler, monitor_store: {CustomStore, key: "node-a"}).monitor_store ==
-             {CustomStore, key: "node-a"}
-  end
+  defp load(overrides \\ []), do: Config.load(Keyword.merge([handler: LogHandler, pulsar: @pulsar], overrides))
 
   test "builds Pulsar producer specs from one topic and subscription" do
-    config =
-      Config.load(
-        handler: LogHandler,
-        transport:
-          {:pulsar,
-           host: "pulsar://localhost:6650",
-           topic: "uof-feed",
-           subscription: "uof-sdk",
-           consumer_opts: [initial_position: :earliest]}
-      )
+    config = load()
 
     assert {Producer, content_opts} = config.content_producer
     assert {Producer, system_opts} = config.system_producer
-    assert [{Pulsar.Client, client_opts}] = config.transport_children
+    assert {Pulsar.Client, client_opts} = config.pulsar_client
 
     assert client_opts == [name: :uof_sdk_pulsar, host: "pulsar://localhost:6650"]
 
@@ -89,14 +37,12 @@ defmodule UOF.SDK.ConfigTest do
     refute Keyword.has_key?(content_opts, :host)
     assert content_opts[:topics] == ["uof-feed"]
     assert content_opts[:subscription] == "uof-sdk-content"
-    assert content_opts[:consumer_opts][:initial_position] == :earliest
     assert content_opts[:consumer_opts][:subscription_type] == :key_shared
 
     assert system_opts[:client] == :uof_sdk_pulsar
     refute Keyword.has_key?(system_opts, :host)
     assert system_opts[:topics] == ["uof-feed"]
     assert system_opts[:subscription] == "uof-sdk-system"
-    assert system_opts[:consumer_opts][:initial_position] == :earliest
     assert system_opts[:consumer_opts][:subscription_type] == :failover
 
     # Failover ownership reports gate the control plane; the Key_Shared
@@ -105,18 +51,19 @@ defmodule UOF.SDK.ConfigTest do
              {UOF.SDK.ProducerMonitor, :active_state_change, []}
 
     refute Keyword.has_key?(content_opts, :active_state_callback)
+  end
 
-    assert config.metadata_adapter == :pulsar_rabbitmq_source
-    assert config.routing_key_metadata_key == :routing_key
-    assert config.ownership == {:failover, :passive}
+  test "defaults to the ETS monitor store" do
+    assert load().monitor_store == {UOF.SDK.ProducerMonitor.Store.ETS, []}
+  end
+
+  test "accepts a custom monitor store" do
+    assert load(monitor_store: CustomStore).monitor_store == {CustomStore, []}
+    assert load(monitor_store: {CustomStore, key: "node-a"}).monitor_store == {CustomStore, key: "node-a"}
   end
 
   test "Pulsar consumers dead-letter failed messages after a single attempt by default" do
-    config =
-      Config.load(
-        handler: LogHandler,
-        transport: {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
-      )
+    config = load()
 
     for {Producer, opts} <- [config.content_producer, config.system_producer] do
       consumer_opts = opts[:consumer_opts]
@@ -126,46 +73,28 @@ defmodule UOF.SDK.ConfigTest do
     end
   end
 
-  test "the Pulsar content subscription starts at the earliest retained message by default" do
-    pulsar = [host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"]
-    config = Config.load(handler: LogHandler, transport: {:pulsar, pulsar})
+  test "the content subscription starts at the earliest retained message by default" do
+    config = load()
 
     {Producer, content_opts} = config.content_producer
     {Producer, system_opts} = config.system_producer
     assert content_opts[:consumer_opts][:initial_position] == :earliest
     refute Keyword.has_key?(system_opts[:consumer_opts], :initial_position)
 
-    overridden =
-      Config.load(handler: LogHandler, transport: {:pulsar, pulsar ++ [consumer_opts: [initial_position: :latest]]})
+    overridden = load(pulsar: @pulsar ++ [consumer_opts: [initial_position: :latest]])
 
     {Producer, content_opts} = overridden.content_producer
     assert content_opts[:consumer_opts][:initial_position] == :latest
   end
 
-  test "transports declare the pipelines the monitor observes" do
-    assert Config.load(handler: LogHandler).monitored_pipelines == [:system, :content]
-
-    pulsar = {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
-    assert Config.load(handler: LogHandler, transport: pulsar).monitored_pipelines == [:system]
-  end
-
   test "user consumer options override the Pulsar failure defaults" do
-    config =
-      Config.load(
-        handler: LogHandler,
-        transport:
-          {:pulsar,
-           host: "pulsar://localhost:6650",
-           topic: "uof-feed",
-           subscription: "uof-sdk",
-           consumer_opts: [
-             redelivery_interval: 5_000,
-             dead_letter_policy: [max_redelivery: 3, topic: "uof-dlq"],
-             subscription_type: :shared
-           ]}
-      )
+    consumer_opts = [
+      redelivery_interval: 5_000,
+      dead_letter_policy: [max_redelivery: 3, topic: "uof-dlq"],
+      subscription_type: :shared
+    ]
 
-    {Producer, opts} = config.content_producer
+    {Producer, opts} = load(pulsar: @pulsar ++ [consumer_opts: consumer_opts]).content_producer
     consumer_opts = opts[:consumer_opts]
 
     assert consumer_opts[:redelivery_interval] == 5_000
@@ -176,18 +105,10 @@ defmodule UOF.SDK.ConfigTest do
   end
 
   test "passes Pulsar :conn_opts through to the supervised client" do
-    config =
-      Config.load(
-        handler: LogHandler,
-        transport:
-          {:pulsar,
-           host: "pulsar://localhost:6650",
-           topic: "uof-feed",
-           subscription: "uof-sdk",
-           conn_opts: [socket_opts: [verify: :verify_none], request_timeout: 5_000]}
-      )
+    conn_opts = [socket_opts: [verify: :verify_none], request_timeout: 5_000]
+    config = load(pulsar: @pulsar ++ [conn_opts: conn_opts])
 
-    assert [{Pulsar.Client, client_opts}] = config.transport_children
+    assert {Pulsar.Client, client_opts} = config.pulsar_client
 
     assert client_opts[:socket_opts] == [verify: :verify_none]
     assert client_opts[:request_timeout] == 5_000
@@ -200,115 +121,75 @@ defmodule UOF.SDK.ConfigTest do
     refute Keyword.has_key?(content_opts, :host)
   end
 
-  test "requires a Pulsar subscription" do
-    assert_raise KeyError, fn ->
-      Config.load(handler: LogHandler, transport: {:pulsar, topic: "uof-feed"})
+  test "requires Pulsar settings" do
+    assert_raise NimbleOptions.ValidationError, ~r/required :pulsar option not found/, fn ->
+      Config.load(handler: LogHandler)
     end
   end
 
-  test "requires a Pulsar host for its supervised client" do
-    assert_raise KeyError, fn ->
-      Config.load(
-        handler: LogHandler,
-        transport: {:pulsar, topic: "uof-feed", subscription: "uof-sdk"}
-      )
-    end
-  end
-
-  test "requires a Pulsar topic" do
-    assert_raise KeyError, fn ->
-      Config.load(handler: LogHandler, transport: {:pulsar, subscription: "uof-sdk"})
-    end
-  end
-
-  test "rejects unsupported transports" do
-    assert_raise NimbleOptions.ValidationError, ~r/:transport/, fn ->
-      Config.load(handler: LogHandler, transport: {:kafka, []})
+  test "requires a Pulsar host, topic, and subscription" do
+    for key <- [:host, :topic, :subscription] do
+      assert_raise KeyError, fn -> load(pulsar: Keyword.delete(@pulsar, key)) end
     end
   end
 
   test "stores node_id when provided" do
-    config = Config.load(handler: LogHandler, node_id: 42)
-    assert config.node_id == 42
+    assert load(node_id: 42).node_id == 42
   end
 
-  test "defaults the health thresholds and overrides max_processing_delay_seconds" do
-    defaults = Config.load(handler: LogHandler)
+  test "defaults the health thresholds" do
+    defaults = load()
     assert defaults.inactivity_seconds == 20
-    assert defaults.max_processing_delay_seconds == 20
-    assert defaults.recovery_overlap_seconds == 300
-
-    tuned = Config.load(handler: LogHandler, max_processing_delay_seconds: 45)
-    assert tuned.max_processing_delay_seconds == 45
-    assert tuned.inactivity_seconds == 20
-  end
-
-  test "accepts a recovery overlap override" do
-    config = Config.load(handler: LogHandler, recovery_overlap_seconds: 900)
-    assert config.recovery_overlap_seconds == 900
   end
 
   test "defaults concurrency to 10 and accepts an override" do
-    assert Config.load(handler: LogHandler).concurrency == 10
-    assert Config.load(handler: LogHandler, concurrency: 50).concurrency == 50
+    assert load().concurrency == 10
+    assert load(concurrency: 50).concurrency == 50
   end
 
   test "raises on missing :handler" do
-    assert_raise NimbleOptions.ValidationError, ~r/required :handler option not found/, fn -> Config.load([]) end
+    assert_raise NimbleOptions.ValidationError, ~r/required :handler option not found/, fn ->
+      Config.load(pulsar: @pulsar)
+    end
   end
 
   test "rejects unknown options" do
     assert_raise NimbleOptions.ValidationError, ~r/unknown options \[:concurency\]/, fn ->
-      Config.load(handler: LogHandler, concurency: 50)
+      load(concurency: 50)
     end
   end
 
   test "rejects options of the wrong type" do
     assert_raise NimbleOptions.ValidationError, ~r/:inactivity_seconds/, fn ->
-      Config.load(handler: LogHandler, inactivity_seconds: "20")
+      load(inactivity_seconds: "20")
     end
 
     assert_raise NimbleOptions.ValidationError, ~r/:node_id/, fn ->
-      Config.load(handler: LogHandler, node_id: 0)
+      load(node_id: 0)
     end
   end
 
   test "rejects a handler that is not a loaded module" do
     assert_raise NimbleOptions.ValidationError, ~r/expected a loaded module implementing UOF.SDK.MessageHandler/, fn ->
-      Config.load(handler: MyApp.MissingHandler)
+      load(handler: MyApp.MissingHandler)
     end
   end
 
   test "rejects a monitor store missing required callbacks" do
     assert_raise NimbleOptions.ValidationError, ~r/IncompleteStore does not implement/, fn ->
-      Config.load(handler: LogHandler, monitor_store: IncompleteStore)
+      load(monitor_store: IncompleteStore)
     end
-  end
-
-  test "requires the recovery overlap to exceed the processing delay" do
-    assert_raise ArgumentError, ~r/recovery_overlap_seconds \(20\) must exceed max_processing_delay_seconds \(20\)/, fn ->
-      Config.load(handler: LogHandler, recovery_overlap_seconds: 20)
-    end
-
-    assert Config.load(handler: LogHandler, recovery_overlap_seconds: 21).recovery_overlap_seconds == 21
-  end
-
-  test "does not bound the recovery overlap by the processing delay for Pulsar" do
-    pulsar = {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
-    config = Config.load(handler: LogHandler, transport: pulsar, recovery_overlap_seconds: 20)
-
-    assert config.recovery_overlap_seconds == 20
   end
 
   test "normalizes configured fallback producers" do
-    config = Config.load(handler: LogHandler, producers: [[id: 1, product: "liveodds"]])
+    config = load(producers: [[id: 1, product: "liveodds"]])
 
     assert config.producers == [%{id: 1, product: "liveodds", name: nil, recovery_window_minutes: nil}]
   end
 
   test "requires an id and product for configured producers" do
     assert_raise NimbleOptions.ValidationError, ~r/required :product option not found/, fn ->
-      Config.load(handler: LogHandler, producers: [[id: 1]])
+      load(producers: [[id: 1]])
     end
   end
 end

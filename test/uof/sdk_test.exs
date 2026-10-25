@@ -1,13 +1,14 @@
 defmodule UOF.SDKTest do
   use ExUnit.Case, async: true
 
-  alias UOF.SDK.AMQP.Connection
   alias UOF.SDK.Config
   alias UOF.SDK.ContentPipeline
   alias UOF.SDK.LogHandler
   alias UOF.SDK.ProducerMonitor
   alias UOF.SDK.ProducerMonitor.Store
   alias UOF.SDK.SystemPipeline
+
+  @pulsar [host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"]
 
   defmodule CallbackOnlyMonitorStore do
     @moduledoc false
@@ -46,83 +47,53 @@ defmodule UOF.SDKTest do
     assert UOF.SDK.monitor_store_child_specs({StartableMonitorStore, key: :a}) == [{StartableMonitorStore, key: :a}]
   end
 
+  defp load(overrides \\ []), do: Config.load(Keyword.merge([handler: LogHandler, pulsar: @pulsar], overrides))
+
   test "child_specs passes normalized producer specs to system and content pipelines" do
-    conn = [host: "stgmq.betradar.com", username: "tok", password: "", ssl_options: []]
-    config = Config.load(handler: LogHandler, transport: {:amqp, connection: conn})
+    config = load()
 
     assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
     assert system_opts[:name] == SystemPipeline
-    assert {BroadwayRabbitMQ.Producer, system_producer_opts} = system_opts[:producer]
-    assert system_producer_opts[:connection] == {:custom_pool, Connection, Connection}
+    assert system_opts[:producer] == config.system_producer
+    assert system_opts[:monitor] == ProducerMonitor
 
     assert content_opts[:name] == ContentPipeline
     assert content_opts[:handler] == LogHandler
-    assert {BroadwayRabbitMQ.Producer, content_producer_opts} = content_opts[:producer]
-    assert content_producer_opts[:connection] == system_producer_opts[:connection]
-  end
-
-  test "child_specs connects the content pipeline to the monitor only when the transport monitors it" do
-    assert [{SystemPipeline, amqp_system}, {ContentPipeline, amqp_content}] =
-             UOF.SDK.child_specs(Config.load(handler: LogHandler))
-
-    assert amqp_system[:monitor] == ProducerMonitor
-    assert amqp_content[:monitor] == ProducerMonitor
-
-    pulsar = {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
-
-    assert [{SystemPipeline, pulsar_system}, {ContentPipeline, pulsar_content}] =
-             UOF.SDK.child_specs(Config.load(handler: LogHandler, transport: pulsar))
-
-    assert pulsar_system[:monitor] == ProducerMonitor
-    assert pulsar_content[:monitor] == nil
+    assert content_opts[:producer] == config.content_producer
+    # Feed continuity is observed on the system subscription only.
+    refute Keyword.has_key?(content_opts, :monitor)
   end
 
   test "child_specs passes node_id to both pipelines" do
-    config = Config.load(handler: LogHandler, node_id: 7)
-
-    assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(config)
+    assert [{SystemPipeline, system_opts}, {ContentPipeline, content_opts}] = UOF.SDK.child_specs(load(node_id: 7))
     assert system_opts[:node_id] == 7
     assert content_opts[:node_id] == 7
   end
 
   test "child_specs passes concurrency through to the content pipeline" do
-    assert [{SystemPipeline, _system}, {ContentPipeline, default}] =
-             UOF.SDK.child_specs(Config.load(handler: LogHandler))
-
+    assert [{SystemPipeline, _system}, {ContentPipeline, default}] = UOF.SDK.child_specs(load())
     assert default[:concurrency] == 10
 
-    config = Config.load(handler: LogHandler, concurrency: 50)
-    [{SystemPipeline, _system}, {ContentPipeline, opts}] = UOF.SDK.child_specs(config)
+    [{SystemPipeline, _system}, {ContentPipeline, opts}] = UOF.SDK.child_specs(load(concurrency: 50))
     assert opts[:concurrency] == 50
   end
 
-  test "supervises a Pulsar client only for the Pulsar transport" do
-    assert {:ok, {_flags, amqp_children}} = UOF.SDK.init(handler: LogHandler)
-    refute Enum.any?(amqp_children, &(&1.id == :uof_sdk_pulsar))
-
-    assert {:ok, {_flags, pulsar_children}} =
-             UOF.SDK.init(
-               handler: LogHandler,
-               transport: {:pulsar, host: "pulsar://localhost:6650", topic: "uof-feed", subscription: "uof-sdk"}
-             )
-
-    assert Enum.any?(pulsar_children, fn child ->
-             child.id == :uof_sdk_pulsar and
-               child.start ==
-                 {Pulsar.Client, :start_link, [[name: :uof_sdk_pulsar, host: "pulsar://localhost:6650"]]}
-           end)
-  end
-
-  test "supervises the shared AMQP connection after the monitor and before both pipelines" do
-    assert {:ok, {flags, children}} = UOF.SDK.init(handler: LogHandler)
+  test "supervises the Pulsar client after the monitor and before both pipelines" do
+    assert {:ok, {flags, children}} = UOF.SDK.init(handler: LogHandler, pulsar: @pulsar)
     assert flags.strategy == :rest_for_one
 
     assert Enum.map(children, & &1.id) == [
              UOF.SDK.ProducerMonitor.Store.ETS,
              ProducerMonitor,
-             Connection,
+             :uof_sdk_pulsar,
              SystemPipeline,
              ContentPipeline
            ]
+
+    assert Enum.any?(children, fn child ->
+             child.id == :uof_sdk_pulsar and
+               child.start ==
+                 {Pulsar.Client, :start_link, [[name: :uof_sdk_pulsar, host: "pulsar://localhost:6650"]]}
+           end)
   end
 end

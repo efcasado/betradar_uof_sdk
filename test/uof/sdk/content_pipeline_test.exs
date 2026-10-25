@@ -16,22 +16,6 @@ defmodule UOF.SDK.ContentPipelineTest do
     defp notify(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
   end
 
-  # One module standing in for monitor/recovery lifecycle notifications.
-  defmodule Sink do
-    @moduledoc false
-    def message(product, ts), do: emit({:message_sink, product, ts})
-
-    def track_processing(product, ts, fun) do
-      emit({:tracking_sink, product, ts})
-      fun.()
-    end
-
-    def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
-    def observe_connection(tag), do: emit({:connection_sink, tag})
-
-    defp emit(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
-  end
-
   defmodule RaisingHandler do
     @moduledoc false
     use MessageHandler
@@ -40,358 +24,100 @@ defmodule UOF.SDK.ContentPipelineTest do
     def handle_odds_change(_msg, _ctx), do: raise("handler failed")
   end
 
-  setup context do
+  setup do
     Application.put_env(:uof_sdk_test, :test_pid, self())
-    name = Module.concat(__MODULE__, context.test)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []}
-           ]
-         ]}
-    })
-
-    %{pipeline: name}
+    :ok
   end
 
-  test "decodes and dispatches an odds_change with context", %{pipeline: pipeline} do
-    xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
-    metadata = %{routing_key: "hi.-.live.odds_change.1.sr:match.12345.-"}
+  defp start_pipeline(context, opts \\ []) do
+    name = Module.concat(__MODULE__, context.test)
 
-    Broadway.test_message(pipeline, xml, metadata: metadata)
+    defaults = [name: name, handler: Handler, concurrency: 1, producer: {Broadway.DummyProducer, []}]
+    start_link_supervised!(%{id: name, start: {ContentPipeline, :start_link, [Keyword.merge(defaults, opts)]}})
+
+    name
+  end
+
+  # Metadata as the Pulsar producer delivers it from the RabbitMQ source connector.
+  defp send_message(pipeline, xml, routing_key, properties \\ %{}) do
+    properties = Map.put(properties, "__rabbitmq_routing_key", routing_key)
+    Broadway.test_message(pipeline, xml, metadata: %{properties: properties})
+  end
+
+  test "decodes and dispatches an odds_change with context", context do
+    pipeline = start_pipeline(context)
+    xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
+
+    send_message(pipeline, xml, "hi.-.live.odds_change.1.sr:match.12345.-")
 
     assert_receive {:odds_change, %Feed.OddsChange{} = msg, ctx}, 1_000
     assert msg.event_id == "sr:match:12345"
     assert ctx.producer_id == 1
-    assert ctx.message_type == "odds_change"
-    assert ctx.event_urn == "sr:match:12345"
-  end
-
-  test "marks a message failed on undecodable data", %{pipeline: pipeline} do
-    ref = Broadway.test_message(pipeline, "<nonsense/>", metadata: %{routing_key: "x"})
-    assert_receive {:ack, ^ref, [], [_failed]}, 1_000
-  end
-
-  test "routes content timestamps to the monitor" do
-    name = Module.concat(__MODULE__, Sinks)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<odds_change product="3" event_id="sr:match:1" timestamp="99"/>),
-      metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-"}
-    )
-
-    # Content timestamps reach the monitor through processing tracking, which
-    # records them on completion; message/2 is only for content-session alives.
-    assert_receive {:tracking_sink, 3, 99}
-    refute_received {:message_sink, 3, 99}
-  end
-
-  test "routes content-session alive timestamps to the monitor" do
-    name = Module.concat(__MODULE__, ContentAlive)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<alive product="3" timestamp="123" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-"}
-    )
-
-    assert_receive {:message_sink, 3, 123}
-    refute_received {:odds_change, _, _}
-  end
-
-  test "does not notify lifecycle side-effects when handler delivery fails" do
-    name = Module.concat(__MODULE__, HandlerFailure)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: RaisingHandler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink
-           ]
-         ]}
-    })
-
-    ref =
-      Broadway.test_message(name, ~s(<odds_change product="3" event_id="sr:match:1" timestamp="99"/>),
-        metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-"}
-      )
-
-    assert_receive {:ack, ^ref, [], [_failed]}, 1_000
-    refute_received {:message_sink, 3, 99}
-  end
-
-  test "reads the routing key from a custom AMQP metadata field" do
-    name = Module.concat(__MODULE__, CustomRk)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             routing_key_metadata_key: :custom_key
-           ]
-         ]}
-    })
-
-    xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
-    # routing key lives under :custom_key, not :routing_key
-    metadata = %{custom_key: "hi.-.live.odds_change.1.sr:match.12345.-"}
-
-    Broadway.test_message(name, xml, metadata: metadata)
-
-    assert_receive {:odds_change, %Feed.OddsChange{}, ctx}, 1_000
-    assert ctx.message_type == "odds_change"
-    assert ctx.event_urn == "sr:match:12345"
-  end
-
-  test "reads the routing key from the Pulsar RabbitMQ source property" do
-    name = Module.concat(__MODULE__, PulsarRoutingKeyProperty)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             metadata_adapter: :pulsar_rabbitmq_source
-           ]
-         ]}
-    })
-
-    xml = ~s(<odds_change product="1" event_id="sr:match:12345" timestamp="42"/>)
-
-    metadata = %{
-      properties: %{"__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.12345.-"}
-    }
-
-    Broadway.test_message(name, xml, metadata: metadata)
-
-    assert_receive {:odds_change, %Feed.OddsChange{}, ctx}, 1_000
     assert ctx.routing_key == "hi.-.live.odds_change.1.sr:match.12345.-"
     assert ctx.message_type == "odds_change"
     assert ctx.event_urn == "sr:match:12345"
   end
 
-  test "observes the content AMQP consumer tag from content-session alives" do
-    name = Module.concat(__MODULE__, ConnObserve)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-", consumer_tag: "amq.ctag-content-1"}
-    )
-
-    assert_receive {:connection_sink, {:content, "amq.ctag-content-1"}}
+  test "marks a message failed on undecodable data", context do
+    ref = context |> start_pipeline() |> send_message("<nonsense/>", "hi.-.live.odds_change.1.sr:match.1.-")
+    assert_receive {:ack, ^ref, [], [_failed]}, 1_000
   end
 
-  test "does not observe the content AMQP connection on event messages" do
-    name = Module.concat(__MODULE__, EventConnIgnored)
+  test "marks a message failed when its handler raises", context do
+    pipeline = start_pipeline(context, handler: RaisingHandler)
 
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             monitor: Sink
-           ]
-         ]}
-    })
+    ref =
+      send_message(
+        pipeline,
+        ~s(<odds_change product="3" event_id="sr:match:1" timestamp="99"/>),
+        "hi.pre.-.odds_change.1.sr:match.1.-"
+      )
 
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
-      metadata: %{routing_key: "hi.pre.-.odds_change.1.sr:match.1.-", consumer_tag: "amq.ctag-content-1"}
-    )
-
-    assert_receive {:odds_change, _, _}
-    refute_received {:connection_sink, _}
+    assert_receive {:ack, ^ref, [], [_failed]}, 1_000
   end
 
-  test "observes a consumer tag from Pulsar RabbitMQ source properties" do
-    name = Module.concat(__MODULE__, PulsarConsumerTag)
+  test "acks system messages without decoding them", context do
+    pipeline = start_pipeline(context, handler: RaisingHandler)
 
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             metadata_adapter: :pulsar_rabbitmq_source,
-             monitor: Sink
-           ]
-         ]}
-    })
+    # Not valid UOF XML: decoding would fail the message.
+    alive = send_message(pipeline, "<alive", "-.-.-.alive.-.-.-.-")
+    snapshot_complete = send_message(pipeline, "<snapshot_complete", "-.-.-.snapshot_complete.-.-.-.-")
 
-    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{
-        properties: %{
-          "__rabbitmq_routing_key" => "-.-.-.alive.-.-.-.-",
-          "__rabbitmq_queue_name" => "uof-content",
-          "__rabbitmq_consumer_tag" => "ctag-1"
-        }
-      }
-    )
-
-    assert_receive {:message_sink, 1, 1}
-    assert_receive {:connection_sink, {:content, "ctag-1"}}
+    assert_receive {:ack, ^alive, [_successful], []}, 1_000
+    assert_receive {:ack, ^snapshot_complete, [_successful], []}, 1_000
   end
 
-  test "observes a Pulsar RabbitMQ source consumer tag from event messages" do
-    name = Module.concat(__MODULE__, PulsarEventConsumerTag)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             metadata_adapter: :pulsar_rabbitmq_source,
-             monitor: Sink
-           ]
-         ]}
-    })
-
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
-      metadata: %{
-        properties: %{
-          "__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.1.-",
-          "__rabbitmq_queue_name" => "uof-content",
-          "__rabbitmq_consumer_tag" => "ctag-1"
-        }
-      }
-    )
-
-    assert_receive {:odds_change, _, _}
-    assert_receive {:connection_sink, {:content, "ctag-1"}}
-  end
-
-  test "acks another node's messages without dispatching them" do
-    name = Module.concat(__MODULE__, OtherNode)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [
-           [
-             name: name,
-             handler: Handler,
-             concurrency: 1,
-             producer: {Broadway.DummyProducer, []},
-             metadata_adapter: :pulsar_rabbitmq_source,
-             monitor: Sink,
-             node_id: 7
-           ]
-         ]}
-    })
+  test "acks another node's messages without dispatching them", context do
+    pipeline = start_pipeline(context, node_id: 7)
 
     other =
-      Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
-        metadata: %{
-          properties: %{
-            "__rabbitmq_routing_key" => "lo.pre.-.odds_change.1.sr:match.1.8",
-            "__rabbitmq_consumer_tag" => "ctag-1"
-          }
-        }
+      send_message(
+        pipeline,
+        ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+        "lo.pre.-.odds_change.1.sr:match.1.8",
+        %{"__rabbitmq_consumer_tag" => "ctag-1"}
       )
 
     assert_receive {:ack, ^other, [_successful], []}, 1_000
     refute_received {:odds_change, _, _}
-    refute_received {:message_sink, _, _}
-    refute_received {:tracking_sink, _, _}
-    refute_received {:connection_sink, _}
 
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="2"/>),
-      metadata: %{
-        properties: %{"__rabbitmq_routing_key" => "lo.pre.-.odds_change.1.sr:match.1.7"}
-      }
+    send_message(
+      pipeline,
+      ~s(<odds_change product="1" event_id="sr:match:1" timestamp="2"/>),
+      "lo.pre.-.odds_change.1.sr:match.1.7"
     )
 
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="3"/>),
-      metadata: %{
-        properties: %{"__rabbitmq_routing_key" => "hi.-.live.odds_change.1.sr:match.1.-"}
-      }
+    send_message(
+      pipeline,
+      ~s(<odds_change product="1" event_id="sr:match:1" timestamp="3"/>),
+      "hi.-.live.odds_change.1.sr:match.1.-"
     )
 
     assert_receive {:odds_change, _, %{routing_key: "lo.pre.-.odds_change.1.sr:match.1.7"}}, 1_000
     assert_receive {:odds_change, _, %{routing_key: "hi.-.live.odds_change.1.sr:match.1.-"}}, 1_000
   end
 
-  test "reports messages addressed to another node" do
-    name = Module.concat(__MODULE__, OtherNodeTelemetry)
+  test "reports messages addressed to another node", context do
     test_pid = self()
     id = make_ref()
 
@@ -406,40 +132,13 @@ defmodule UOF.SDK.ContentPipelineTest do
 
     on_exit(fn -> :telemetry.detach(id) end)
 
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [[name: name, handler: Handler, concurrency: 1, producer: {Broadway.DummyProducer, []}, node_id: 7]]}
-    })
-
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
-      metadata: %{routing_key: "lo.pre.-.odds_change.1.sr:match.1.8"}
+    context
+    |> start_pipeline(node_id: 7)
+    |> send_message(
+      ~s(<odds_change product="1" event_id="sr:match:1" timestamp="1"/>),
+      "lo.pre.-.odds_change.1.sr:match.1.8"
     )
 
     assert_receive {:other_node, %{count: 1}, %{node_id: "8", message_type: "odds_change"}}, 1_000
-  end
-
-  test "tracks content messages, not alives, while their handler runs" do
-    name = Module.concat(__MODULE__, Tracking)
-
-    start_link_supervised!(%{
-      id: name,
-      start:
-        {ContentPipeline, :start_link,
-         [[name: name, handler: Handler, concurrency: 1, producer: {Broadway.DummyProducer, []}, monitor: Sink]]}
-    })
-
-    Broadway.test_message(name, ~s(<alive product="1" timestamp="1" subscribed="1"/>),
-      metadata: %{routing_key: "-.-.-.alive.-.-.-.-"}
-    )
-
-    Broadway.test_message(name, ~s(<odds_change product="1" event_id="sr:match:1" timestamp="42"/>),
-      metadata: %{routing_key: "hi.-.live.odds_change.1.sr:match.1.-"}
-    )
-
-    assert_receive {:tracking_sink, 1, 42}
-    assert_receive {:odds_change, _, _}
-    refute_received {:tracking_sink, 1, 1}
   end
 end

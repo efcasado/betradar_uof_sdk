@@ -26,10 +26,11 @@ defmodule UofSdk.MixProject do
       {:uof_schemas, "~> 0.3.0"},
       {:broadway, "~> 1.3"},
       {:nimble_options, "~> 1.1"},
-      {:broadway_rabbitmq, "~> 0.8.2", optional: true},
-      {:off_broadway_pulsar, "~> 2.0", optional: true},
+      {:off_broadway_pulsar, "~> 2.0"},
       # dev / test
-      {:styler, "~> 1.2", only: [:dev, :test], runtime: false}
+      {:styler, "~> 1.2", only: [:dev, :test], runtime: false},
+      # Integration tests publish to RabbitMQ, upstream of the source connector.
+      {:amqp, "~> 4.1", only: :test}
     ]
   end
 

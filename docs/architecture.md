@@ -1,7 +1,7 @@
 # Architecture
 
 - [Overview](#overview): public boundaries and the supervision tree
-- [Transports](#transports): [AMQP](#amqp) and [Pulsar](#pulsar)
+- [Pulsar](#pulsar): the topic, subscriptions, and feed continuity
 - [Message processing](#message-processing): ordering, delivery, and failures
 - [Recovery](#recovery): startup, lifecycle states, and time controls
 - [Persistence](#persistence): the monitor store and restart resume
@@ -24,10 +24,10 @@ Applications interact with a small set of modules:
 
 `uof_schemas` owns XML decoding and feed structs. `uof_api` owns the HTTP API client,
 including producer descriptions and recovery requests. Broadway owns message demand,
-processor concurrency, and acknowledgement dispatch. The transport adapters connect those
-Broadway pipelines to RabbitMQ or Pulsar.
+processor concurrency, and acknowledgement dispatch. `off_broadway_pulsar` connects those
+Broadway pipelines to Pulsar.
 
-This division keeps API access, schema handling, and business logic out of the transport
+This division keeps API access, schema handling, and business logic out of the consumer
 implementation. Applications can use the API and schema packages independently of the SDK.
 
 ### The Supervision Tree
@@ -51,68 +51,30 @@ MyApp.Supervisor
 └── UOF.SDK                           (:rest_for_one)
     ├── ProducerMonitor.Store        (if the store provides child_spec/1)
     ├── ProducerMonitor
-    ├── AMQP.Connection or Pulsar.Client (selected transport)
+    ├── Pulsar.Client
     ├── SystemPipeline
     └── ContentPipeline
 ```
 
-The transport client is one child selected by configuration. Each pipeline
+The Pulsar client is shared by both pipelines. Each pipeline
 is a Broadway supervision tree with one producer stage. System processing uses one
 processor; content processing uses the configured processor concurrency.
 
-A monitor restart also restarts the transport client and both pipelines. The observed
-pipelines must report current consume sessions to the new monitor, and a Pulsar system
-consumer must report its ownership again. A store-process restart also restarts the components that loaded its state.
+A monitor restart also restarts the Pulsar client and both pipelines. The system pipeline
+must report the current consume session to the new monitor, and its consumer must report
+its ownership again. A store-process restart also restarts the components that loaded its state.
 A content-pipeline restart does not require restarting the system pipeline or monitor.
-Failures handled inside a child, such as a channel reconnect, need not restart its siblings.
+Failures handled inside a child, such as a broker reconnect, need not restart its siblings.
 
-The SDK uses registered names for its monitor, pipelines, and transport client. The standard
-configuration starts one SDK instance per VM; Pulsar scale-out uses multiple such instances.
+The SDK uses registered names for its monitor, pipelines, and Pulsar client. The standard
+configuration starts one SDK instance per VM; scale-out uses multiple such instances.
 
-## Transports
+## Pulsar
 
-The SDK supports two transports: direct AMQP and Pulsar. The
-[README](../README.md#choosing-a-transport) compares them and shows how to configure each;
-this section describes how each one works.
-
-### AMQP
-
-The AMQP transport owns one broker connection shared by the two pipelines:
-
-```text
-Betradar unifiedfeed exchange
-             │
-      one AMQP connection
-             │
-     ┌───────┴────────┐
- system channel   content channel
-     │                │
- exclusive queue  exclusive queue
-     │                │
- SystemPipeline   ContentPipeline
-```
-
-The system queue receives `alive` and `snapshot_complete`. The content queue receives event
-messages and `alive` messages used to observe content freshness. Bindings also account for
-`node_id`, which scopes recovery traffic to the intended feed session.
-
-Each queue is exclusive and auto-deleted. Instances do not divide work through a shared
-queue, so this mode scales processing through local Broadway concurrency. A fresh consume
-session receives a new [consumer tag](#consumer-tags), which the monitor uses to detect a
-possible feed gap.
-
-Broadway owns reconnect backoff. A channel failure replaces that channel while the shared
-connection remains available. A connection failure causes both consumers to obtain channels
-on a replacement connection. Observing a previous transient connection failure also starts
-the next attempt, while preserving the failure reason for reporting.
-
-The connection coordinator and channel setup are described in
-[AMQP connection internals](#amqp-connection-internals).
-
-### Pulsar
-
-The Pulsar deployment introduces durable buffering between the upstream feed connection and
-SDK consumers:
+Betradar delivers UOF over AMQP. A RabbitMQ source connector consumes it into a Pulsar
+topic, which introduces durable buffering between the upstream feed connection and SDK
+consumers. The [README](../README.md#deployment) lists what a deployment needs and shows
+how to configure the SDK; this section describes how it works.
 
 ```text
 Betradar AMQP
@@ -136,7 +98,7 @@ health and recovery. These are independent subscriptions to the same topic: the 
 pipeline filters out event content before decoding it. The system subscription is the
 only control plane; see [feed continuity](#feed-continuity).
 
-#### Connector Contract
+### Connector Contract
 
 The connector publishes the original XML payload and keeps routing metadata separate from
 the key used for distributed dispatch:
@@ -185,7 +147,7 @@ tag (`amq.ctag-…`) so the SDK can detect reconnects.
 For the connector CLI, select key-based batching with
 `pulsar-admin sources create --batch-builder KEY_BASED`.
 
-#### Ownership and Failover
+### Ownership and Failover
 
 The supported topic has a single partition: either a non-partitioned topic or a partitioned
 topic with exactly one partition. Failover ownership is assigned per partition, so this
@@ -200,7 +162,7 @@ runs periodic health checks and issues recovery requests. Passive instances cont
 content processing. Demotion parks in-flight recoveries; promotion permits pending work to
 resume. Manual recovery on a passive instance returns `{:error, :passive}`.
 
-#### Feed Continuity
+### Feed Continuity
 
 With one partition and a Failover subscription, the active system consumer receives every
 message on the topic, including content it acknowledges without decoding. A delivery gap
@@ -214,10 +176,9 @@ Producer status describes feed continuity on the topic, not application progress
 
 - `:up` means the topic carries a continuous feed for the producer. Content may still be
   waiting in the content subscription.
-- Content lag is not tracked, so a producer is never `:delayed` and
-  `max_processing_delay_seconds` is unused. With Key-Shared, one monitor would see only
-  its own share of content anyway. Use handler timestamps or the content subscription's
-  backlog statistics to measure processing lag across instances.
+- Content lag is not tracked. With Key-Shared, one monitor would see only its own share of
+  content anyway. Use handler timestamps or the content subscription's backlog statistics
+  to measure processing lag across instances.
 - The checkpoint advances with subscribed system heartbeats while `:up`, regardless of how
   far content processing has got. A recovery after a session change replays from there;
   everything earlier is already on the topic.
@@ -270,12 +231,11 @@ flags it down when processing lags (`ProcessingQueueDelayViolation`). The .NET S
 uses the oldest alive seen on the user sessions. The
 [recovery documentation](https://docs.sportradar.com/uof/sdk/features/recovery) recommends
 storing the last processed message timestamp, and states that slow processing marks a
-producer down without issuing recovery. All three assume a direct AMQP connection, where
-unprocessed content is lost with its queue. The protocol only requires recovering from a
-timestamp before which nothing was missed; on Pulsar that boundary is the topic, not
-processing. Direct AMQP keeps the content-aware behaviour.
+producer down without issuing recovery. All three consume AMQP directly, where unprocessed
+content is lost with its queue. The protocol only requires recovering from a timestamp
+before which nothing was missed; here that boundary is the topic, not processing.
 
-#### Node Isolation
+### Node Isolation
 
 The source connector binds `#`, so a topic can contain recovery traffic for several
 subscriptions using the same access token. Both SDK pipelines inspect the original routing
@@ -283,7 +243,7 @@ key and acknowledge messages addressed to another node without decoding them, in
 handler, or updating the monitor. Unaddressed messages (`-` in the node position) are
 accepted by every node. A `nil` or non-positive `node_id` disables this filtering.
 
-For Pulsar, `node_id` identifies a subscription, not an individual SDK instance:
+`node_id` identifies a subscription, not an individual SDK instance:
 
 - All instances sharing a base subscription must use the same positive `node_id`.
   Otherwise Key-Shared can deliver part of a recovery replay to instances that discard it,
@@ -292,9 +252,7 @@ For Pulsar, `node_id` identifies a subscription, not an individual SDK instance:
   isolate their recovery replays and `snapshot_complete` messages.
 - Use `nil` only when a single subscription consumes the access token.
 
-Direct AMQP scopes recovery traffic through queue bindings as well as pipeline filtering.
-
-#### Backlog and Restart Continuity
+### Backlog and Restart Continuity
 
 The connector is outside the SDK supervision tree. Restarting an SDK instance therefore
 does not necessarily restart the upstream AMQP session. A durable subscription can retain
@@ -309,14 +267,13 @@ separate; see [feed continuity](#feed-continuity) for when it is needed.
 Content follows a short path:
 
 ```text
-transport delivery
-    → routing-key metadata
+Pulsar delivery
+    → routing-key property
     → Broadway partition dispatch
     → node filtering
     → XML decoding
     → application callback
-    → content timestamp observation (AMQP only)
-    → transport acknowledgement
+    → Pulsar acknowledgement
 ```
 
 ### Ordering and Scale-Out
@@ -326,7 +283,7 @@ for one event go to the same processor, while different events can be handled co
 System messages use a separate pipeline so producer monitoring has its own processing lane.
 There is no processing-completion ordering between the system and content pipelines.
 
-With the [connector rules above](#connector-contract), Pulsar Key-Shared dispatch and local
+With the [connector rules above](#connector-contract), Key-Shared dispatch and local
 Broadway partitioning use the same event identity. Different message types for one event,
 such as `odds_change` and `bet_stop`, reach the same SDK instance and the same local
 processor. Using the full routing key instead would split those message types across
@@ -360,11 +317,11 @@ tasks linked to the monitor: a slow API does not block it, and an exception from
 still fails it. The startup description fetch is the exception; it runs before the monitor
 takes any observations.
 
-Handler persistence and transport acknowledgement are separate operations. Applications
+Handler persistence and Pulsar acknowledgement are separate operations. Applications
 should make their effects idempotent because reconnects and recovery can replay messages.
 Failures pass through the pipeline's failure callback, which logs context and emits
-`[:uof_sdk, :message, :failed]` telemetry. The AMQP transport rejects failed messages without
-requeue. The Pulsar transport nacks a failed message and, about a second later, diverts it to
+`[:uof_sdk, :message, :failed]` telemetry. The pipeline nacks a failed message and, about a
+second later, Pulsar diverts it to
 the `<topic>-<subscription>-DLQ` topic instead of processing it again, so it remains available
 for inspection; batch-index acknowledgement keeps the failure from redelivering the other
 messages of its batch. Override `:consumer_opts` (`:redelivery_interval`,
@@ -372,7 +329,8 @@ messages of its batch. Override `:consumer_opts` (`:redelivery_interval`,
 A message failure emits diagnostics but does not directly request producer recovery.
 
 Content delivery is not gated on producer health. Live and replayed content can reach handlers
-while a producer is `:down`, `:recovering`, or `:delayed`. The SDK reports synchronization and
+while a producer is `:down` or `:recovering`, and content can still be waiting in the backlog
+while it is `:up`. The SDK reports synchronization and
 health; applications decide how those reports affect their business operations. A producer
 becoming `:up` is not a barrier proving that all application side effects have completed.
 
@@ -390,7 +348,7 @@ stored in the monitor snapshot. If the API fails, the monitor starts from the st
 descriptions, or else from the configured `:producers`, logs a warning, and keeps retrying
 the API in the background. Startup fails only when none of the three has descriptions. An
 `alive` from an unknown producer also reloads the descriptions, at most once per minute, so a
-producer activated after startup is monitored from its next `alive`. Transport consumption
+producer activated after startup is monitored from its next `alive`. Feed consumption
 and producer synchronization proceed after that initialization; a successful `start_link/1`
 is not a feed-synchronization barrier.
 
@@ -409,10 +367,10 @@ Recovery is a coordinated sequence:
 5. A matching `snapshot_complete` ends the recovery job and updates producer state.
 
 Each producer draws request IDs from its own sequence, which starts at a random offset, so a
-completion for a request issued before a VM restart or by a previous Pulsar owner is
+completion for a request issued before a VM restart or by a previous control-plane owner is
 unlikely to match a newer request. Request IDs are correlation values, not fencing tokens.
 
-Rejected or failed HTTP requests (an API error, a transport error, or a non-`ACCEPTED`
+Rejected or failed HTTP requests (an API error, an HTTP transport error, or a non-`ACCEPTED`
 response) are retried after the recovery interval. An exception raised while issuing the
 request is not treated as a rejection: it fails the monitor, and the persisted recovery
 intent makes the restarted monitor recover again. A stall timer reissues a request
@@ -421,17 +379,10 @@ messages are ignored using recovery-job generations.
 
 `snapshot_complete` marks the feed's completion of a recovery replay. Content callbacks run
 on their own processors, so this system observation is separate from application processing
-completion. With AMQP, a producer is `:up` when the feed has confirmed synchronization and
-content processing is within `max_processing_delay_seconds`: a replay still being processed
-shows as `:delayed` once it lags beyond that threshold. Applications that must not act until
-every replayed message is handled should treat the threshold as their tolerance. With
-Pulsar, `:up` describes [feed continuity](#feed-continuity) only.
-
-With AMQP, content lag is measured from the oldest content message still being handled,
-falling back to the newest one completed. Each content processor reports the message it is
-handling to the monitor, so one processor stuck on an old message is not hidden by fresher
-messages completing elsewhere. After a restart, a resuming producer needs content processed
-in the current session; its stored checkpoint does not count.
+completion. A producer is `:up` when the topic carries a continuous feed for it, which
+describes [feed continuity](#feed-continuity), not application progress: replayed content
+can still be waiting in the content subscription. Applications that must not act until
+every replayed message is handled measure that themselves.
 
 The lifecycle states describe the monitor's view:
 
@@ -440,8 +391,7 @@ The lifecycle states describe the monitor's view:
 | `:down` | Unsynchronized: no recovery job yet, or one waiting for the producer's alives to resume |
 | `:recovering` | Recovery is pending, being requested, or awaiting completion |
 | `:up` | The monitor considers the producer synchronized |
-| `:delayed` | Processing observations exceed the configured delay threshold (AMQP only) |
-| `:resuming` | Restored progress is eligible for resume, pending continuity checks and, with AMQP, freshness |
+| `:resuming` | Restored progress is eligible for resume, pending continuity checks |
 
 A pending or in-flight recovery job is reported as `:recovering` in `UOF.SDK.ProducerStatus`.
 Recovery jobs, timers, and request correlation are not part of it.
@@ -459,49 +409,43 @@ UOF.SDK.producer(1)
 Automatic recovery normally needs no application intervention. For a manual request, use
 `UOF.SDK.recover(1)`; pass `full: true` to ignore the checkpoint and request a full snapshot.
 This uses the same monitor coordination, lifecycle reporting, and stall guard as automatic
-recovery. On a passive Pulsar instance it returns `{:error, :passive}`; issue the request
+recovery. On a passive instance it returns `{:error, :passive}`; issue the request
 on the active owner instead.
 
 ### Consumer Tags
 
-RabbitMQ assigns a consumer tag (`amq.ctag-…`) to every consume session. A new tag means the
-subscription was re-established and messages may have been missed. The SDK tracks one tag
-for each pipeline the monitor observes:
-
-- AMQP: the `:consumer_tag` delivery metadata of the SDK's own consumers, for the system
-  and the content pipeline.
-- Pulsar: the `__rabbitmq_consumer_tag` property set by the source connector, which holds the
-  upstream consume session. Both subscriptions read the same session from the same topic,
-  so only the system pipeline reports it.
+RabbitMQ assigns a consumer tag (`amq.ctag-…`) to every consume session. The source
+connector copies its session's tag into the `__rabbitmq_consumer_tag` property of every
+message. A new tag means the connector's upstream session was re-established and messages
+may have been missed. Both subscriptions read the same session from the same topic, so the
+system pipeline alone reports the tag, from each `alive`.
 
 While running, a tag the monitor has not seen before recovers every producer. Tags are
 compared by novelty rather than arrival order, so a late message from a superseded session
 is not a change.
 
-The monitor saves the last tags in its [snapshot](#snapshot-contents). After a restart it
-waits, for up to `inactivity_seconds`, until the observed pipelines report their current tags.
-Matching tags mean the upstream session never broke: synchronized producers resume from the
-retained backlog without recovery. This is what lets a Pulsar deployment survive an SDK
-restart. Different tags are saved with every producer unsynchronized, and recovery starts.
-Direct AMQP opens new consume sessions on every restart, so its tags always differ.
+The monitor saves the last tag in its [snapshot](#snapshot-contents). After a restart it
+waits, for up to `inactivity_seconds`, until the system pipeline reports the current tag.
+A matching tag means the upstream session never broke: synchronized producers resume from
+the retained backlog without recovery. This is what lets a deployment survive an SDK
+restart. A different tag is saved with every producer unsynchronized, and recovery starts.
 
 ### Time and Recovery Controls
 
 Public duration settings are in seconds and converted to milliseconds internally. Feed
 timestamps and stored checkpoints are epoch milliseconds. Heartbeat inactivity uses local
-observation time; content lag compares local wall-clock time with processed feed timestamps.
-Clock skew can therefore affect lag observations. Recovery cooldown uses monotonic time.
+observation time, and the recovery window is applied against the local wall clock. Recovery
+cooldown uses monotonic time.
 
 | Setting | What it measures or controls | Effect |
 | --- | --- | --- |
 | `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Records recovery on an observed heartbeat timeout and requests it once the producer's alives resume; also bounds session-readiness waiting |
-| `max_processing_delay_seconds` | Age of the oldest content message still being handled, or else of the newest one completed, including content-session heartbeats | AMQP only: moves synchronized producers between `:up` and `:delayed`; freshness also gates restart resume |
 | `min_interval_between_recoveries` | Per-producer recovery-request cooldown and delay after a failed request | Defers requests or retries while recovery remains pending |
 | `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp |
-| `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window; with AMQP, must exceed `max_processing_delay_seconds` |
+| `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window |
 
-These controls have distinct purposes. Content lag alone is not a heartbeat failure, and
-recovery overlap is not a timeout. Health checks and timer messages are handled by the
+These controls have distinct purposes: recovery overlap is not a timeout, and a stalled
+recovery is not a heartbeat failure. Health checks and timer messages are handled by the
 monitor, subject to control-plane ownership and its current recovery state; durations are
 not hard real-time deadlines. See [configuration](../README.md#configuration) for defaults and
 [startup and recovery](#recovery) for the recovery sequence and manual requests.
@@ -521,11 +465,11 @@ persistent store when progress must survive those.
 
 | Field | Meaning |
 | --- | --- |
-| `consumer_tags` | Committed [consumer tags](#consumer-tags) of the observed pipelines |
-| `producers` | Per producer: recovery checkpoint (epoch milliseconds) and whether it is synchronized with those sessions |
+| `consumer_tag` | Committed [consumer tag](#consumer-tags) of the connector's upstream session |
+| `producers` | Per producer: recovery checkpoint (epoch milliseconds) and whether it is synchronized with that session |
 
 A producer may resume at startup only when it is synchronized and has a checkpoint. A
-consumer tag change saves the new tags with every producer unsynchronized, in one write. Recovery preparation saves the producer as unsynchronized before its HTTP request,
+consumer tag change saves the new tag with every producer unsynchronized, in one write. Recovery preparation saves the producer as unsynchronized before its HTTP request,
 so a crash at any point cannot resume from stale state. Checkpoints only move forward.
 
 The monitor saves only when the snapshot changes: on a session change, a checkpoint advance
@@ -605,26 +549,27 @@ The [ETS store tests](../test/uof/sdk/producer_monitor/store/ets_test.exs) show 
 ### Restart Resume
 
 At startup, a synchronized producer with a checkpoint enters `:resuming`. It becomes `:up`
-once the observed pipelines report unchanged [consumer tags](#consumer-tags), a current
-heartbeat arrives, and, with AMQP, processing has caught up. Without a heartbeat within `inactivity_seconds` it
-recovers, and a readiness deadline prevents an incomplete restart from waiting indefinitely.
+once the system pipeline reports an unchanged [consumer tag](#consumer-tags) and a current
+heartbeat arrives. Without a heartbeat within `inactivity_seconds` it recovers, and a
+readiness deadline prevents an incomplete restart from waiting indefinitely.
 
-Direct AMQP reconnects create new consume sessions and require recovery. Pulsar can resume
-retained backlog when its upstream connector session remains unchanged. An upstream session
-change or recovery-required heartbeat still enters the normal recovery path. Persistence
-alone does not prove delivery continuity or replace broker backlog retention.
+The SDK resumes retained backlog when the connector's upstream session remains unchanged.
+An upstream session change or recovery-required heartbeat still enters the normal recovery
+path. Persistence alone does not prove delivery continuity or replace broker backlog
+retention.
 
 Incremental recovery subtracts the configured overlap from the checkpoint and clamps the
 result to the producer's advertised recovery window. Handlers must tolerate replayed
 messages. See [store implementation](#implementing-a-store) for the
-configuration and durability contract, and [Pulsar backlog requirements](#backlog-and-restart-continuity)
-for the transport side of restart continuity.
+configuration and durability contract, and [backlog requirements](#backlog-and-restart-continuity)
+for the broker side of restart continuity.
 
 ## Observability
 
-A running supervisor, an established transport connection, and a synchronized producer are
-separate states. Use producer status to understand feed synchronization and processing lag;
-use transport and message diagnostics to investigate why progress has stopped.
+A running supervisor, an established Pulsar connection, and a synchronized producer are
+separate states. Use producer status to understand feed synchronization; measure processing
+lag from handler timestamps or the content subscription's backlog, and use Pulsar and
+message diagnostics to investigate why progress has stopped.
 
 | Signal | What it tells the application |
 | --- | --- |
@@ -638,14 +583,13 @@ use transport and message diagnostics to investigate why progress has stopped.
 | `[:uof_sdk, :producer, :status]` | A reported producer status transition, emitted whether or not a handler is configured |
 | `[:uof_sdk, :producers, :loaded]` | Producer descriptions loaded, with `count` and `source` (`:api`, `:snapshot`, or `:config`); a fallback source means the API was unavailable |
 | `[:uof_sdk, :message, :other_node]` | A message addressed to another `node_id`, acknowledged without processing; expected when subscriptions share an access token |
-| `[:uof_sdk, :amqp, :setup_failure]` | A returned AMQP setup failure, preserving the operation, original reason, and retry classification |
-| `[:broadway_rabbitmq, :amqp, :open_connection, :start / :stop / :exception]` | Spans around shared AMQP connection establishment |
+| `[:pulsar, :consumer, ...]` | Consumer events from the `pulsar` client, such as nacks, redelivery requests, and dead-letter diversions |
 
 Recovery events share producer ID, product, and request ID, so initiation, failures,
 stalls, and completion can be correlated per request. A recovery with no `:completed`
 event, or repeated `:failed` or `:stalled` events, is the signal to alert on. Message-failure logs include routing context and
-a truncated payload. AMQP diagnostics distinguish expected retries from permanent failures;
-unexpected exceptions and exits also appear through process failure reports. A quiet error
+a truncated payload. Unexpected exceptions and exits also appear through process failure
+reports. A quiet error
 log alone does not establish readiness or prove that handlers have completed their work.
 
 ## Contributing
@@ -661,47 +605,21 @@ duplicate request is harmless beyond quota. Status callbacks run in the monitor 
 complete promptly.
 
 `ProducerMonitor.Connections` tracks [consumer tags](#consumer-tags) independently of producer state.
-`Transport` derives the two producer specifications and the shared transport child from one
-configuration. `MessageMetadata` normalizes transport metadata, and `RoutingKey` supplies
+`Transport` derives the two producer specifications and the shared Pulsar client from the
+`:pulsar` configuration. `MessageMetadata` reads the connector's message properties, and `RoutingKey` supplies
 routing and event identity. The pipelines own decoding and dispatch rather than recovery
 policy.
 
 Useful entry points are the [SDK supervisor](../lib/uof/sdk.ex),
-[transport wiring](../lib/uof/sdk/transport.ex),
+[Pulsar wiring](../lib/uof/sdk/transport.ex),
 [producer monitor](../lib/uof/sdk/producer_monitor.ex), and
 [store behaviour](../lib/uof/sdk/producer_monitor/store.ex).
 
-### AMQP Connection Internals
-
-`UOF.SDK.AMQP.Connection` is the supervised coordinator implementing BroadwayRabbitMQ's
-channel-checkout interface. It starts and monitors a `UOF.SDK.AMQP.Session` process that owns
-connection establishment and the socket lifetime. The Session is monitored atomically at
-startup, so even an immediate connection failure retains its exit reason.
-
-Connection establishment runs asynchronously. While an attempt is pending, checkouts return
-`:connecting` and Broadway retries with backoff. Once connected, each producer opens its own
-channel so its consumer ownership remains local to Broadway. Checking a channel back in
-requests an AMQP close; the protocol finishes teardown without force-killing the channel
-and disrupting the shared connection.
-
-The Session is outside the SDK supervision tree and monitors the coordinator. If the
-coordinator stops during a handshake, the Session finishes the bounded open and closes its
-result. Its registered name prevents a replacement attempt until cleanup completes. SDK
-supervisor shutdown can therefore return before socket cleanup finishes. Connection cleanup
-waits for graceful termination and uses a bounded wait before forcing disposal of the socket
-process if it remains alive after the close call.
-
-`UOF.SDK.AMQP.Client` adapts channel setup to BroadwayRabbitMQ's retry contract. Known transient
-failures, including normal shutdown during a pending AMQP call, use backoff. Permanent
-failures retain their cause, and unexpected exits and exceptions propagate after channel
-cleanup. Permission rejection raises explicitly because Broadway otherwise retries it.
-The SDK's setup-failure telemetry preserves the original reason and retry classification.
-
 ### Design Invariants
 
-1. The monitor starts before transport consumers that report sessions or ownership to it.
-2. Direct AMQP pipelines share one connection and own separate channels and queues.
-3. Only the active Pulsar system-subscription owner issues recovery requests.
+1. The monitor starts before the consumers that report sessions or ownership to it.
+2. The system subscription is the only control plane; the content pipeline never reports to the monitor.
+3. Only the active system-subscription owner issues recovery requests.
 4. Recovery intent is persisted before its HTTP request is issued.
 5. Monitor state is persisted as one snapshot, replaced atomically; an unreadable snapshot fails startup.
 6. Content callbacks own application effects; the SDK owns feed delivery and recovery orchestration.

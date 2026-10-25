@@ -5,21 +5,22 @@
 > Betradar offers official Java and .NET SDKs at <https://sdk.sportradar.com>.
 
 An Elixir SDK for Betradar's [Unified Odds Feed](https://docs.betradar.com/)
-(UOF). It connects to the feed, decodes XML messages into structs, sends those
-messages to a handler you implement, and keeps each producer in sync with
-automatic recovery.
+(UOF). It consumes the feed from an Apache Pulsar topic, decodes XML messages into
+structs, sends those messages to a handler you implement, and keeps each producer in
+sync with automatic recovery.
 
-The SDK is built on [Broadway](https://hexdocs.pm/broadway) and depends on
+The SDK is built on [Broadway](https://hexdocs.pm/broadway) and
+[`off_broadway_pulsar`](https://hex.pm/packages/off_broadway_pulsar), and depends on
 [`uof_api`](https://hex.pm/packages/uof_api) and
 [`uof_schemas`](https://hex.pm/packages/uof_schemas).
 
 The SDK handles:
 
-- AMQP or Pulsar feed consumption.
+- Feed consumption from Pulsar, scaled out across instances.
 - XML decoding into Elixir structs.
 - Message delivery to your application callbacks.
 - Producer health tracking.
-- Recovery after startup, reconnects, or feed gaps.
+- Recovery after startup, upstream reconnects, or feed gaps.
 
 Your application handles:
 
@@ -32,69 +33,46 @@ Your application handles:
 
 ## Installation
 
-Add the SDK and one transport adapter to `mix.exs`, then run `mix deps.get`. The
-SDK requires Elixir 1.20+.
+Add the SDK to `mix.exs`, then run `mix deps.get`. The SDK requires Elixir 1.20+.
 
 ```elixir
 def deps do
   [
-    {:uof_sdk, "~> 0.1.0"},
-    {:broadway_rabbitmq, "~> 0.8.2"}
+    {:uof_sdk, "~> 0.1.0"}
   ]
 end
 ```
 
-For Pulsar, replace `broadway_rabbitmq` with `{:off_broadway_pulsar, "~> 2.0"}`.
-Only the adapter for your chosen transport is required.
+## Deployment
 
-## Choosing a transport
+Betradar delivers UOF over AMQP. A RabbitMQ source connector consumes it and publishes
+each message to a Pulsar topic, and SDK instances consume that topic:
 
-| | AMQP | Pulsar |
-| --- | --- | --- |
-| Connects | Directly to Betradar | Through a RabbitMQ source connector into a Pulsar topic |
-| Scales through | Local Broadway concurrency in one instance | Key-Shared content delivery across instances |
-| On restart | Always recovers | Can resume from retained backlog |
+```text
+Betradar AMQP → RabbitMQ source connector → Pulsar topic → SDK instances
+```
 
-Direct AMQP is primarily for single-instance deployments with local Broadway concurrency.
-Its exclusive queues do not divide work across SDK instances. Pulsar adds durable buffering
-and distributes content across instances sharing a subscription. This is a property of
-the SDK's transport setup, not a general limitation of RabbitMQ or Pulsar.
+The topic buffers the feed durably, so an SDK restart can resume from retained backlog
+without recovery, and instances sharing a subscription divide content delivery between
+them. The deployment needs:
 
-### AMQP
+- **A RabbitMQ source connector** configured according to the
+  [connector contract](docs/architecture.md#connector-contract): message-key rules,
+  the routing-key property, key-based batching, and a server-generated consumer tag.
+  Point it at Betradar's AMQP host with your access token as the username, your
+  assigned virtual host, the `unifiedfeed` exchange, and the `#` binding.
+  [`docker-compose.yml`](docker-compose.yml) shows a complete local setup.
+- **A single-partition topic** whose backlog is never discarded: see
+  [backlog and restart continuity](docs/architecture.md#backlog-and-restart-continuity).
+- **The SDK's subscriptions created in advance, or topic retention**, so a new content
+  subscription cannot miss a recovery replay: see
+  [feed continuity](docs/architecture.md#feed-continuity).
 
-`transport: {:amqp, connection: [...]}` connects directly to Betradar. The
-[quick start](#quick-start) contains a complete integration-environment configuration.
-
-| Environment | AMQP host |
+| Environment | Betradar AMQP host |
 | --- | --- |
 | Production | `mq.betradar.com` |
 | Integration | `stgmq.betradar.com` |
 | Replay | `replaymq.betradar.com` |
-
-### Pulsar
-
-With the Pulsar adapter installed, replace the [quick start](#quick-start)'s `:uof_sdk`
-configuration with:
-
-```elixir
-config :uof_sdk,
-  handler: UOF.SDK.LogHandler,
-  node_id: 1,
-  transport: {:pulsar,
-    host: "pulsar://localhost:6650",
-    topic: "uof-feed",
-    subscription: "uof-sdk"
-  }
-```
-
-Keep the `:uof_api` configuration: Pulsar still needs API access for producer descriptions
-and recovery. This example assumes a running broker and a RabbitMQ source connector
-configured according to the [connector contract](docs/architecture.md#connector-contract),
-not just a Pulsar topic. Instances that share content delivery use the same topic, base
-subscription, and `node_id`. Additional transport options are passed to
-[`OffBroadway.Pulsar.Producer`](https://hexdocs.pm/off_broadway_pulsar/OffBroadway.Pulsar.Producer.html);
-`:conn_opts` configures the shared client. The SDK owns the two subscription types and the
-system consumer's ownership callback.
 
 A message that fails to decode or process is not retried: about a second later it is
 diverted to a dead-letter topic named `<topic>-<subscription>-DLQ`, one for each of the
@@ -108,13 +86,12 @@ key-based batching, failover, feed continuity, and node isolation.
 
 ## Quick start
 
-This example connects directly to Betradar over AMQP. You need a UOF access token
-and your assigned virtual host. For distributed consumption, see
-[Pulsar setup](#pulsar).
+This example assumes a running Pulsar broker and a source connector publishing the
+integration feed to the `uof-feed` topic, as described in [deployment](#deployment). You
+need a UOF access token for the recovery API.
 
 Set `UOF_ACCESS_TOKEN` in your environment. In `config/runtime.exs`, configure the
-feed and recovery API for the same environment. Replace `/unifiedfeed/12345` with
-your assigned virtual host:
+Pulsar topic and the recovery API for the same environment as the connector:
 
 ```elixir
 import Config
@@ -122,23 +99,23 @@ import Config
 config :uof_sdk,
   handler: UOF.SDK.LogHandler,
   node_id: 1,
-  transport: {:amqp,
-    connection: [
-      host: "stgmq.betradar.com",
-      username: System.fetch_env!("UOF_ACCESS_TOKEN"),
-      password: "",
-      virtual_host: "/unifiedfeed/12345",
-      ssl_options: []
-    ]
-  }
+  pulsar: [
+    host: "pulsar://localhost:6650",
+    topic: "uof-feed",
+    subscription: "uof-sdk"
+  ]
 
 config :uof_api,
   base_url: "https://stgapi.betradar.com/v1",
   auth_token: System.fetch_env!("UOF_ACCESS_TOKEN")
 ```
 
-These are integration-environment endpoints. See
-[AMQP hosts](#amqp) and [configuration options](#configuration).
+The SDK needs API access for producer descriptions and recovery. Instances that share
+content delivery use the same topic, base subscription, and `node_id`. Additional
+`:pulsar` options are passed to
+[`OffBroadway.Pulsar.Producer`](https://hexdocs.pm/off_broadway_pulsar/OffBroadway.Pulsar.Producer.html);
+`:conn_opts` configures the shared client. The SDK owns the two subscription types and the
+system consumer's ownership callback. See [configuration options](#configuration).
 
 Add `UOF.SDK` to your application's supervision tree:
 
@@ -198,22 +175,21 @@ connection.
 
 Configure `:uof_sdk` through application environment, as shown in the
 [quick start](#quick-start). `UOF.SDK.start_link/1` also accepts keyword
-overrides. Configure one transport; the SDK derives its system and content consumers.
+overrides. The SDK derives its system and content consumers from `:pulsar`.
 The `:uof_api` access token and base URL must match the feed environment because startup
 loads producer descriptions and recovery uses the HTTP API.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `:handler` | Required | Module implementing `UOF.SDK.MessageHandler` |
-| `:transport` | `:amqp` | `{:amqp, opts}` or `{:pulsar, opts}`; see [Choosing a transport](#choosing-a-transport) |
-| `:node_id` | `nil` | Positive ID scopes recovery replays and `snapshot_complete`; shared by every instance on one Pulsar subscription, distinct across subscriptions using the same access token |
+| `:pulsar` | Required | `:host`, `:topic`, and base `:subscription`; `:conn_opts` for the client; other options go to `OffBroadway.Pulsar.Producer` |
+| `:node_id` | `nil` | Positive ID scopes recovery replays and `snapshot_complete`; shared by every instance on one subscription, distinct across subscriptions using the same access token |
 | `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | `module` or `{module, opts}` persisting restart state; see [implementing a store](docs/architecture.md#implementing-a-store) |
 | `:concurrency` | `10` | Number of content processors in each SDK instance |
 | `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
-| `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound; not used by Pulsar |
 | `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
 | `:max_recovery_time` | `3600` | Wait for recovery completion before reissuing a stalled request |
-| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery; with AMQP, must exceed `:max_processing_delay_seconds` |
+| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery |
 | `:producers` | `[]` | Fallback producer descriptions (`[id: 1, product: "liveodds", recovery_window_minutes: 4320]`), used only if the UOF API is unavailable at startup and no previous run stored any |
 
 Public durations are in seconds. Recovery throttling defaults follow the official SDK

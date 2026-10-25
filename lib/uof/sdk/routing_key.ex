@@ -70,7 +70,7 @@ defmodule UOF.SDK.RoutingKey do
   @doc """
   Whether a message is addressed to `node_id`: unaddressed (`-`) messages are
   for everyone, recovery messages only for the node that requested them. A
-  `nil` or non-positive `node_id` accepts every node, as the AMQP bindings do.
+  `nil` or non-positive `node_id` accepts every node.
   """
   @spec for_node?(t(), integer() | nil) :: boolean()
   def for_node?(%__MODULE__{node_id: nil}, _node_id), do: true

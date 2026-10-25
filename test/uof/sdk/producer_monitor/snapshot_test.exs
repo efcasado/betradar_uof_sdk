@@ -5,7 +5,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
   alias UOF.SDK.ProducerMonitor.Snapshot.Progress
 
   @snapshot %Snapshot{
-    consumer_tags: %{system: "ctag-s", content: "ctag-c"},
+    consumer_tag: "ctag-s",
     producers: %{
       1 => %Progress{checkpoint: 2_000, synchronized: true},
       3 => %Progress{checkpoint: nil, synchronized: false}
@@ -26,9 +26,9 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
   end
 
   test "a session change unsynchronizes every producer and keeps checkpoints" do
-    changed = Snapshot.change_session(@snapshot, %{system: "ctag-s", content: "ctag-c2"})
+    changed = Snapshot.change_session(@snapshot, "ctag-s2")
 
-    assert changed.consumer_tags == %{system: "ctag-s", content: "ctag-c2"}
+    assert changed.consumer_tag == "ctag-s2"
     assert Snapshot.progress(changed, 1) == %Progress{checkpoint: 2_000, synchronized: false}
     refute Snapshot.resumable?(changed, 1)
   end
@@ -39,19 +39,20 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
 
   test "rejects other terms and unsupported versions" do
     assert_raise ArgumentError, ~r/unreadable producer monitor snapshot/, fn ->
-      Snapshot.decode!(:erlang.term_to_binary(%{consumer_tags: %{}}))
+      Snapshot.decode!(:erlang.term_to_binary(%{consumer_tag: nil}))
     end
 
-    assert_raise ArgumentError, ~r/unsupported producer monitor snapshot version: 2/, fn ->
-      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 2, %{}}))
+    # Version 1 stored one consumer tag per pipeline.
+    assert_raise ArgumentError, ~r/unsupported producer monitor snapshot version: 1/, fn ->
+      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 1, %{}}))
     end
   end
 
   test "rejects snapshots with an invalid shape" do
-    assert_raise ArgumentError, ~r/invalid producer monitor snapshot consumer tag/, fn ->
+    assert_raise ArgumentError, ~r/invalid producer monitor snapshot: /, fn ->
       Snapshot.decode!(
         :erlang.term_to_binary(
-          {:uof_sdk_monitor_snapshot, 1, %{consumer_tags: %{other: "t"}, producers: %{}, descriptions: []}}
+          {:uof_sdk_monitor_snapshot, 2, %{consumer_tag: %{system: "t"}, producers: %{}, descriptions: []}}
         )
       )
     end
@@ -59,7 +60,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
     assert_raise ArgumentError, ~r/invalid producer monitor snapshot progress/, fn ->
       Snapshot.decode!(
         :erlang.term_to_binary(
-          {:uof_sdk_monitor_snapshot, 1, %{consumer_tags: %{}, producers: %{1 => {"2000", true}}, descriptions: []}}
+          {:uof_sdk_monitor_snapshot, 2, %{consumer_tag: nil, producers: %{1 => {"2000", true}}, descriptions: []}}
         )
       )
     end
@@ -76,7 +77,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
     assert_raise ArgumentError, ~r/invalid producer monitor snapshot description/, fn ->
       Snapshot.decode!(
         :erlang.term_to_binary(
-          {:uof_sdk_monitor_snapshot, 1, %{consumer_tags: %{}, producers: %{}, descriptions: [%{id: 1}]}}
+          {:uof_sdk_monitor_snapshot, 2, %{consumer_tag: nil, producers: %{}, descriptions: [%{id: 1}]}}
         )
       )
     end
@@ -84,7 +85,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
 
   test "rejects a snapshot missing a field" do
     assert_raise ArgumentError, ~r/invalid producer monitor snapshot: /, fn ->
-      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 1, %{consumer_tags: %{}, producers: %{}}}))
+      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 2, %{consumer_tag: nil, producers: %{}}}))
     end
   end
 end

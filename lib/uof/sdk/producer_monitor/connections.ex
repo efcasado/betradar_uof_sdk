@@ -1,97 +1,50 @@
 defmodule UOF.SDK.ProducerMonitor.Connections do
   @moduledoc false
 
-  # Order-independent consume-session tracking.
+  # Order-independent tracking of the upstream consume session.
   #
-  # Observations arrive from concurrent pipeline processors, so delivery order
-  # proves nothing. Consumer tags are unique per consume session (transport contract),
-  # which makes novelty the only reliable reconnect signal: a tag already in
-  # the seen set is a repeat or an out-of-order straggler from a superseded
-  # session and must not move the committed baseline backwards. The seen set
-  # is seeded with the persisted baseline so resuming into an unchanged
-  # session is not a change.
+  # The system pipeline reports the connector's consumer tag from every alive.
+  # Consumer tags are unique per consume session (connector contract), which
+  # makes novelty the only reliable reconnect signal: a tag already in the
+  # seen set is a repeat or an out-of-order straggler from a superseded session
+  # and must not move the committed baseline backwards. The seen set is seeded
+  # with the persisted baseline so resuming into an unchanged session is not a
+  # change.
   #
-  # Persisted consumer tags are comparison baselines, not readiness evidence. They do
-  # arm the restart gate, which remains closed until every required namespace
-  # has been observed in this process.
-  #
-  # The required namespaces are the pipelines the transport monitors. A
-  # persisted tag outside them is dropped, so the next commit removes it.
+  # The persisted tag is a comparison baseline, not readiness evidence. It does
+  # arm the restart gate, which remains closed until a tag has been observed in
+  # this process.
 
-  defstruct required: [], persisted: %{}, observed: %{}, seen: %{}, pending: %{}
+  defstruct persisted: nil, observed: nil, seen: MapSet.new(), pending: nil
 
   @type t :: %__MODULE__{
-          required: [atom()],
-          persisted: %{optional(atom()) => term()},
-          observed: %{optional(atom()) => term()},
-          seen: %{optional(atom()) => MapSet.t()},
-          pending: %{optional(atom()) => term()}
+          persisted: binary() | nil,
+          observed: binary() | nil,
+          seen: MapSet.t(),
+          pending: binary() | nil
         }
 
-  def new(persisted, required) do
-    persisted = Map.take(persisted, required)
-
-    %__MODULE__{
-      required: required,
-      persisted: persisted,
-      seen: Map.new(persisted, fn {namespace, tag} -> {namespace, MapSet.new([tag])} end)
-    }
+  def new(persisted) do
+    %__MODULE__{persisted: persisted, seen: MapSet.new(List.wrap(persisted))}
   end
 
-  def observe(%__MODULE__{} = connections, namespace, tag) do
-    connections = track(connections, namespace, tag)
-
-    cond do
-      not ready?(connections) -> {:not_ready, connections}
-      changed?(connections) -> {:recovery_needed, connections}
-      true -> {:unchanged, connections}
-    end
-  end
-
-  defp track(%__MODULE__{} = connections, namespace, tag) do
-    seen = Map.get(connections.seen, namespace, MapSet.new())
-
-    if MapSet.member?(seen, tag) do
-      %{connections | observed: Map.put_new(connections.observed, namespace, tag)}
+  def observe(%__MODULE__{} = connections, tag) do
+    if MapSet.member?(connections.seen, tag) do
+      {:unchanged, %{connections | observed: connections.observed || tag}}
     else
-      %{
-        connections
-        | observed: Map.put(connections.observed, namespace, tag),
-          seen: Map.put(connections.seen, namespace, MapSet.put(seen, tag)),
-          pending: Map.put(connections.pending, namespace, tag)
-      }
+      {:recovery_needed, %{connections | observed: tag, seen: MapSet.put(connections.seen, tag), pending: tag}}
     end
   end
 
-  def active?(%__MODULE__{} = connections) do
-    map_size(connections.observed) > 0
-  end
-
-  # Persisted consumer tags mean this process is restarting a previously observed
-  # session. Once any current tag arrives, an otherwise fresh process is
-  # likewise committed to completing the startup gate.
+  # A persisted tag means this process is restarting a previously observed
+  # session, so recovery waits until the current tag is observed.
   def awaiting_readiness?(%__MODULE__{} = connections) do
-    not ready?(connections) and
-      (map_size(connections.persisted) > 0 or active?(connections))
+    not ready?(connections) and not is_nil(connections.persisted)
   end
 
-  def missing_namespaces(%__MODULE__{required: required, observed: observed}) do
-    Enum.reject(required, &Map.has_key?(observed, &1))
-  end
-
-  def ready?(%__MODULE__{required: required, observed: observed}) do
-    Enum.all?(required, &Map.has_key?(observed, &1))
-  end
-
-  defp changed?(%__MODULE__{} = connections) do
-    map_size(connections.pending) > 0
-  end
+  def ready?(%__MODULE__{observed: observed}), do: not is_nil(observed)
 
   def commit(%__MODULE__{} = connections) do
-    %{
-      connections
-      | persisted: Map.merge(connections.persisted, connections.pending),
-        pending: %{}
-    }
+    %{connections | persisted: connections.pending, pending: nil}
   end
 end

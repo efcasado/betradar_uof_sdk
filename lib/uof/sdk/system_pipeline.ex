@@ -10,13 +10,11 @@ defmodule UOF.SDK.SystemPipeline do
   ## Options
 
     * `:name` (required) - pipeline name.
-    * `:producer` - Broadway producer spec for system messages.
-    * `:monitor` - module that receives lifecycle side-effects (`alive` and
-      `snapshot_complete`). Default `nil`.
-    * `:metadata_adapter` - message metadata shape (`:amqp` or
-      `:pulsar_rabbitmq_source`; default `:amqp`).
-    * `:routing_key_metadata_key` - the `message.metadata` field carrying the
-      UOF routing key for AMQP/custom producers (default `:routing_key`).
+    * `:producer` - Broadway producer spec for the Failover system
+      subscription. It receives every message on the topic; event content is
+      acked without decoding.
+    * `:monitor` - module that receives lifecycle side-effects (`alive`,
+      `snapshot_complete`, and the upstream consumer tag). Default `nil`.
     * `:node_id` - this SDK node's id. `snapshot_complete` addressed to another
       node is acked without reaching the monitor, so a colliding `request_id`
       from another node cannot complete our recovery. `nil` accepts every node.
@@ -43,27 +41,18 @@ defmodule UOF.SDK.SystemPipeline do
 
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
-    name = Keyword.fetch!(opts, :name)
-    metadata_adapter = Keyword.get(opts, :metadata_adapter, :amqp)
-    routing_key_key = Keyword.get(opts, :routing_key_metadata_key, :routing_key)
-
     Broadway.start_link(__MODULE__,
-      name: name,
+      name: Keyword.fetch!(opts, :name),
       producer: [module: Keyword.fetch!(opts, :producer), concurrency: 1],
       processors: [default: [concurrency: 1]],
-      partition_by: &partition(&1, metadata_adapter, routing_key_key),
-      context: %{
-        monitor: Keyword.get(opts, :monitor),
-        node_id: Keyword.get(opts, :node_id),
-        metadata_adapter: metadata_adapter,
-        routing_key_key: routing_key_key
-      }
+      partition_by: &partition/1,
+      context: %{monitor: Keyword.get(opts, :monitor), node_id: Keyword.get(opts, :node_id)}
     )
   end
 
   @impl Broadway
   def handle_message(_processor, %Message{} = message, context) do
-    rk = message |> routing_key(context) |> RoutingKey.parse()
+    rk = message |> MessageMetadata.routing_key() |> RoutingKey.parse()
 
     cond do
       rk.message_type not in ["alive", "snapshot_complete"] -> message
@@ -87,7 +76,7 @@ defmodule UOF.SDK.SystemPipeline do
   defp handle_system_message(%Message{} = message, context, rk) do
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
-        maybe_track_connection(context, rk.message_type, message)
+        maybe_track_connection(context.monitor, rk.message_type, message)
         observe(context, rk, decoded)
         message
 
@@ -97,9 +86,9 @@ defmodule UOF.SDK.SystemPipeline do
   end
 
   @impl Broadway
-  def handle_failed(messages, context) do
+  def handle_failed(messages, _context) do
     for message <- messages do
-      rk = message |> routing_key(context) |> RoutingKey.parse()
+      rk = message |> MessageMetadata.routing_key() |> RoutingKey.parse()
 
       :telemetry.execute(
         [:uof_sdk, :message, :failed],
@@ -115,7 +104,7 @@ defmodule UOF.SDK.SystemPipeline do
           uof_message_type: rk.message_type,
           uof_event_urn: rk.event_urn,
           uof_payload: truncate(message.data, 4096)
-        ] ++ MessageMetadata.delivery_log_metadata(message, context.metadata_adapter)
+        ] ++ MessageMetadata.delivery_log_metadata(message)
       )
     end
 
@@ -141,31 +130,27 @@ defmodule UOF.SDK.SystemPipeline do
 
   defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
 
-  defp maybe_track_connection(%{monitor: nil}, _type, _message), do: :ok
+  defp maybe_track_connection(nil, _type, _message), do: :ok
 
-  defp maybe_track_connection(%{monitor: monitor} = context, "alive", message) do
-    case MessageMetadata.consumer_tag(message, context.metadata_adapter) do
+  defp maybe_track_connection(monitor, "alive", message) do
+    case MessageMetadata.consumer_tag(message) do
       nil -> :ok
-      tag -> monitor.observe_connection({:system, tag})
+      tag -> monitor.observe_connection(tag)
     end
   end
 
-  defp maybe_track_connection(_context, _type, _message), do: :ok
+  defp maybe_track_connection(_monitor, _type, _message), do: :ok
 
   defp notify(nil, _fun, _args), do: :ok
   defp notify(mod, fun, args), do: apply(mod, fun, args)
 
   ## partitioning ------------------------------------------------------------
 
-  defp partition(%Message{} = message, metadata_adapter, routing_key_key) do
+  defp partition(%Message{} = message) do
     message
-    |> routing_key(%{metadata_adapter: metadata_adapter, routing_key_key: routing_key_key})
+    |> MessageMetadata.routing_key()
     |> RoutingKey.parse()
     |> RoutingKey.partition_key()
     |> :erlang.phash2()
-  end
-
-  defp routing_key(%Message{} = message, context) do
-    MessageMetadata.routing_key(message, context.metadata_adapter, context.routing_key_key)
   end
 end

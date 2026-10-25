@@ -28,8 +28,17 @@ Your application handles:
   messages.
 - Persistence of the data you care about.
 - Idempotency for replayed or duplicated messages.
-- [Persistent checkpoint storage](docs/architecture.md#persistence) in
+- [Persistent checkpoint storage](docs/deployment.md#monitor-store) in
   production.
+
+## Guides
+
+- [Architecture](docs/architecture.md): components, feed topology, message processing,
+  persistence, and design invariants.
+- [Deployment](docs/deployment.md): the source connector, topic, subscriptions, and
+  scaling.
+- [Recovery](docs/recovery.md): producer status, automatic recovery, manual and full
+  recoveries, and what to monitor.
 
 ## Installation
 
@@ -43,51 +52,11 @@ def deps do
 end
 ```
 
-## Deployment
-
-Betradar delivers UOF over AMQP. A RabbitMQ source connector consumes it and publishes
-each message to a Pulsar topic, and SDK instances consume that topic:
-
-```text
-Betradar AMQP → RabbitMQ source connector → Pulsar topic → SDK instances
-```
-
-The topic buffers the feed durably, so an SDK restart can resume from retained backlog
-without recovery, and instances sharing a subscription divide content delivery between
-them. The deployment needs:
-
-- **A RabbitMQ source connector** configured according to the
-  [connector contract](docs/architecture.md#connector-contract): message-key rules,
-  the routing-key property, key-based batching, and a server-generated consumer tag.
-  Point it at Betradar's AMQP host with your access token as the username, your
-  assigned virtual host, the `unifiedfeed` exchange, and the `#` binding.
-  [`docker-compose.yml`](docker-compose.yml) shows a complete local setup.
-- **A single-partition topic** whose backlog is never discarded: see
-  [backlog and restart continuity](docs/architecture.md#backlog-and-restart-continuity).
-- **The SDK's subscriptions created in advance, or topic retention**, so a new content
-  subscription cannot miss a recovery replay: see
-  [feed continuity](docs/architecture.md#feed-continuity).
-
-| Environment | Betradar AMQP host |
-| --- | --- |
-| Production | `mq.betradar.com` |
-| Integration | `stgmq.betradar.com` |
-| Replay | `replaymq.betradar.com` |
-
-A message that fails to decode or process is not retried: about a second later it is
-diverted to a dead-letter topic named `<topic>-<subscription>-DLQ`, one for each of the
-`-content` and `-system` subscriptions. The broker must allow those topics to be created
-automatically, or you create them in advance. Acknowledgements are tracked per batch index,
-so a failure doesn't redeliver the rest of its batch; Pulsar 4.2 brokers enable this by
-default (`acknowledgmentAtBatchIndexLevelEnabled`).
-
-See the [architecture guide](docs/architecture.md#pulsar) for the connector contract,
-key-based batching, failover, feed continuity, and node isolation.
-
 ## Quick start
 
-This example assumes a running Pulsar broker and a source connector publishing the
-integration feed to the `uof-feed` topic, as described in [deployment](#deployment). You
+The SDK consumes the feed from a Pulsar topic that a RabbitMQ source connector fills from
+Betradar. This example assumes that is in place, publishing the integration feed to the
+`uof-feed` topic; the [deployment guide](docs/deployment.md) describes how to set it up. You
 need a UOF access token for the recovery API.
 
 Set `UOF_ACCESS_TOKEN` in your environment. In `config/runtime.exs`, configure the
@@ -110,12 +79,9 @@ config :uof_api,
   auth_token: System.fetch_env!("UOF_ACCESS_TOKEN")
 ```
 
-The SDK needs API access for producer descriptions and recovery. Instances that share
-content delivery use the same topic, base subscription, and `node_id`. Additional
-`:pulsar` options are passed to
-[`OffBroadway.Pulsar.Producer`](https://hexdocs.pm/off_broadway_pulsar/OffBroadway.Pulsar.Producer.html);
-`:conn_opts` configures the shared client. The SDK owns the two subscription types and the
-system consumer's ownership callback. See [configuration options](#configuration).
+The SDK needs API access for producer descriptions and recovery. See
+[configuration options](#configuration), and the deployment guide for
+[`node_id` and scaling](docs/deployment.md#sdk-configuration).
 
 Add `UOF.SDK` to your application's supervision tree:
 
@@ -193,7 +159,7 @@ loads producer descriptions and recovery uses the HTTP API.
 
 Public durations are in seconds. Recovery throttling defaults follow the official SDK
 guidance.
-See [time and recovery controls](docs/architecture.md#time-and-recovery-controls) for the precise semantics.
+See [time controls](docs/recovery.md#time-controls) for the precise semantics.
 
 ## Handler reference
 

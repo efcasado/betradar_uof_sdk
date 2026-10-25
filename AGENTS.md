@@ -9,11 +9,14 @@ Keep new features within that scope unless the task explicitly expands it.
 ## Start here
 
 - Read the [architecture guide](docs/architecture.md) before changing Pulsar consumption,
-  supervision, message processing, recovery, or persistence behavior. It describes
-  how the SDK works: component responsibilities, process boundaries, the monitor
-  store contract, and the design invariants.
-- Use the [README](README.md) for the public surface: installation, Pulsar and
-  connector setup, configuration options, handler callbacks, and testing.
+  supervision, message processing, or persistence behavior. It describes how the SDK
+  is built: component responsibilities, process boundaries, the feed topology, the
+  monitor store contract, and the design invariants.
+- Read the [recovery guide](docs/recovery.md) before changing producer status,
+  recovery, sessions, or restart behavior, and the [deployment guide](docs/deployment.md)
+  before changing what a deployment must provide (connector, topic, subscriptions).
+- Use the [README](README.md) for the public surface: installation, quick start,
+  configuration options, handler callbacks, and testing.
 - Update those documents when a change alters the behavior they describe.
 
 ## Implementation conventions
@@ -86,9 +89,8 @@ the runtime suites. Report what was tested and any checks that were not run.
 - Prioritize concrete correctness risks in supported configurations. Explain the
   trigger, affected behavior, and consequence; distinguish verified failures from
   hypotheses. Consult dependency source when a finding depends on its semantics.
-- Check the architecture guide's invariants, particularly the system subscription
-  as the sole control plane, active-only recovery, persisted recovery intent, and
-  atomic monitor snapshots.
+- Check every change against the architecture guide's
+  [design invariants](docs/architecture.md#design-invariants).
 - Check the [connector contract](docs/architecture.md#connector-contract):
   routing decisions read the `__rabbitmq_routing_key` property, the message key is
   the ordering scope (event URN or `system`) and relies on key-based batching, and

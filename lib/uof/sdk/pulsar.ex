@@ -20,7 +20,7 @@ defmodule UOF.SDK.Pulsar do
   # retained message lets it read what the system subscription has already
   # acknowledged, provided the topic retains acknowledged messages. Deployments
   # without retention create the subscriptions in advance instead; see the
-  # architecture guide's feed continuity section.
+  # deployment guide's subscriptions section.
   @content_consumer_defaults [initial_position: :earliest]
 
   # Processing is single-attempt. A failed message is nacked; without a

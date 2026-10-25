@@ -39,14 +39,13 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
     refute Snapshot.resumable?(changed, 1)
   end
 
-  test "reads the previous snapshot format without full recovery intent" do
+  test "rejects an old progress shape" do
     previous =
       :erlang.term_to_binary(
         {:uof_sdk_monitor_snapshot, 1, %{consumer_tag: "ctag-s", producers: %{1 => {2_000, true}}, descriptions: []}}
       )
 
-    assert %Progress{checkpoint: 2_000, synchronized: true, full_recovery_pending: false} =
-             previous |> Snapshot.decode!() |> Snapshot.progress(1)
+    assert_raise ArgumentError, ~r/invalid producer monitor snapshot progress/, fn -> Snapshot.decode!(previous) end
   end
 
   test "rejects binaries that are not external terms" do
@@ -58,8 +57,8 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
       Snapshot.decode!(:erlang.term_to_binary(%{consumer_tag: nil}))
     end
 
-    assert_raise ArgumentError, ~r/unsupported producer monitor snapshot version: 3/, fn ->
-      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 3, %{}}))
+    assert_raise ArgumentError, ~r/unsupported producer monitor snapshot version: 2/, fn ->
+      Snapshot.decode!(:erlang.term_to_binary({:uof_sdk_monitor_snapshot, 2, %{}}))
     end
   end
 
@@ -86,7 +85,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
     assert_raise ArgumentError, ~r/invalid producer monitor snapshot progress/, fn ->
       Snapshot.decode!(
         :erlang.term_to_binary(
-          {:uof_sdk_monitor_snapshot, 1, %{consumer_tag: nil, producers: %{1 => {"2000", true}}, descriptions: []}}
+          {:uof_sdk_monitor_snapshot, 1, %{consumer_tag: nil, producers: %{1 => {"2000", true, false}}, descriptions: []}}
         )
       )
     end

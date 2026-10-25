@@ -45,7 +45,7 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   defstruct consumer_tag: nil, producers: %{}, descriptions: []
 
   @format :uof_sdk_monitor_snapshot
-  @version 2
+  @version 1
 
   @doc "Whether the producer may resume retained backlog without recovery."
   @spec resumable?(t(), integer()) :: boolean()
@@ -103,20 +103,7 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
           descriptions: Enum.map(descriptions, &validate_description!/1)
         }
 
-      # Durable stores can still hold snapshots from before full-recovery intent
-      # was recorded. Those producers have no pending manual full recovery.
-      {@format, 1, %{consumer_tag: consumer_tag, producers: producers, descriptions: descriptions}}
-      when (is_binary(consumer_tag) or is_nil(consumer_tag)) and is_map(producers) and is_list(descriptions) ->
-        %__MODULE__{
-          consumer_tag: consumer_tag,
-          producers: Map.new(producers, &decode_previous_progress!/1),
-          descriptions: Enum.map(descriptions, &validate_description!/1)
-        }
-
       {@format, @version, data} ->
-        raise ArgumentError, "invalid producer monitor snapshot: #{inspect(data, limit: 5)}"
-
-      {@format, 1, data} ->
         raise ArgumentError, "invalid producer monitor snapshot: #{inspect(data, limit: 5)}"
 
       {@format, version, _data} ->
@@ -140,15 +127,6 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   end
 
   defp decode_progress!(entry) do
-    raise ArgumentError, "invalid producer monitor snapshot progress: #{inspect(entry)}"
-  end
-
-  defp decode_previous_progress!({id, {checkpoint, synchronized}})
-       when is_integer(id) and (is_integer(checkpoint) or is_nil(checkpoint)) and is_boolean(synchronized) do
-    {id, %Progress{checkpoint: checkpoint, synchronized: synchronized}}
-  end
-
-  defp decode_previous_progress!(entry) do
     raise ArgumentError, "invalid producer monitor snapshot progress: #{inspect(entry)}"
   end
 

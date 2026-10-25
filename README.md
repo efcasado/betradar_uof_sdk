@@ -104,7 +104,7 @@ so a failure doesn't redeliver the rest of its batch; Pulsar 4.2 brokers enable 
 default (`acknowledgmentAtBatchIndexLevelEnabled`).
 
 See the [architecture guide](docs/architecture.md#pulsar) for the connector contract,
-key-based batching, failover, and node isolation.
+key-based batching, failover, feed continuity, and node isolation.
 
 ## Quick start
 
@@ -210,10 +210,10 @@ loads producer descriptions and recovery uses the HTTP API.
 | `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | `module` or `{module, opts}` persisting restart state; see [implementing a store](docs/architecture.md#implementing-a-store) |
 | `:concurrency` | `10` | Number of content processors in each SDK instance |
 | `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
-| `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound |
+| `:max_processing_delay_seconds` | `20` | Content-lag threshold and restart-resume freshness bound; not used by Pulsar |
 | `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
 | `:max_recovery_time` | `3600` | Wait for recovery completion before reissuing a stalled request |
-| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery; must exceed `:max_processing_delay_seconds` |
+| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery; with AMQP, must exceed `:max_processing_delay_seconds` |
 | `:producers` | `[]` | Fallback producer descriptions (`[id: 1, product: "liveodds", recovery_window_minutes: 4320]`), used only if the UOF API is unavailable at startup and no previous run stored any |
 
 Public durations are in seconds. Recovery throttling defaults follow the official SDK

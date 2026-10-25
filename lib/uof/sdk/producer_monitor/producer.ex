@@ -151,7 +151,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec check(t(), integer(), non_neg_integer(), non_neg_integer(), boolean(), integer() | nil) :: check_result()
+  @spec check(t(), integer(), non_neg_integer(), non_neg_integer() | nil, boolean(), integer() | nil) ::
+          check_result()
   def check(producer, now, inactivity_ms, max_processing_delay_ms, connections_ready?, in_flight_ts) do
     freshness = content_freshness(producer, in_flight_ts)
 
@@ -170,7 +171,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
         {:transition, mark_up(producer)}
 
       producer.status == :resuming and producer.last_alive_at != nil and connections_ready? and
-        freshness != nil and not processing_violation?(freshness, now, max_processing_delay_ms) ->
+          caught_up?(freshness, now, max_processing_delay_ms) ->
         {:transition, mark_up(producer)}
 
       true ->
@@ -213,7 +214,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec complete_recovery(t(), integer(), integer(), non_neg_integer(), integer() | nil) :: {:ok, t()} | :stale
+  @spec complete_recovery(t(), integer(), integer(), non_neg_integer() | nil, integer() | nil) :: {:ok, t()} | :stale
   # Completion applies the same content-lag check as a health tick: content
   # already known to lag (e.g. a stuck handler) completes the recovery as
   # :delayed rather than reporting :up for one tick.
@@ -450,8 +451,17 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   defp content_freshness(_producer, in_flight_ts) when is_integer(in_flight_ts), do: in_flight_ts
   defp content_freshness(%__MODULE__{last_message_timestamp: timestamp}, nil), do: timestamp
 
+  # A nil threshold means content progress is not monitored (Pulsar): the
+  # producer's status then reflects feed continuity only.
+  defp processing_violation?(_freshness, _now, nil), do: false
   defp processing_violation?(nil, _now, _ms), do: false
   defp processing_violation?(freshness, now, ms), do: now - freshness > ms
+
+  # Resuming requires content processed in this session, unless content
+  # progress is not monitored.
+  defp caught_up?(_freshness, _now, nil), do: true
+  defp caught_up?(nil, _now, _ms), do: false
+  defp caught_up?(freshness, now, ms), do: not processing_violation?(freshness, now, ms)
 
   defp max_timestamp(nil, timestamp), do: timestamp
   defp max_timestamp(timestamp, nil), do: timestamp

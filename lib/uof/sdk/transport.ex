@@ -13,12 +13,14 @@ defmodule UOF.SDK.Transport do
   @type producer_spec :: {module(), keyword()}
   @type child_spec :: Supervisor.child_spec() | {module(), term()}
   @type ownership :: :always_active | {:failover, :passive}
+  @type pipeline :: :system | :content
 
   @spec producers(term(), integer() | nil) :: %{
           content: producer_spec(),
           children: [child_spec()],
           system: producer_spec(),
           ownership: ownership(),
+          monitored_pipelines: [pipeline()],
           metadata_adapter: :amqp | :pulsar_rabbitmq_source,
           routing_key_metadata_key: atom()
         }
@@ -46,6 +48,10 @@ defmodule UOF.SDK.Transport do
       content: rabbitmq_producer(content_bindings(node_id)),
       system: rabbitmq_producer(system_bindings(node_id)),
       ownership: :always_active,
+      # Each queue is exclusive and auto-deleted, so content still queued when
+      # its channel drops is lost. Feed continuity therefore depends on the
+      # content consume session and on how far content processing has got.
+      monitored_pipelines: [:system, :content],
       metadata_adapter: :amqp,
       routing_key_metadata_key: :routing_key
     }
@@ -64,6 +70,17 @@ defmodule UOF.SDK.Transport do
      on_failure: :reject,
      metadata: [:routing_key, :redelivered, :delivery_tag, :consumer_tag]}
   end
+
+  # Only the system pipeline observes feed continuity, so nothing confirms
+  # that the content subscription exists before the first recovery. Pulsar
+  # subscribes asynchronously and starts a new subscription at the latest
+  # message by default: a content consumer still connecting would miss the
+  # replay the system pipeline sees complete. Starting at the earliest
+  # retained message lets it read what the system subscription has already
+  # acknowledged, provided the topic retains acknowledged messages. Deployments
+  # without retention create the subscriptions in advance instead; see the
+  # architecture guide's feed continuity section.
+  @content_consumer_defaults [initial_position: :earliest]
 
   defp pulsar_producers(opts) do
     ensure_adapter!(Producer, :off_broadway_pulsar, :pulsar)
@@ -110,9 +127,15 @@ defmodule UOF.SDK.Transport do
       # Neither producer carries :host, so both reuse this one connection
       # context instead of each calling Pulsar.start/1.
       children: [{Client, client_opts}],
-      content: pulsar_producer(base_opts, subscription, :content, :key_shared),
-      system: pulsar_producer(system_opts, subscription, :system, :failover),
+      content: pulsar_producer(base_opts, subscription, :content, :key_shared, @content_consumer_defaults),
+      system: pulsar_producer(system_opts, subscription, :system, :failover, []),
       ownership: {:failover, :passive},
+      # Both subscriptions read the same durable topic, and the system
+      # subscription receives every message on it. A gap can only start
+      # upstream of the topic, where the connector's consume session changes,
+      # and content not yet processed stays in the content subscription's
+      # backlog. The system pipeline alone therefore observes feed continuity.
+      monitored_pipelines: [:system],
       metadata_adapter: :pulsar_rabbitmq_source,
       routing_key_metadata_key: :routing_key
     }
@@ -132,9 +155,10 @@ defmodule UOF.SDK.Transport do
     dead_letter_policy: [max_redelivery: 1]
   ]
 
-  defp pulsar_producer(opts, subscription, suffix, subscription_type) do
+  defp pulsar_producer(opts, subscription, suffix, subscription_type, defaults) do
     consumer_opts =
       @pulsar_consumer_defaults
+      |> Keyword.merge(defaults)
       |> Keyword.merge(Keyword.get(opts, :consumer_opts, []))
       |> Keyword.put(:subscription_type, subscription_type)
 

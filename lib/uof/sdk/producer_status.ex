@@ -10,12 +10,14 @@ defmodule UOF.SDK.ProducerStatus do
       completion
     * `:up` — synchronized
     * `:delayed` — the remote feed is healthy but local processing is behind
+      (AMQP only; the Pulsar transport does not track content lag)
     * `:resuming` — draining retained backlog after a restart and awaiting
       current-session confirmation
 
   Timestamps are epoch milliseconds. `last_alive_at` is when this node last
   observed a system heartbeat; `last_message_timestamp` is the newest processed
-  feed timestamp. `processing_queue_delay` is set only while `:delayed`.
+  feed timestamp, and is `nil` with the Pulsar transport. `processing_queue_delay`
+  is set only while `:delayed`.
   """
 
   @type status :: :down | :recovering | :up | :delayed | :resuming

@@ -45,7 +45,7 @@ defmodule UOF.SDK.Config do
     max_processing_delay_seconds: [
       type: :pos_integer,
       default: 20,
-      doc: "Content-lag threshold and restart-resume freshness bound."
+      doc: "Content-lag threshold and restart-resume freshness bound. Not used by the Pulsar transport."
     ],
     min_interval_between_recoveries: [
       type: :pos_integer,
@@ -77,8 +77,8 @@ defmodule UOF.SDK.Config do
       type: :pos_integer,
       default: 300,
       doc: """
-      Look-back subtracted from the stored checkpoint for incremental recovery. Must exceed
-      `:max_processing_delay_seconds`.
+      Look-back subtracted from the stored checkpoint for incremental recovery. With the AMQP
+      transport, it must exceed `:max_processing_delay_seconds`.
       """
     ]
   ]
@@ -131,6 +131,7 @@ defmodule UOF.SDK.Config do
           content_producer: Transport.producer_spec(),
           system_producer: Transport.producer_spec(),
           ownership: Transport.ownership(),
+          monitored_pipelines: [Transport.pipeline()],
           metadata_adapter: MessageMetadata.adapter(),
           routing_key_metadata_key: atom(),
           monitor_store: {module(), keyword()},
@@ -151,6 +152,7 @@ defmodule UOF.SDK.Config do
     :content_producer,
     :system_producer,
     :ownership,
+    :monitored_pipelines,
     :metadata_adapter,
     :routing_key_metadata_key,
     :monitor_store,
@@ -173,9 +175,9 @@ defmodule UOF.SDK.Config do
       |> Application.get_all_env()
       |> Keyword.merge(overrides)
       |> NimbleOptions.validate!(@schema)
-      |> validate_recovery_overlap!()
 
     pipelines = Transport.producers(cfg[:transport], cfg[:node_id])
+    validate_recovery_overlap!(cfg, pipelines.monitored_pipelines)
 
     struct!(
       __MODULE__,
@@ -185,6 +187,7 @@ defmodule UOF.SDK.Config do
         content_producer: pipelines.content,
         system_producer: pipelines.system,
         ownership: pipelines.ownership,
+        monitored_pipelines: pipelines.monitored_pipelines,
         metadata_adapter: pipelines.metadata_adapter,
         routing_key_metadata_key: pipelines.routing_key_metadata_key
       )
@@ -192,19 +195,19 @@ defmodule UOF.SDK.Config do
   end
 
   # Subscribed alives advance the checkpoint while a producer is :up, which
-  # tolerates content lagging by up to the processing delay. Incremental
-  # recovery must look back further than that, or a restart can skip messages
-  # that were delivered but not yet processed.
-  defp validate_recovery_overlap!(cfg) do
+  # tolerates content lagging by up to the processing delay. When content
+  # continuity depends on processing (AMQP), incremental recovery must look
+  # back further than that, or a reconnect can skip messages that were
+  # delivered but not yet processed. Pulsar retains unprocessed content in
+  # the content subscription, so the bound does not apply there.
+  defp validate_recovery_overlap!(cfg, monitored_pipelines) do
     overlap = Keyword.fetch!(cfg, :recovery_overlap_seconds)
     delay = Keyword.fetch!(cfg, :max_processing_delay_seconds)
 
-    if overlap <= delay do
+    if :content in monitored_pipelines and overlap <= delay do
       raise ArgumentError,
             "recovery_overlap_seconds (#{overlap}) must exceed max_processing_delay_seconds (#{delay})"
     end
-
-    cfg
   end
 
   @doc false

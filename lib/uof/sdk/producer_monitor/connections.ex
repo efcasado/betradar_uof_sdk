@@ -12,22 +12,27 @@ defmodule UOF.SDK.ProducerMonitor.Connections do
   # session is not a change.
   #
   # Persisted consumer tags are comparison baselines, not readiness evidence. They do
-  # arm the restart gate, which remains closed until both namespaces have been
-  # observed in this process.
+  # arm the restart gate, which remains closed until every required namespace
+  # has been observed in this process.
+  #
+  # The required namespaces are the pipelines the transport monitors. A
+  # persisted tag outside them is dropped, so the next commit removes it.
 
-  @required_namespaces [:system, :content]
-
-  defstruct persisted: %{}, observed: %{}, seen: %{}, pending: %{}
+  defstruct required: [], persisted: %{}, observed: %{}, seen: %{}, pending: %{}
 
   @type t :: %__MODULE__{
+          required: [atom()],
           persisted: %{optional(atom()) => term()},
           observed: %{optional(atom()) => term()},
           seen: %{optional(atom()) => MapSet.t()},
           pending: %{optional(atom()) => term()}
         }
 
-  def new(persisted) do
+  def new(persisted, required) do
+    persisted = Map.take(persisted, required)
+
     %__MODULE__{
+      required: required,
       persisted: persisted,
       seen: Map.new(persisted, fn {namespace, tag} -> {namespace, MapSet.new([tag])} end)
     }
@@ -64,18 +69,18 @@ defmodule UOF.SDK.ProducerMonitor.Connections do
 
   # Persisted consumer tags mean this process is restarting a previously observed
   # session. Once any current tag arrives, an otherwise fresh process is
-  # likewise committed to completing the two-namespace startup gate.
+  # likewise committed to completing the startup gate.
   def awaiting_readiness?(%__MODULE__{} = connections) do
     not ready?(connections) and
       (map_size(connections.persisted) > 0 or active?(connections))
   end
 
-  def missing_namespaces(%__MODULE__{observed: observed}) do
-    Enum.reject(@required_namespaces, &Map.has_key?(observed, &1))
+  def missing_namespaces(%__MODULE__{required: required, observed: observed}) do
+    Enum.reject(required, &Map.has_key?(observed, &1))
   end
 
-  def ready?(%__MODULE__{observed: observed}) do
-    Enum.all?(@required_namespaces, &Map.has_key?(observed, &1))
+  def ready?(%__MODULE__{required: required, observed: observed}) do
+    Enum.all?(required, &Map.has_key?(observed, &1))
   end
 
   defp changed?(%__MODULE__{} = connections) do

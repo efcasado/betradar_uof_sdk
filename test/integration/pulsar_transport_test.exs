@@ -25,16 +25,14 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
   end
 
+  # Receives the system pipeline's observations. As in `UOF.SDK.child_specs/1`
+  # for Pulsar, the content pipeline does not report to the monitor.
   defmodule Monitor do
     @moduledoc false
 
-    def message(product, timestamp), do: notify({:observed_message, product, timestamp})
+    def alive(product, timestamp, subscribed?), do: notify({:observed_alive, product, timestamp, subscribed?})
 
-    def track_processing(product, timestamp, fun) do
-      result = fun.()
-      notify({:observed_message, product, timestamp})
-      result
-    end
+    def snapshot_complete(product, request_id), do: notify({:observed_snapshot_complete, product, request_id})
 
     def observe_connection(tag), do: notify({:observed_connection, tag})
 
@@ -49,19 +47,15 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     subscription = "uof-sdk-integration-#{System.unique_integer([:positive])}"
 
+    # Content subscriptions start at the earliest retained message, so each
+    # test's content pipeline also receives earlier tests' messages: assertions
+    # match the messages a test publishes.
     %{
       children: [client],
       content: content_producer,
       system: system_producer,
       metadata_adapter: metadata_adapter
-    } =
-      Transport.producers(
-        {:pulsar,
-         host: "pulsar://localhost:#{@pulsar_port}",
-         topic: "persistent://public/default/uof-feed",
-         subscription: subscription},
-        nil
-      )
+    } = pulsar_producers(subscription)
 
     start_supervised!(client)
 
@@ -77,7 +71,6 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
        concurrency: 1,
        producer: content_producer,
        metadata_adapter: metadata_adapter,
-       monitor: Monitor,
        node_id: 7}
     )
 
@@ -104,21 +97,43 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
       :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, xml)
     end)
 
-    assert_receive {:odds_change, %Feed.OddsChange{} = odds_change, odds_context}, 10_000
-    assert odds_change.event_id == "sr:match:12345"
+    assert_receive {:odds_change, %Feed.OddsChange{event_id: "sr:match:12345"}, odds_context}, 10_000
     assert odds_context.routing_key == "hi.-.pre.odds_change.1.sr:match.12345.-"
     assert odds_context.event_urn == "sr:match:12345"
 
-    assert_receive {:fixture_change, %Feed.FixtureChange{} = fixture_change, fixture_context}, 10_000
-    assert fixture_change.event_id == "sr:match:67890"
+    assert_receive {:fixture_change, %Feed.FixtureChange{event_id: "sr:match:67890"}, fixture_context}, 10_000
     assert fixture_context.routing_key == "hi.-.pre.fixture_change.1.sr:match.67890.-"
     assert fixture_context.event_urn == "sr:match:67890"
 
-    assert_receive {:observed_connection, {:content, consumer_tag}}, 10_000
-    assert is_binary(consumer_tag) and consumer_tag != ""
+    publish_alive(channel, 42)
 
-    assert_receive {:observed_message, 1, 42}, 10_000
-    assert_receive {:observed_message, 1, 43}, 10_000
+    assert_receive {:observed_connection, {:system, consumer_tag}}, 10_000
+    assert is_binary(consumer_tag) and consumer_tag != ""
+    assert_receive {:observed_alive, 1, 42, true}, 10_000
+  end
+
+  test "a content subscription created after messages were published still receives them", %{channel: channel} do
+    routing_key = "hi.-.pre.odds_change.1.sr:match.777.-"
+    xml = ~s(<odds_change product="1" event_id="sr:match:777" timestamp="7"/>)
+    :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, xml)
+
+    # Delivered to the existing content subscription, so it is on the topic.
+    assert_receive {:odds_change, _, %{routing_key: ^routing_key}}, 10_000
+
+    %{content: late_producer, metadata_adapter: metadata_adapter} =
+      pulsar_producers("uof-sdk-integration-late-#{System.unique_integer([:positive])}")
+
+    start_supervised!(
+      {ContentPipeline,
+       name: __MODULE__.LatePipeline,
+       handler: Handler,
+       concurrency: 1,
+       producer: late_producer,
+       metadata_adapter: metadata_adapter,
+       node_id: 7}
+    )
+
+    assert_receive {:odds_change, _, %{routing_key: ^routing_key}}, 10_000
   end
 
   test "keys messages by ordering scope, one key per batch entry", %{channel: channel} do
@@ -203,28 +218,38 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     refute_receive {:failed, ^routing_key}, 2_000
   end
 
-  test "changes the consumer tag when the source connector restarts", %{channel: channel} do
-    publish_odds_change(channel, "111", 100)
+  test "changes the system consumer tag when the source connector restarts", %{channel: channel} do
+    publish_alive(channel, 100)
 
-    assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
-    assert_receive {:observed_connection, {:content, old_consumer_tag}}, 10_000
+    assert_receive {:observed_alive, 1, 100, true}, 10_000
+    assert_receive {:observed_connection, {:system, old_consumer_tag}}, 10_000
 
     {:ok, old_queue} = TestSupport.source_queue()
     TestSupport.restart_source!()
     _new_queue = TestSupport.wait_for_new_source_queue!(old_queue)
 
-    publish_odds_change(channel, "222", 101)
+    publish_alive(channel, 101)
 
-    assert_receive {:odds_change, %Feed.OddsChange{}, _context}, 10_000
-    assert_receive {:observed_connection, {:content, new_consumer_tag}}, 10_000
+    # The system subscription starts at the latest message, so these are the
+    # only alives it receives, in topic order.
+    assert_receive {:observed_alive, 1, 101, true}, 10_000
+    assert_receive {:observed_connection, {:system, new_consumer_tag}}, 10_000
 
     refute new_consumer_tag == old_consumer_tag
   end
 
-  defp publish_odds_change(channel, event_id, timestamp) do
-    routing_key = "hi.-.pre.odds_change.1.sr:match.#{event_id}.-"
-    xml = ~s(<odds_change product="1" event_id="sr:match:#{event_id}" timestamp="#{timestamp}"/>)
+  defp pulsar_producers(subscription) do
+    Transport.producers(
+      {:pulsar,
+       host: "pulsar://localhost:#{@pulsar_port}",
+       topic: "persistent://public/default/uof-feed",
+       subscription: subscription},
+      nil
+    )
+  end
 
-    :ok = AMQP.Basic.publish(channel, "unifiedfeed", routing_key, xml)
+  defp publish_alive(channel, timestamp) do
+    xml = ~s(<alive product="1" timestamp="#{timestamp}" subscribed="1"/>)
+    :ok = AMQP.Basic.publish(channel, "unifiedfeed", "-.-.-.alive.-.-.-.-", xml)
   end
 end

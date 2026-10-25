@@ -1978,4 +1978,97 @@ defmodule UOF.SDK.ProducerMonitorTest do
   ## Connection sessions -------------------------------------------------------
 
   ## Timer and checkpoint hygiene ---------------------------------------------
+
+  ## System-only monitoring ----------------------------------------------------
+
+  # The Pulsar transport monitors only the system pipeline: both subscriptions
+  # read one durable topic, so the content pipeline does not report to the
+  # monitor and content lag is not tracked.
+  defp start_system_only(overrides \\ [], clock) do
+    start_monitor(Keyword.put(overrides, :pipelines, [:system]), clock)
+  end
+
+  describe "system-only monitoring" do
+    test "a restart waits only for the system consumer tag before recovering", %{clock: clock} do
+      save_state(%{}, [], %{system: "ctag-sys"})
+      m = start_system_only(clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      sync(m)
+      refute_received {:recover_called, _, _}
+
+      ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+      assert_recovery_triggered()
+    end
+
+    test "a resumed producer becomes up without content progress", %{clock: clock} do
+      save_state(%{1 => 1_000}, [1], %{system: "ctag-sys"})
+      set_clock(clock, 50_000)
+      m = start_system_only(clock)
+
+      ProducerMonitor.observe_connection(m, {:system, "ctag-sys"})
+      ProducerMonitor.alive(m, 1, 50_000, true)
+      tick(m)
+
+      assert_receive {:status, %ProducerStatus{status: :up}}
+      refute_received {:recover_called, _, _}
+    end
+
+    test "a system consumer tag change across a restart recovers from the checkpoint", %{clock: clock} do
+      save_state(%{1 => 1_000}, [1], %{system: "ctag-sys"})
+      set_clock(clock, 50_000)
+      m = start_system_only(clock)
+
+      ProducerMonitor.observe_connection(m, {:system, "ctag-sys-new"})
+
+      assert_receive {:status, %ProducerStatus{status: :recovering}}
+      assert_receive {:recover_called, "pre", opts}
+      assert opts[:after] == 1_000
+    end
+
+    test "a persisted content consumer tag neither gates readiness nor survives a session change", %{clock: clock} do
+      persist_healthy_shutdown(1_000)
+      set_clock(clock, 50_000)
+      m = start_system_only(clock)
+
+      ProducerMonitor.observe_connection(m, {:system, "ctag-sys-new"})
+      assert_receive {:recover_called, "pre", _opts}
+      sync(m)
+
+      assert stored_snapshot().consumer_tags == %{system: "ctag-sys-new"}
+    end
+
+    test "the readiness deadline names only the system namespace", %{clock: clock} do
+      save_state(%{1 => 1_000}, [1], %{system: "ctag-sys"})
+      m = start_system_only(clock)
+      state = :sys.get_state(m)
+
+      set_clock(clock, 1_000 + @inactivity + 1)
+
+      assert_raise RuntimeError,
+                   "producer monitor connection readiness timed out; missing namespaces: [:system]",
+                   fn -> ProducerMonitor.handle_info(:tick, state) end
+    end
+
+    # The content pipeline does not report on Pulsar; a stale observation is
+    # injected here to show the monitor would not act on content lag anyway.
+    test "content lag neither delays the producer nor freezes its checkpoint", %{clock: clock} do
+      m = start_system_only(clock)
+
+      ProducerMonitor.alive(m, 1, 1_000, true)
+      rid = assert_recovery_triggered()
+      assert_receive {:status, %ProducerStatus{status: :recovering}}
+      ProducerMonitor.message(m, 1, 1_000)
+      set_clock(clock, 50_000)
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+      assert_receive {:status, %ProducerStatus{status: :up}}
+
+      ProducerMonitor.alive(m, 1, 50_000, true)
+      tick(m)
+
+      refute_received {:status, _}
+      assert {:ok, %ProducerStatus{status: :up, processing_queue_delay: nil}} = ProducerMonitor.producer(m, 1)
+      assert checkpoint(1) == {:ok, 50_000}
+    end
+  end
 end

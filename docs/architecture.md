@@ -300,13 +300,14 @@ persistent store when progress must survive those.
 | Field | Meaning |
 | --- | --- |
 | `consumer_tag` | Committed consumer tag of the connector's upstream session |
-| `producers` | Per producer: recovery checkpoint (epoch milliseconds) and whether it is synchronized with that session |
+| `producers` | Per producer: recovery checkpoint (epoch milliseconds), whether it is synchronized with that session, and whether a full recovery is pending |
 | `descriptions` | The last producer descriptions loaded from the UOF API |
 
 A producer may resume at startup only when it is synchronized and has a checkpoint. A consumer
 tag change saves the new tag with every producer unsynchronized, in one write. Recovery
 preparation saves the producer as unsynchronized before its HTTP request, so a crash at any
-point cannot resume from stale state. Checkpoints only move forward.
+point cannot resume from stale state. A pending full recovery stays full across a restart or
+session change until its matching completion. Checkpoints only move forward.
 
 The monitor saves only when the snapshot changes: on a session change, a checkpoint advance
 from a subscribed system heartbeat while `:up`, a producer's synchronization change, and newly

@@ -5,7 +5,8 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   `consumer_tag` holds the committed consumer tag of the source connector's
   upstream consume session.
   `producers` holds, per producer id, the recovery checkpoint (epoch
-  milliseconds) and whether the producer is synchronized with that session.
+  milliseconds), whether the producer is synchronized with that session, and
+  whether a full recovery must still complete.
   A producer may resume retained backlog only when it is synchronized and has a
   checkpoint.
   `descriptions` holds the last producer descriptions loaded from the UOF API,
@@ -19,9 +20,13 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   defmodule Progress do
     @moduledoc "Recovery progress for one producer."
 
-    @type t :: %__MODULE__{checkpoint: integer() | nil, synchronized: boolean()}
+    @type t :: %__MODULE__{
+            checkpoint: integer() | nil,
+            synchronized: boolean(),
+            full_recovery_pending: boolean()
+          }
 
-    defstruct checkpoint: nil, synchronized: false
+    defstruct checkpoint: nil, synchronized: false, full_recovery_pending: false
   end
 
   @type description :: %{
@@ -45,7 +50,10 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   @doc "Whether the producer may resume retained backlog without recovery."
   @spec resumable?(t(), integer()) :: boolean()
   def resumable?(%__MODULE__{} = snapshot, id) do
-    match?(%Progress{synchronized: true, checkpoint: checkpoint} when is_integer(checkpoint), progress(snapshot, id))
+    match?(
+      %Progress{synchronized: true, full_recovery_pending: false, checkpoint: checkpoint} when is_integer(checkpoint),
+      progress(snapshot, id)
+    )
   end
 
   @doc false
@@ -70,7 +78,10 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   @doc "Encode a snapshot for a store."
   @spec encode(t()) :: binary()
   def encode(%__MODULE__{consumer_tag: consumer_tag, producers: producers, descriptions: descriptions}) do
-    producers = Map.new(producers, fn {id, progress} -> {id, {progress.checkpoint, progress.synchronized}} end)
+    producers =
+      Map.new(producers, fn {id, progress} ->
+        {id, {progress.checkpoint, progress.synchronized, progress.full_recovery_pending}}
+      end)
 
     :erlang.term_to_binary(
       {@format, @version, %{consumer_tag: consumer_tag, producers: producers, descriptions: descriptions}}
@@ -109,9 +120,10 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
     ArgumentError -> raise ArgumentError, "unreadable producer monitor snapshot: not a valid external term"
   end
 
-  defp decode_progress!({id, {checkpoint, synchronized}})
-       when is_integer(id) and (is_integer(checkpoint) or is_nil(checkpoint)) and is_boolean(synchronized) do
-    {id, %Progress{checkpoint: checkpoint, synchronized: synchronized}}
+  defp decode_progress!({id, {checkpoint, synchronized, full_recovery_pending}})
+       when is_integer(id) and (is_integer(checkpoint) or is_nil(checkpoint)) and is_boolean(synchronized) and
+              is_boolean(full_recovery_pending) do
+    {id, %Progress{checkpoint: checkpoint, synchronized: synchronized, full_recovery_pending: full_recovery_pending}}
   end
 
   defp decode_progress!(entry) do

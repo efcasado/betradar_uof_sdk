@@ -334,6 +334,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
           true ->
             after_ts = if !opts[:full], do: after_from_checkpoint(state, producer)
+            state = if opts[:full], do: require_recovery(state, id, true), else: state
             {:reply, :ok, request_recovery(state, producer, after_ts)}
         end
     end
@@ -459,7 +460,7 @@ defmodule UOF.SDK.ProducerMonitor do
         # The producer stays :recovering and already requires recovery durably,
         # so the repeat needs no new transition or write.
         {:repeat, producer, resume_ts} ->
-          producer = Producer.repeat_recovery(producer, resume_ts)
+          producer = Producer.repeat_recovery(producer, preserve_full_recovery(state, producer, resume_ts))
           state |> put_producer(producer) |> maybe_initiate(producer)
 
         :stale ->
@@ -800,8 +801,9 @@ defmodule UOF.SDK.ProducerMonitor do
 
   # The stored snapshot is the subscription's state, possibly written by the
   # previous owner while this instance was passive. Producers without a
-  # recovery job are restored from it as on a restart; this instance keeps the
-  # descriptions it loaded itself.
+  # recovery job are restored from it as on a restart. A retained job must
+  # honor a full recovery requested by another owner while this instance was
+  # passive; this instance keeps the descriptions it loaded itself.
   defp reload_snapshot(state) do
     snapshot = %{load_snapshot(state.monitor_store) | descriptions: state.snapshot.descriptions}
 
@@ -810,7 +812,11 @@ defmodule UOF.SDK.ProducerMonitor do
       %{state | snapshot: snapshot, session: Session.new(snapshot.consumer_tag)},
       fn {_id, producer}, state ->
         if Producer.recovering?(producer) do
-          state
+          if Snapshot.progress(snapshot, producer.id).full_recovery_pending do
+            put_producer(state, Producer.repeat_recovery(producer, nil))
+          else
+            state
+          end
         else
           restored = restore_producer(%{producer | status: :down, last_alive_at: nil, resuming_since: nil}, snapshot)
           state = put_producer(state, restored)
@@ -938,11 +944,15 @@ defmodule UOF.SDK.ProducerMonitor do
   # the producer checkpoint and its synchronization flag.
   defp persist_producer_progress(state, after_) do
     synchronized? = after_.status == :up
-    update_progress(state, after_.id, &%{&1 | synchronized: synchronized?})
+    update_progress(state, after_.id, &%{&1 | synchronized: synchronized?, full_recovery_pending: false})
   end
 
-  defp require_recovery(state, id) do
-    update_progress(state, id, &%{&1 | synchronized: false})
+  defp require_recovery(state, id, full_recovery? \\ false) do
+    update_progress(
+      state,
+      id,
+      &%{&1 | synchronized: false, full_recovery_pending: &1.full_recovery_pending or full_recovery?}
+    )
   end
 
   defp initiate(state, producer) do
@@ -956,7 +966,12 @@ defmodule UOF.SDK.ProducerMonitor do
   defp may_issue?(state), do: owns_control?(state) and not Session.awaiting_readiness?(state.session)
 
   defp after_from_checkpoint(state, producer) do
-    Snapshot.progress(state.snapshot, producer.id).checkpoint
+    progress = Snapshot.progress(state.snapshot, producer.id)
+    if progress.full_recovery_pending, do: nil, else: progress.checkpoint
+  end
+
+  defp preserve_full_recovery(state, producer, after_ts) do
+    if Snapshot.progress(state.snapshot, producer.id).full_recovery_pending, do: nil, else: after_ts
   end
 
   defp put_producer(state, %Producer{} = producer) do

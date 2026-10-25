@@ -8,7 +8,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
     consumer_tag: "ctag-s",
     producers: %{
       1 => %Progress{checkpoint: 2_000, synchronized: true},
-      3 => %Progress{checkpoint: nil, synchronized: false}
+      3 => %Progress{checkpoint: nil, synchronized: false, full_recovery_pending: true}
     }
   }
 
@@ -23,6 +23,11 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
 
     unchecked = Snapshot.put_progress(@snapshot, 4, %Progress{synchronized: true})
     refute Snapshot.resumable?(unchecked, 4)
+
+    pending =
+      Snapshot.put_progress(@snapshot, 1, %Progress{checkpoint: 2_000, synchronized: true, full_recovery_pending: true})
+
+    refute Snapshot.resumable?(pending, 1)
   end
 
   test "a session change unsynchronizes every producer and keeps checkpoints" do
@@ -30,7 +35,17 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
 
     assert changed.consumer_tag == "ctag-s2"
     assert Snapshot.progress(changed, 1) == %Progress{checkpoint: 2_000, synchronized: false}
+    assert Snapshot.progress(changed, 3).full_recovery_pending
     refute Snapshot.resumable?(changed, 1)
+  end
+
+  test "rejects an old progress shape" do
+    previous =
+      :erlang.term_to_binary(
+        {:uof_sdk_monitor_snapshot, 1, %{consumer_tag: "ctag-s", producers: %{1 => {2_000, true}}, descriptions: []}}
+      )
+
+    assert_raise ArgumentError, ~r/invalid producer monitor snapshot progress/, fn -> Snapshot.decode!(previous) end
   end
 
   test "rejects binaries that are not external terms" do
@@ -70,7 +85,7 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
     assert_raise ArgumentError, ~r/invalid producer monitor snapshot progress/, fn ->
       Snapshot.decode!(
         :erlang.term_to_binary(
-          {:uof_sdk_monitor_snapshot, 1, %{consumer_tag: nil, producers: %{1 => {"2000", true}}, descriptions: []}}
+          {:uof_sdk_monitor_snapshot, 1, %{consumer_tag: nil, producers: %{1 => {"2000", true, false}}, descriptions: []}}
         )
       )
     end

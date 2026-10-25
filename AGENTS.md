@@ -9,11 +9,14 @@ Keep new features within that scope unless the task explicitly expands it.
 ## Start here
 
 - Read the [architecture guide](docs/architecture.md) before changing Pulsar consumption,
-  supervision, message processing, recovery, or persistence behavior. It describes
-  how the SDK works: component responsibilities, process boundaries, the monitor
-  store contract, and the design invariants.
-- Use the [README](README.md) for the public surface: installation, Pulsar and
-  connector setup, configuration options, handler callbacks, and testing.
+  supervision, message processing, or persistence behavior. It describes how the SDK
+  is built: component responsibilities, process boundaries, the feed topology, the
+  monitor store contract, and the design invariants.
+- Read the [recovery guide](docs/recovery.md) before changing producer status,
+  recovery, sessions, or restart behavior, and the [deployment guide](docs/deployment.md)
+  before changing what a deployment must provide (connector, topic, subscriptions).
+- Use the [README](README.md) for the public surface: installation, quick start,
+  configuration options, handler callbacks, and testing.
 - Update those documents when a change alters the behavior they describe.
 
 ## Implementation conventions

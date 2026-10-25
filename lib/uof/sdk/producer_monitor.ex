@@ -1,132 +1,28 @@
 defmodule UOF.SDK.ProducerMonitor do
   @moduledoc """
-  Tracks producer health and orchestrates recovery — two concerns that are
-  tightly coupled in the UOF protocol.
+  Tracks producer health and orchestrates recovery: the SDK's control plane.
 
-  At startup the monitor loads active producer descriptions from
-  `UOF.API.Descriptions.producers/0`. It derives the recovery product from the
-  description's `api_url` and keeps the advertised stateful recovery window.
-  Loaded descriptions are stored in the snapshot. If the API fails, the
-  monitor starts from the stored descriptions, or else from the configured
-  `:producers`, and keeps retrying the API in the background. Startup fails
-  only when no source has any: running without known producers would silently
-  disable health tracking and recovery. An `alive` from a producer the monitor
-  does not know also triggers a rate-limited reload, so producers activated
-  after startup are picked up.
+  Its inputs are the system pipeline's observations (`alive`,
+  `snapshot_complete`, and the upstream consumer tag), the broker's ownership
+  reports for the system subscription, and manual requests. Events only record
+  facts and change recovery jobs. After every event and on every tick, the
+  monitor issues what is due through `UOF.SDK.ProducerMonitor.Producer.advance/3`
+  and publishes status changes, so every request passes the same gates: this
+  instance owns the system subscription and the upstream session is confirmed.
 
-  ## Health monitoring
+  The monitor persists one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`) per
+  store, shared by a subscription's instances: the consumer tag and, per
+  producer, a checkpoint and the recovery it owes. Only the active instance
+  writes it, and promotion reloads it. Recovery intent is durable before any
+  request is issued.
 
-  `UOF.SDK.ProducerMonitor.Producer` is the per-producer state machine. It owns
-  health observations, lifecycle transitions, its canonical recovery job, and
-  the recovery cooldown. Delivery gaps move a producer from `:down` or `:up`
-  to `:recovering`, and a matching recovery completion moves it to `:up`. A
-  restart that can safely drain retained backlog starts at `:resuming` and
-  becomes `:up` after current-session continuity is confirmed.
+  Producer descriptions come from the UOF API, falling back to stored and then
+  configured descriptions; an `alive` from an unknown producer triggers a
+  rate-limited reload.
 
-  Every observation comes from the system pipeline. Both subscriptions read
-  one durable topic, and the active system consumer receives every message on
-  it, so a delivery gap can only start upstream, where the connector's consume
-  session changes. Content not yet processed stays in the content
-  subscription's backlog. `:up` therefore means the topic carries a continuous
-  feed for the producer, not that content processing has caught up; content
-  lag is not tracked.
-
-  ## Recovery orchestration
-
-  Recovery checkpoints are owned here, not by the Broadway pipeline. Subscribed
-  `alive` heartbeats advance the checkpoint only after the producer is already
-  up. Incremental recovery starts one minute before the stored checkpoint to
-  cover short publication reorderings across Pulsar message keys. The replay
-  timestamp is bounded by the producer's recovery window when each request is
-  issued, including retries.
-
-  Events only record facts and change recovery jobs; `reconcile/1`, run after
-  every event and on every tick, is the only place requests are issued. It
-  calls `Producer.advance/3` for each producer while this instance owns the
-  control plane and the upstream session is confirmed, so every request passes
-  the same gates and there are no recovery timers. Status callbacks are
-  derived the same way: after every event, each producer's reported status is
-  compared with the last one published, and only changes are published.
-
-  A delivery gap marks the producer `:recovering`. The request is issued after
-  the per-producer cooldown with a fresh `request_id` and a checkpoint-derived
-  `after:` timestamp. A heartbeat
-  timeout records the recovery immediately but issues it only once the
-  producer's alives resume: Betradar rejects recovery while a producer is
-  silent, and failed requests count against its rate limit. Until then the
-  producer is reported `:down`; the next alive lets the request go and reports
-  it `:recovering`. Issuing emits
-  `[:uof_sdk, :recovery, :initiated]` telemetry and starts the stall deadline.
-  Failed requests are retried; stalled requests are reissued from the original
-  timestamp. A matching `snapshot_complete` moves the producer to `:up`.
-
-  Every required recovery has one canonical recovery job. A job without a
-  `request_id` is pending (cooling down, retrying, waiting for the session, or
-  parked while passive); a job with a `request_id` is in flight. The producer's `:recovering` status is
-  the public projection of that job, not a separate orchestration decision.
-  Before any new job can issue HTTP, the monitor durably marks that producer as
-  requiring recovery so a crash cannot restart from stale synchronized state.
-
-  The recovery defaults follow the official SDK's recovery guidance and should
-  be changed with care.
-
-  ## Restart resume
-
-  The monitor saves its state as one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`):
-  the committed consumer tag and, per producer, a checkpoint and
-  whether it is synchronized with that session. A producer may resume only
-  when it is synchronized and has a checkpoint. At startup that state is
-  restored:
-
-    * A resumable producer with a checkpoint starts as `:resuming`. It becomes
-      `:up` after an `alive` is heard and the consumer tag is observed in the
-      current process.
-    * The persisted consumer tag is a comparison baseline, not evidence that
-      the current pipelines are ready. Recovery HTTP waits until the system
-      pipeline reports a tag. If that does not happen within one
-      alive-inactivity interval, the monitor crashes so supervision restarts
-      the pipelines.
-      Once ready, a changed consumer tag is saved together with every producer marked
-      unsynchronized, and recovery starts.
-    * A resumable producer gets one alive-inactivity interval to provide a
-      current heartbeat; silence then follows the normal recovery path instead
-      of leaving it in `:resuming` forever.
-    * `subscribed=0` records recovery immediately, even if it races demotion or
-      session startup; only the HTTP request waits. Producers not
-      synchronized start `:down` and recover on their first subscribed
-      `alive`.
-
-  ## Control-plane ownership
-
-  The system subscription is Failover: the broker delivers
-  `alive`/`snapshot_complete` to exactly one instance. `UOF.SDK.Pulsar` wires
-  that broker signal to `active_state_change/2`, and the monitor holds
-  control-plane authority only while active. While passive it never issues
-  recovery requests or runs periodic health transitions — a demoted instance
-  cannot observe the `snapshot_complete` for a request it issued, so issuing
-  from standby burns recovery quota in a stall-reissue loop. An explicit
-  recovery-required alive racing demotion is nevertheless kept as a pending
-  job for promotion.
-
-  The snapshot belongs to the subscription: instances sharing a store key
-  share it, and only the active instance writes it, since a passive copy is
-  stale. Promotion reloads it and restores producers without a recovery job
-  as a restart does, so a promoted instance in an unchanged upstream session
-  resumes instead of recovering. Recovery intent recorded while passive is
-  made durable before it is reissued.
-
-  Demotion drops in-flight recovery correlation (the completion will go to the
-  new owner); affected producers stay `:recovering` and are reissued on
-  promotion. Consume-session observations are ignored entirely while passive:
-  the owner heals the shared feed, and promotion compares the next tag with
-  the stored one. Reports
-  are best-effort and may repeat; they are not a fencing mechanism, so
-  briefly-overlapping actives can duplicate a recovery request — duplicates
-  are correlated by `request_id` and harmless beyond quota.
-
-  Monitors start passive and act only after the broker's initial ownership
-  report. The active consumer's PID is monitored because its exit does not
-  guarantee a passive report from `off_broadway_pulsar`.
+  The recovery guide (`docs/recovery.md`) describes the behaviour, and the
+  architecture guide (`docs/architecture.md`) the design invariants this module
+  must preserve.
   """
 
   use GenServer

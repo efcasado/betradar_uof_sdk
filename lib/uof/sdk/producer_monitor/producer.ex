@@ -1,52 +1,21 @@
 defmodule UOF.SDK.ProducerMonitor.Producer do
   @moduledoc """
-  State machine for one Betradar producer.
+  State machine for one Betradar producer: health observations, its recovery
+  job, the cooldown, and request attempts. Its functions run in the monitor
+  process; each HTTP request runs in a task linked to the monitor, whose
+  response returns to it as a message.
 
-  The struct keeps the producer description, health observations, and its
-  complete recovery state together: static request configuration, cooldown
-  history, and an optional pending or in-flight job. `UOF.SDK.ProducerMonitor`
-  supplies global inputs such as session readiness and control-plane
-  ownership. This module starts per-producer recovery HTTP requests in tasks
-  linked to the monitor and handles their responses, and owns logging and
-  telemetry; the monitor retains event routing, durable persistence, and
-  callbacks.
-
-  `status` holds health state only. `UOF.SDK.ProducerMonitor` reports a
-  producer with a recovery job as `:recovering` in `UOF.SDK.ProducerStatus`,
-  or as `:down` while the job is pending and the producer is silent.
-
-  ## Recovery sequencing
-
-  Recording a recovery and issuing its HTTP request are deliberately separate.
-  Events only change the job: `prepare_recovery/3` records a pending one, and
-  failures, demotion, session changes, and interrupted completions return a job
-  to pending. `advance/3` is the only place a request is issued: the monitor
-  calls it for every producer after each event and on every tick, but only
-  while it may issue (it owns the control plane and the upstream session is
-  confirmed). The monitor persists recovery intent before it calls `advance/3`,
-  so a crash after a request cannot restart from stale synchronized state.
-
-  `advance/3` issues a pending job once the cooldown since the last attempt
-  has passed, unless the producer is silent: Betradar rejects recovery for a
-  silent producer and failed requests count against its rate limit, so a
-  recovery recorded on a heartbeat timeout waits for the next alive. It
-  reissues an accepted request that has gone without
-  `snapshot_complete` for longer than `max_recovery_ms`. There are no timers,
-  so no timer can outlive the job or the gates it was scheduled under.
-
-  The job retains its original timestamp; each HTTP attempt starts 60 seconds
-  before it and is bounded by the producer's current recovery window with a
-  10-minute safety margin.
-
-  ## Interrupted recoveries
+  Events change the job (`prepare_recovery/2`, `repeat_recovery/2`,
+  `park_recovery/1`, `complete_recovery/3`). `advance/3` is the only function
+  that issues requests: a pending job once the cooldown has passed and the
+  producer is not silent, and a reissue of an accepted request that has run
+  past `max_recovery_ms`.
 
   An unsubscribed alive or a heartbeat gap while a request is in flight
-  interrupts the job: the producer may have lost messages that the running
-  replay does not cover. The job keeps waiting for its `snapshot_complete`,
-  which then repeats the recovery from the last subscribed alive seen before
-  the interruption instead of marking the producer `:up`, as the official SDKs
-  do. A job reissued from its original timestamp (stall, failure, demotion,
-  session change) covers any interruption, so reissuing clears it.
+  interrupts it: its completion repeats the recovery from the last subscribed
+  alive seen before, instead of marking the producer `:up`. Each attempt
+  replays from 60 seconds before the job's timestamp, bounded by the current
+  recovery window with a 10-minute margin.
   """
 
   alias UOF.Schemas.Common.Response

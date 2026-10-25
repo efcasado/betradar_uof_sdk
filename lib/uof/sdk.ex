@@ -78,7 +78,7 @@ defmodule UOF.SDK do
         ]
 
     # Strategy and ordering are load-bearing: the monitor must start before
-    # the transport client and pipelines so its registered name exists when
+    # the Pulsar client and pipelines so its registered name exists when
     # consumers report failover ownership, and :rest_for_one must take the
     # client and pipelines down with a crashed monitor so re-subscribing Pulsar
     # consumers deliver a fresh ownership report to its restarted passive

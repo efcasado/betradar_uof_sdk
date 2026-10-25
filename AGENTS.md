@@ -8,7 +8,7 @@ Keep new features within that scope unless the task explicitly expands it.
 
 ## Start here
 
-- Read the [architecture guide](docs/architecture.md) before changing transport,
+- Read the [architecture guide](docs/architecture.md) before changing Pulsar consumption,
   supervision, message processing, recovery, or persistence behavior. It describes
   how the SDK works: component responsibilities, process boundaries, the monitor
   store contract, and the design invariants.
@@ -20,7 +20,7 @@ Keep new features within that scope unless the task explicitly expands it.
 
 - Prefer idiomatic Elixir: pattern matching, explicit contracts, small functions,
   and OTP supervision. Let invalid internal states and programming errors fail
-  visibly; handle expected transport failures through the appropriate backoff.
+  visibly; handle expected broker failures through the appropriate backoff.
 - Catch failures only where there is a concrete recovery or cleanup responsibility.
   Preserve the original cause. Cleanup must respect shared resource ownership.
 - Keep state transitions in their owning component. Follow the architecture guide
@@ -68,7 +68,7 @@ mix format --check-formatted
 mix test
 ```
 
-For transport or lifecycle changes, also run `make test-integration`. It uses
+For Pulsar consumption or lifecycle changes, also run `make test-integration`. It uses
 Docker for RabbitMQ and Pulsar and builds the RabbitMQ source connector when
 needed; see the [README](README.md#testing) and Makefile for prerequisites and
 overrides.

@@ -1,4 +1,4 @@
-defmodule UOF.SDK.PulsarTransportIntegrationTest do
+defmodule UOF.SDK.PulsarIntegrationTest do
   use ExUnit.Case, async: false
 
   alias UOF.Schemas.Feed

@@ -676,7 +676,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:error, :unknown_producer} = ProducerMonitor.recover(m, 99, full: true)
   end
 
-  test "manual recovery is persisted but waits for restored connections", %{clock: clock} do
+  test "manual recovery is persisted but waits for the restored session", %{clock: clock} do
     save_state(%{1 => 1_000}, [1], "s1")
     m = start_monitor(clock)
 
@@ -1040,7 +1040,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert opts[:after] == 1_000
   end
 
-  test "connection startup has a bounded readiness deadline", %{clock: clock} do
+  test "session startup has a bounded readiness deadline", %{clock: clock} do
     persist_healthy_shutdown(1_000)
     m = start_monitor(clock)
     state = :sys.get_state(m)
@@ -1542,7 +1542,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert stored_snapshot().consumer_tag == "s2"
   end
 
-  test "a persisted consumer tag arms the restart connection gate before observations arrive", %{clock: clock} do
+  test "a persisted consumer tag arms the restart session gate before observations arrive", %{clock: clock} do
     save_state(%{}, [], "old-s")
     m = start_monitor(clock)
 
@@ -1612,7 +1612,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert checkpoint(1) == {:ok, 2_000}
   end
 
-  ## Connection sessions -------------------------------------------------------
+  ## Consume sessions ----------------------------------------------------------
 
   ## Timer and checkpoint hygiene ---------------------------------------------
 end

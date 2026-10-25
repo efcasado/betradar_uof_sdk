@@ -90,7 +90,7 @@ defmodule UOF.SDK.ProducerMonitor do
   ## Control-plane ownership
 
   The system subscription is Failover: the broker delivers
-  `alive`/`snapshot_complete` to exactly one instance. The transport wires
+  `alive`/`snapshot_complete` to exactly one instance. `UOF.SDK.Pulsar` wires
   that broker signal to `active_state_change/2`, and the monitor holds
   control-plane authority only while active. While passive it never issues
   recovery requests or runs periodic health transitions — a demoted instance
@@ -224,7 +224,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @doc """
   Observe a broker-reported ownership change for the system-subscription
-  consumer. The Pulsar transport wires this as the system producer's
+  consumer. `UOF.SDK.Pulsar` wires this as the system producer's
   `:active_state_callback`; `metadata` is the callback's map
   (`:active_state`, `:topic`, `:subscription`, `:consumer_pid`).
 

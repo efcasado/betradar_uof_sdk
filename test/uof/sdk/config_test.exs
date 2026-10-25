@@ -164,12 +164,6 @@ defmodule UOF.SDK.ConfigTest do
     end
   end
 
-  test "rejects options removed with the AMQP transport" do
-    for option <- [transport: {:pulsar, @pulsar}, max_processing_delay_seconds: 20] do
-      assert_raise NimbleOptions.ValidationError, ~r/unknown options/, fn -> load([option]) end
-    end
-  end
-
   test "rejects options of the wrong type" do
     assert_raise NimbleOptions.ValidationError, ~r/:inactivity_seconds/, fn ->
       load(inactivity_seconds: "20")

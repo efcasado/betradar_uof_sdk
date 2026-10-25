@@ -43,7 +43,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert :unchanged = Producer.check(%{stale_alive | last_alive_at: 1_000}, 1_001, 900, true)
   end
 
-  test "a resuming producer becomes up only after heartbeat and connection gates" do
+  test "a resuming producer becomes up only after heartbeat and session gates" do
     producer = %Producer{id: 1, status: :resuming, last_alive_at: 1_000}
 
     assert :unchanged = Producer.check(producer, 1_001, 900, false)

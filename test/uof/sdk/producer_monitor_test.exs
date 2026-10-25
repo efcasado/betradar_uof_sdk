@@ -1473,15 +1473,21 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert stored_snapshot().consumer_tag == "ctag-b"
   end
 
-  defp report_active_state(monitor, active_state) do
+  defp report_active_state(monitor, active_state, consumer_pid \\ self()) do
     ProducerMonitor.active_state_change(monitor, %{
       active_state: active_state,
       topic: "uof-feed",
       subscription: "uof-sdk-system",
-      consumer_pid: self()
+      consumer_pid: consumer_pid
     })
 
     sync(monitor)
+  end
+
+  defp start_consumer_process do
+    pid = spawn(fn -> receive do: (:stop -> :ok) end)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+    pid
   end
 
   test "a monitor starts passive until ownership is reported", %{clock: clock} do
@@ -1732,6 +1738,66 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
     ProducerMonitor.snapshot_complete(m, 1, rid)
     assert_receive {:status, %ProducerStatus{status: :up}}
+  end
+
+  test "an active consumer exit without a passive report parks recovery until replacement", %{clock: clock} do
+    m = start_monitor([ownership: :passive], clock)
+    consumer = start_consumer_process()
+    report_active_state(m, :active, consumer)
+
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    rid = assert_recovery_triggered()
+    assert is_integer(rid)
+
+    :ok = :sys.suspend(m)
+    ref = Process.monitor(consumer)
+    send(consumer, :stop)
+    assert_receive {:DOWN, ^ref, :process, ^consumer, :normal}
+    :ok = :sys.resume(m)
+    sync(m)
+
+    assert :sys.get_state(m).ownership == :passive
+    assert {:error, :passive} = ProducerMonitor.recover(m, 1, [])
+    refute_receive {:recover_called, _, _}
+
+    replacement = start_consumer_process()
+    report_active_state(m, :active, replacement)
+    ProducerMonitor.observe_consumer_tag(m, "s1")
+    assert_recovery_triggered()
+  end
+
+  test "a replacement active report supersedes a delayed exit and passive report", %{clock: clock} do
+    m = start_monitor([ownership: :passive], clock)
+    old_consumer = start_consumer_process()
+    new_consumer = start_consumer_process()
+    report_active_state(m, :active, old_consumer)
+    save_state(%{}, [], "other-owner-session")
+
+    # The new worker's report can be queued before the old worker's DOWN.
+    :ok = :sys.suspend(m)
+
+    ProducerMonitor.active_state_change(m, %{
+      active_state: :active,
+      topic: "uof-feed",
+      subscription: "uof-sdk-system",
+      consumer_pid: new_consumer
+    })
+
+    ref = Process.monitor(old_consumer)
+    send(old_consumer, :stop)
+    assert_receive {:DOWN, ^ref, :process, ^old_consumer, :normal}
+    :ok = :sys.resume(m)
+    sync(m)
+
+    assert %{ownership: :active, consumer_pid: ^new_consumer, session: %{persisted: "other-owner-session"}} =
+             :sys.get_state(m)
+
+    report_active_state(m, :passive, old_consumer)
+    assert %{ownership: :active, consumer_pid: ^new_consumer} = :sys.get_state(m)
+
+    # An active report queued by the dead worker must not replace this owner.
+    report_active_state(m, :active, old_consumer)
+    assert %{ownership: :active, consumer_pid: ^new_consumer} = :sys.get_state(m)
   end
 
   defp establish_session(m) do

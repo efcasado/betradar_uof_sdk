@@ -136,6 +136,9 @@ in-flight recoveries on the demoted instance are parked, and the promoted instan
 snapshot and restores producers from it as on a [restart](#restarts): in an unchanged upstream
 session it resumes without recovery. This needs a store shared by the instances; see
 [monitor store](deployment.md#monitor-store).
+If the active system consumer exits without reporting demotion, the monitor detects its exit
+and parks its recoveries. A replacement consumer's ownership report determines whether the
+instance resumes as active or stays passive.
 
 ## Time controls
 

@@ -94,6 +94,26 @@ Pulsar topic
              └── SDK instance C → ContentPipeline → application handler
 ```
 
+### Why a Pulsar Topic
+
+The official SDKs consume Betradar's AMQP feed directly, through exclusive, auto-deleted
+queues. Putting a durable topic between Betradar and the SDK changes what a restart, a
+failover, or a slow handler costs:
+
+| | Direct AMQP (official SDKs) | Pulsar topic (this SDK) |
+| --- | --- | --- |
+| SDK restart or deploy | The queue is deleted on disconnect, so queued messages are lost and every producer recovers | The connector keeps the Betradar session and the topic keeps the backlog: an unchanged session [resumes](recovery.md#restarts) without recovery |
+| Failover between instances | Not applicable: each process holds its own session | With a shared [monitor store](deployment.md#monitor-store), the promoted instance resumes without recovery |
+| Scaling | Each process gets its own queues and the whole feed; work scales only within a process | Key-Shared divides content across instances by sport event, keeping per-event ordering |
+| Slow processing | Messages back up in Betradar's queue, and the official SDKs report the producer down or delayed while processing lags | Content waits in the content subscription; [feed continuity](#feed-continuity), and so recovery, does not depend on processing |
+| Recovery requests | After every reconnect or restart, against Betradar's [rate limits](recovery.md#rate-limits) | Only after an upstream gap or a producer-side interruption |
+| Operations | Nothing extra to run | Pulsar and the RabbitMQ source connector, set up as the [deployment guide](deployment.md) describes |
+
+The topic also gives failed messages somewhere to go: they are dead-lettered for inspection
+rather than lost.
+
+### Subscriptions
+
 Each instance starts one supervised `Pulsar.Client`, shared by its two subscriptions.
 Instances with the same base subscription divide content delivery through Key-Shared. The
 system subscription uses Failover to select the instance that coordinates producer health and

@@ -31,6 +31,24 @@ Your application handles:
 - [Persistent checkpoint storage](docs/deployment.md#monitor-store) in
   production.
 
+## Why Pulsar
+
+The official SDKs consume Betradar's AMQP feed directly. This SDK reads it from a Pulsar
+topic instead, filled by a RabbitMQ source connector that holds the Betradar session:
+
+- **Restarts and deploys without recoveries.** The topic keeps the backlog while SDK
+  instances restart, so an unchanged upstream session resumes where it left off instead of
+  requesting a recovery. Betradar's AMQP queues are deleted on disconnect, so a direct
+  consumer recovers every producer after every restart.
+- **Horizontal scaling.** Instances sharing a subscription divide the content by sport
+  event, keeping each event's messages in order. Direct AMQP consumers each receive the
+  whole feed.
+- **Fewer recovery requests.** Recoveries happen only when the feed actually had a gap, which
+  keeps clear of Betradar's rate limits.
+
+The cost is operating Pulsar and the connector. The
+[architecture guide](docs/architecture.md#why-a-pulsar-topic) compares both approaches.
+
 ## Guides
 
 - [Architecture](docs/architecture.md): components, feed topology, message processing,

@@ -59,8 +59,11 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   @type status :: :down | :up | :resuming
 
+  # `after_ts` is the raw replay origin retained across attempts;
+  # `attempt_after_ts` is the value sent to the API for the current request.
   @type recovery_job :: %{
           after_ts: integer() | nil,
+          attempt_after_ts: integer() | nil,
           request_id: integer() | nil,
           generation: reference(),
           awaiting_alive: boolean(),
@@ -191,6 +194,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def prepare_recovery(%__MODULE__{recovery: recovery} = producer, after_ts, awaiting_alive \\ false) do
     job = %{
       after_ts: after_ts,
+      attempt_after_ts: nil,
       request_id: nil,
       generation: make_ref(),
       awaiting_alive: awaiting_alive,
@@ -232,7 +236,16 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   # promotion.
   @spec mark_recovery_pending(t()) :: t()
   defp mark_recovery_pending(%__MODULE__{recovery: recovery} = producer) do
-    job = %{recovery.job | request_id: nil, generation: make_ref(), task: nil, interrupted: false, resume_ts: nil}
+    job = %{
+      recovery.job
+      | attempt_after_ts: nil,
+        request_id: nil,
+        generation: make_ref(),
+        task: nil,
+        interrupted: false,
+        resume_ts: nil
+    }
+
     %{producer | recovery: %{recovery | job: job}}
   end
 
@@ -338,7 +351,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     after_ts = recovery_after(job.after_ts, producer.recovery_window_minutes, recovery.now_fun.())
     request_id = recovery.next_request_id
     opts = build_opts(after_ts, request_id, recovery.node_id)
-    job = %{job | request_id: request_id}
+    job = %{job | attempt_after_ts: after_ts, request_id: request_id}
 
     producer = %{
       producer
@@ -378,7 +391,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
     case result do
       :ok ->
-        emit_initiated(producer, job.request_id, job.after_ts)
+        emit_initiated(producer, job.request_id, job.attempt_after_ts)
         schedule({:stall, producer.id, job.request_id}, recovery.max_recovery_ms)
         producer
 

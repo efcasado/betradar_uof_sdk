@@ -125,6 +125,17 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   test "a stalled request is reclamped when the recovery window moves" do
     test_pid = self()
     now = start_supervised!({Agent, fn -> @now end})
+    telemetry_id = make_ref()
+
+    :ok =
+      :telemetry.attach(
+        telemetry_id,
+        [:uof_sdk, :recovery, :initiated],
+        fn _event, _measurements, metadata, _config -> send(test_pid, {:initiated, metadata}) end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(telemetry_id) end)
 
     producer =
       %Producer{id: 1, recovery_window_minutes: 60}
@@ -140,12 +151,18 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
     assert_receive {:recover_called, first}
     assert first[:after] == @now - 50 * 60_000
+    producer = Producer.handle_response(producer, :ok)
+    assert_receive {:initiated, %{recovery_from: first_after}}
+    assert first_after == first[:after]
 
     Agent.update(now, &(&1 + 20 * 60_000))
-    Producer.handle_stall(producer, first[:request_id])
+    producer = Producer.handle_stall(producer, first[:request_id])
 
     assert_receive {:recover_called, second}
     assert second[:after] == @now - 30 * 60_000
+    Producer.handle_response(producer, :ok)
+    assert_receive {:initiated, %{recovery_from: second_after}}
+    assert second_after == second[:after]
   end
 
   test "a failed request is reclamped on retry" do

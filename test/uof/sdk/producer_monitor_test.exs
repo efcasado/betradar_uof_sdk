@@ -507,6 +507,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
 
   test "clamps :after ten minutes inside the producer's recovery window", %{clock: clock} do
     # checkpoint is 2 h old, window is 60 min -> clamp to now - 50 min
+    attach_telemetry([[:uof_sdk, :recovery, :initiated]])
     put_checkpoint(1, @now - 2 * 60 * 60_000)
 
     m =
@@ -518,9 +519,18 @@ defmodule UOF.SDK.ProducerMonitorTest do
         clock
       )
 
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == @now - 50 * 60_000
+    expected_after = @now - 50 * 60_000
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        ProducerMonitor.alive(m, 1, 1_000, true)
+        assert_receive {:recover_called, "pre", opts}
+        assert opts[:after] == expected_after
+        assert_receive {:telemetry, [:uof_sdk, :recovery, :initiated], _, %{recovery_from: ^expected_after}}
+        sync(m)
+      end)
+
+    assert log =~ "after=#{expected_after}"
   end
 
   test "keeps a single in-flight recovery per producer", %{clock: clock} do

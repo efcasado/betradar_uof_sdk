@@ -6,9 +6,11 @@ defmodule UOF.SDK.ContentPipeline do
 
   Event messages are partitioned across processors by sport-event URN
   (`partition_by`) so that all messages for a given event are handled in order
-  by the same processor. System messages are handled by
-  `UOF.SDK.SystemPipeline`; this pipeline does not report to the producer
-  monitor, because feed continuity is observed on the system subscription.
+  by the same processor. The content subscription also receives `alive` and
+  `snapshot_complete`; they are acked without decoding, since
+  `UOF.SDK.SystemPipeline` handles them on the system subscription. This
+  pipeline does not report to the producer monitor, because feed continuity is
+  observed there.
 
   ## Options
 
@@ -38,7 +40,7 @@ defmodule UOF.SDK.ContentPipeline do
   deterministically fails to parse would loop forever. A failed message is
   nacked and, about a second later, diverted to the
   `<topic>-<subscription>-DLQ` topic instead of being processed again (see
-  `UOF.SDK.Transport`), where it can be inspected.
+  `UOF.SDK.Pulsar`), where it can be inspected.
 
   Every failure passes through `handle_failed/2`, which logs the routing key,
   reason, delivery details and (truncated) payload, and emits
@@ -58,6 +60,8 @@ defmodule UOF.SDK.ContentPipeline do
   alias UOF.SDK.RoutingKey
 
   require Logger
+
+  @content_message_types UOF.SDK.MessageHandler.content_message_types()
 
   @doc false
   def child_spec(opts) do
@@ -88,10 +92,10 @@ defmodule UOF.SDK.ContentPipeline do
   def handle_message(_processor, %Message{} = message, context) do
     rk = message |> MessageMetadata.routing_key() |> RoutingKey.parse()
 
-    if RoutingKey.for_node?(rk, context.node_id) do
-      handle_node_message(message, context, rk)
-    else
-      skip_other_node(message, rk)
+    cond do
+      rk.message_type not in @content_message_types -> message
+      RoutingKey.for_node?(rk, context.node_id) -> handle_node_message(message, context, rk)
+      true -> skip_other_node(message, rk)
     end
   end
 
@@ -171,8 +175,6 @@ defmodule UOF.SDK.ContentPipeline do
   defp deliver(handler, "rollback_bet_settlement", msg, ctx), do: handler.handle_rollback_bet_settlement(msg, ctx)
 
   defp deliver(handler, "fixture_change", msg, ctx), do: handler.handle_fixture_change(msg, ctx)
-
-  defp deliver(_handler, _unknown_type, _msg, _ctx), do: :ok
 
   ## partitioning ------------------------------------------------------------
 

@@ -29,7 +29,7 @@ defmodule UOF.SDK.ConfigTest do
 
     assert {Producer, content_opts} = config.content_producer
     assert {Producer, system_opts} = config.system_producer
-    assert [{Pulsar.Client, client_opts}] = config.transport_children
+    assert {Pulsar.Client, client_opts} = config.pulsar_client
 
     assert client_opts == [name: :uof_sdk_pulsar, host: "pulsar://localhost:6650"]
 
@@ -108,7 +108,7 @@ defmodule UOF.SDK.ConfigTest do
     conn_opts = [socket_opts: [verify: :verify_none], request_timeout: 5_000]
     config = load(pulsar: @pulsar ++ [conn_opts: conn_opts])
 
-    assert [{Pulsar.Client, client_opts}] = config.transport_children
+    assert {Pulsar.Client, client_opts} = config.pulsar_client
 
     assert client_opts[:socket_opts] == [verify: :verify_none]
     assert client_opts[:request_timeout] == 5_000

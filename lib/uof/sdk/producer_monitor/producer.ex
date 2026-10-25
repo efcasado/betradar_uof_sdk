@@ -5,7 +5,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   The struct keeps the producer description, health observations, and its
   complete recovery state together: static request configuration, cooldown
   history, and an optional pending or in-flight job. `UOF.SDK.ProducerMonitor`
-  supplies global inputs such as connection readiness and control-plane
+  supplies global inputs such as session readiness and control-plane
   ownership. This module starts per-producer recovery HTTP requests in tasks
   linked to the monitor and handles their responses, and owns timers,
   logging, and telemetry; the monitor retains event routing, durable
@@ -142,7 +142,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   @doc false
   @spec check(t(), integer(), non_neg_integer(), boolean()) :: check_result()
-  def check(producer, now, inactivity_ms, connections_ready?) do
+  def check(producer, now, inactivity_ms, session_ready?) do
     cond do
       recovering?(producer) ->
         :unchanged
@@ -150,7 +150,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       alive_violation?(producer, now, inactivity_ms) ->
         {:recovery_needed, producer, :alive_timeout}
 
-      producer.status == :resuming and producer.last_alive_at != nil and connections_ready? ->
+      producer.status == :resuming and producer.last_alive_at != nil and session_ready? ->
         {:transition, mark_up(producer)}
 
       true ->
@@ -173,7 +173,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     %{producer | recovery: %{recovery | job: %{job | after_ts: after_ts, awaiting_alive: false}}}
   end
 
-  # Connection invalidation is already durable when this is called, so the
+  # A session change is already durable when this is called, so the
   # replacement may proceed directly through cooldown and HTTP issuance.
   @doc false
   @spec restart_recovery(t(), integer() | nil) :: t()

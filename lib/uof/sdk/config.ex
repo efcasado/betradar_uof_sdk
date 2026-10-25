@@ -95,7 +95,7 @@ defmodule UOF.SDK.Config do
         ]
   """
 
-  alias UOF.SDK.Transport
+  alias UOF.SDK.Pulsar
 
   @otp_app :uof_sdk
 
@@ -103,9 +103,9 @@ defmodule UOF.SDK.Config do
           handler: module(),
           node_id: pos_integer() | nil,
           pulsar: keyword(),
-          transport_children: [Transport.child_spec()],
-          content_producer: Transport.producer_spec(),
-          system_producer: Transport.producer_spec(),
+          pulsar_client: {module(), keyword()},
+          content_producer: Pulsar.producer_spec(),
+          system_producer: Pulsar.producer_spec(),
           monitor_store: {module(), keyword()},
           concurrency: pos_integer(),
           inactivity_seconds: pos_integer(),
@@ -119,7 +119,7 @@ defmodule UOF.SDK.Config do
     :handler,
     :node_id,
     :pulsar,
-    :transport_children,
+    :pulsar_client,
     :content_producer,
     :system_producer,
     :monitor_store,
@@ -142,15 +142,15 @@ defmodule UOF.SDK.Config do
       |> Keyword.merge(overrides)
       |> NimbleOptions.validate!(@schema)
 
-    pipelines = Transport.producers(cfg[:pulsar])
+    pulsar = Pulsar.producers(cfg[:pulsar])
 
     struct!(
       __MODULE__,
       Keyword.merge(cfg,
         producers: Enum.map(cfg[:producers], &Map.new/1),
-        transport_children: pipelines.children,
-        content_producer: pipelines.content,
-        system_producer: pipelines.system
+        pulsar_client: pulsar.client,
+        content_producer: pulsar.content,
+        system_producer: pulsar.system
       )
     )
   end

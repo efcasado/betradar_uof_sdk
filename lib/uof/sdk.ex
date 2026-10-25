@@ -83,7 +83,7 @@ defmodule UOF.SDK do
     # client and pipelines down with a crashed monitor so re-subscribing Pulsar
     # consumers deliver a fresh ownership report to its restarted passive
     # state.
-    Supervisor.init(lifecycle ++ config.transport_children ++ child_specs(config), strategy: :rest_for_one)
+    Supervisor.init(lifecycle ++ [config.pulsar_client | child_specs(config)], strategy: :rest_for_one)
   end
 
   @doc """

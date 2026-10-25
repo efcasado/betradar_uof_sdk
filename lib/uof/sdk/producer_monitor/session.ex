@@ -1,4 +1,4 @@
-defmodule UOF.SDK.ProducerMonitor.Connections do
+defmodule UOF.SDK.ProducerMonitor.Session do
   @moduledoc false
 
   # Order-independent tracking of the upstream consume session.
@@ -28,23 +28,23 @@ defmodule UOF.SDK.ProducerMonitor.Connections do
     %__MODULE__{persisted: persisted, seen: MapSet.new(List.wrap(persisted))}
   end
 
-  def observe(%__MODULE__{} = connections, tag) do
-    if MapSet.member?(connections.seen, tag) do
-      {:unchanged, %{connections | observed: connections.observed || tag}}
+  def observe(%__MODULE__{} = session, tag) do
+    if MapSet.member?(session.seen, tag) do
+      {:unchanged, %{session | observed: session.observed || tag}}
     else
-      {:recovery_needed, %{connections | observed: tag, seen: MapSet.put(connections.seen, tag), pending: tag}}
+      {:recovery_needed, %{session | observed: tag, seen: MapSet.put(session.seen, tag), pending: tag}}
     end
   end
 
   # A persisted tag means this process is restarting a previously observed
   # session, so recovery waits until the current tag is observed.
-  def awaiting_readiness?(%__MODULE__{} = connections) do
-    not ready?(connections) and not is_nil(connections.persisted)
+  def awaiting_readiness?(%__MODULE__{} = session) do
+    not ready?(session) and not is_nil(session.persisted)
   end
 
   def ready?(%__MODULE__{observed: observed}), do: not is_nil(observed)
 
-  def commit(%__MODULE__{} = connections) do
-    %{connections | persisted: connections.pending, pending: nil}
+  def commit(%__MODULE__{} = session) do
+    %{session | persisted: session.pending, pending: nil}
   end
 end

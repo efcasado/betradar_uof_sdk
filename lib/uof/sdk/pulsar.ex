@@ -1,4 +1,4 @@
-defmodule UOF.SDK.Transport do
+defmodule UOF.SDK.Pulsar do
   @moduledoc false
 
   # Derives the Pulsar client and the two Broadway producer specs from the
@@ -11,7 +11,6 @@ defmodule UOF.SDK.Transport do
   @pulsar_client :uof_sdk_pulsar
 
   @type producer_spec :: {module(), keyword()}
-  @type child_spec :: Supervisor.child_spec() | {module(), term()}
 
   # Only the system pipeline observes feed continuity, so nothing confirms
   # that the content subscription exists before the first recovery. Pulsar
@@ -39,8 +38,8 @@ defmodule UOF.SDK.Transport do
   ]
 
   @spec producers(keyword()) :: %{
+          client: {module(), keyword()},
           content: producer_spec(),
-          children: [child_spec()],
           system: producer_spec()
         }
   def producers(opts) do
@@ -78,7 +77,7 @@ defmodule UOF.SDK.Transport do
       # The client is supervised independently from both Broadway producers.
       # Neither producer carries :host, so both reuse this one connection
       # context instead of each calling Pulsar.start/1.
-      children: [{Client, client_opts}],
+      client: {Client, client_opts},
       content: pulsar_producer(base_opts, subscription, :content, :key_shared, @content_consumer_defaults),
       system: pulsar_producer(system_opts, subscription, :system, :failover, [])
     }

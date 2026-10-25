@@ -59,7 +59,7 @@ defmodule UOF.SDK.ContentPipelineTest do
   end
 
   test "marks a message failed on undecodable data", context do
-    ref = context |> start_pipeline() |> send_message("<nonsense/>", "x")
+    ref = context |> start_pipeline() |> send_message("<nonsense/>", "hi.-.live.odds_change.1.sr:match.1.-")
     assert_receive {:ack, ^ref, [], [_failed]}, 1_000
   end
 
@@ -76,14 +76,15 @@ defmodule UOF.SDK.ContentPipelineTest do
     assert_receive {:ack, ^ref, [], [_failed]}, 1_000
   end
 
-  test "acks alives without dispatching them", context do
-    ref =
-      context
-      |> start_pipeline()
-      |> send_message(~s(<alive product="1" timestamp="1" subscribed="1"/>), "-.-.-.alive.-.-.-.-")
+  test "acks system messages without decoding them", context do
+    pipeline = start_pipeline(context, handler: RaisingHandler)
 
-    assert_receive {:ack, ^ref, [_successful], []}, 1_000
-    refute_received {:odds_change, _, _}
+    # Not valid UOF XML: decoding would fail the message.
+    alive = send_message(pipeline, "<alive", "-.-.-.alive.-.-.-.-")
+    snapshot_complete = send_message(pipeline, "<snapshot_complete", "-.-.-.snapshot_complete.-.-.-.-")
+
+    assert_receive {:ack, ^alive, [_successful], []}, 1_000
+    assert_receive {:ack, ^snapshot_complete, [_successful], []}, 1_000
   end
 
   test "acks another node's messages without dispatching them", context do

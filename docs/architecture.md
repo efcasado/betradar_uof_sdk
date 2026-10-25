@@ -95,7 +95,8 @@ Each instance starts one supervised `Pulsar.Client`, shared by its two subscript
 Instances with the same base subscription divide content delivery through Key-Shared.
 The system subscription uses Failover to select the instance that coordinates producer
 health and recovery. These are independent subscriptions to the same topic: the system
-pipeline filters out event content before decoding it. The system subscription is the
+pipeline acknowledges event content without decoding it, and the content pipeline does the
+same with `alive` and `snapshot_complete`. The system subscription is the
 only control plane; see [feed continuity](#feed-continuity).
 
 ### Connector Contract
@@ -270,7 +271,7 @@ Content follows a short path:
 Pulsar delivery
     → routing-key property
     → Broadway partition dispatch
-    → node filtering
+    → message-type and node filtering
     → XML decoding
     → application callback
     → Pulsar acknowledgement
@@ -357,7 +358,7 @@ Recovery is a coordinated sequence:
 1. An initial synchronization need, session change, health observation, or manual request
    creates recovery intent for a producer.
 2. The monitor persists that the producer requires recovery before issuing HTTP.
-3. Once ownership, connection gates, and cooldown permit it, the SDK requests recovery with
+3. Once ownership, session readiness, and cooldown permit it, the SDK requests recovery with
    a request ID. After a heartbeat timeout it also waits for the producer's alives to
    resume: Betradar rejects recovery for a silent producer, and failed requests count
    against its rate limit. A stored checkpoint selects incremental recovery, whose replay
@@ -595,7 +596,7 @@ log alone does not establish readiness or prove that handlers have completed the
 ## Contributing
 
 `ProducerMonitor` is the coordination GenServer. It routes observations, applies ownership
-and connection gates, persists transitions, and publishes producer-status callbacks.
+and session readiness, persists transitions, and publishes producer-status callbacks.
 `ProducerMonitor.Producer` owns per-producer health transitions, recovery jobs, cooldowns,
 HTTP attempts, and timers. These functions execute in the monitor process, except the HTTP
 request itself, which runs in a linked task whose response returns as a message; a response
@@ -604,14 +605,14 @@ left to finish rather than shut down: it has usually reached Betradar already, a
 duplicate request is harmless beyond quota. Status callbacks run in the monitor and should
 complete promptly.
 
-`ProducerMonitor.Connections` tracks [consumer tags](#consumer-tags) independently of producer state.
-`Transport` derives the two producer specifications and the shared Pulsar client from the
+`ProducerMonitor.Session` tracks the upstream [consumer tag](#consumer-tags) independently of producer state.
+`UOF.SDK.Pulsar` derives the two producer specifications and the shared Pulsar client from the
 `:pulsar` configuration. `MessageMetadata` reads the connector's message properties, and `RoutingKey` supplies
 routing and event identity. The pipelines own decoding and dispatch rather than recovery
 policy.
 
 Useful entry points are the [SDK supervisor](../lib/uof/sdk.ex),
-[Pulsar wiring](../lib/uof/sdk/transport.ex),
+[Pulsar wiring](../lib/uof/sdk/pulsar.ex),
 [producer monitor](../lib/uof/sdk/producer_monitor.ex), and
 [store behaviour](../lib/uof/sdk/producer_monitor/store.ex).
 

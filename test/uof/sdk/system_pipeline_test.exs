@@ -7,7 +7,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     @moduledoc false
     def alive(product, ts, subscribed?), do: emit({:alive_sink, product, ts, subscribed?})
     def snapshot_complete(product, request_id), do: emit({:snapshot_sink, product, request_id})
-    def observe_connection(consumer_tag), do: emit({:connection_sink, consumer_tag})
+    def observe_consumer_tag(consumer_tag), do: emit({:consumer_tag_sink, consumer_tag})
 
     defp emit(event), do: send(Application.fetch_env!(:uof_sdk_test, :test_pid), event)
   end
@@ -64,7 +64,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     })
 
     assert_receive {:alive_sink, 1, 42, true}
-    assert_receive {:connection_sink, "ctag-1"}
+    assert_receive {:consumer_tag_sink, "ctag-1"}
   end
 
   test "acks without a monitor", context do
@@ -87,7 +87,7 @@ defmodule UOF.SDK.SystemPipelineTest do
     assert_receive {:ack, ^ref, [_successful], []}, 1_000
     refute_received {:alive_sink, _, _, _}
     refute_received {:snapshot_sink, _, _}
-    refute_received {:connection_sink, _}
+    refute_received {:consumer_tag_sink, _}
   end
 
   test "acks another node's snapshot_complete without reaching the monitor", context do

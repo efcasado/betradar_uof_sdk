@@ -24,7 +24,7 @@ Keep new features within that scope unless the task explicitly expands it.
 - Catch failures only where there is a concrete recovery or cleanup responsibility.
   Preserve the original cause. Cleanup must respect shared resource ownership.
 - Keep state transitions in their owning component. Follow the architecture guide
-  when deciding whether a change belongs in a pipeline, transport, or monitor.
+  when deciding whether a change belongs in a pipeline, the Pulsar wiring, or the monitor.
 - Reuse `uof_api` for HTTP API access and `uof_schemas` for XML decoding and feed
   structs.
 - Inspect the installed dependency source before relying on adapter behavior.
@@ -95,7 +95,7 @@ the runtime suites. Report what was tested and any checks that were not run.
   `node_id` identifies a subscription shared by all of its instances.
 - Check recovery completion against the active producer/request and treat stale
   observations explicitly. Feed synchronization, application processing, and
-  transport acknowledgement are distinct boundaries.
+  Pulsar acknowledgement are distinct boundaries.
 - Do not request generic error catches, extra retries, or forced process termination
   without showing how they preserve the relevant failure and ownership contracts.
 - Keep mechanical formatting checks in tooling. Avoid turning internal contracts

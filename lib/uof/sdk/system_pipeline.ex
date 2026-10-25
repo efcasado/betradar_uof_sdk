@@ -76,7 +76,7 @@ defmodule UOF.SDK.SystemPipeline do
   defp handle_system_message(%Message{} = message, context, rk) do
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
-        maybe_track_connection(context.monitor, rk.message_type, message)
+        maybe_observe_consumer_tag(context.monitor, rk.message_type, message)
         observe(context, rk, decoded)
         message
 
@@ -130,16 +130,16 @@ defmodule UOF.SDK.SystemPipeline do
 
   defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
 
-  defp maybe_track_connection(nil, _type, _message), do: :ok
+  defp maybe_observe_consumer_tag(nil, _type, _message), do: :ok
 
-  defp maybe_track_connection(monitor, "alive", message) do
+  defp maybe_observe_consumer_tag(monitor, "alive", message) do
     case MessageMetadata.consumer_tag(message) do
       nil -> :ok
-      tag -> monitor.observe_connection(tag)
+      tag -> monitor.observe_consumer_tag(tag)
     end
   end
 
-  defp maybe_track_connection(_monitor, _type, _message), do: :ok
+  defp maybe_observe_consumer_tag(_monitor, _type, _message), do: :ok
 
   defp notify(nil, _fun, _args), do: :ok
   defp notify(mod, fun, args), do: apply(mod, fun, args)

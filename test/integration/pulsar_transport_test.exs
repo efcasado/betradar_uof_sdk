@@ -6,7 +6,6 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
   alias UOF.SDK.MessageHandler
   alias UOF.SDK.SystemPipeline
   alias UOF.SDK.TestSupport
-  alias UOF.SDK.Transport
 
   @moduletag :integration
   @pulsar_port System.get_env("PULSAR_BROKER_PORT", "16650")
@@ -34,7 +33,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     def snapshot_complete(product, request_id), do: notify({:observed_snapshot_complete, product, request_id})
 
-    def observe_connection(tag), do: notify({:observed_connection, tag})
+    def observe_consumer_tag(tag), do: notify({:observed_consumer_tag, tag})
 
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
   end
@@ -51,7 +50,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     # test's content pipeline also receives earlier tests' messages: assertions
     # match the messages a test publishes.
     %{
-      children: [client],
+      client: client,
       content: content_producer,
       system: system_producer
     } = pulsar_producers(subscription)
@@ -98,7 +97,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
 
     publish_alive(channel, 42)
 
-    assert_receive {:observed_connection, consumer_tag}, 10_000
+    assert_receive {:observed_consumer_tag, consumer_tag}, 10_000
     assert is_binary(consumer_tag) and consumer_tag != ""
     assert_receive {:observed_alive, 1, 42, true}, 10_000
   end
@@ -208,7 +207,7 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     publish_alive(channel, 100)
 
     assert_receive {:observed_alive, 1, 100, true}, 10_000
-    assert_receive {:observed_connection, old_consumer_tag}, 10_000
+    assert_receive {:observed_consumer_tag, old_consumer_tag}, 10_000
 
     {:ok, old_queue} = TestSupport.source_queue()
     TestSupport.restart_source!()
@@ -219,13 +218,13 @@ defmodule UOF.SDK.PulsarTransportIntegrationTest do
     # The system subscription starts at the latest message, so these are the
     # only alives it receives, in topic order.
     assert_receive {:observed_alive, 1, 101, true}, 10_000
-    assert_receive {:observed_connection, new_consumer_tag}, 10_000
+    assert_receive {:observed_consumer_tag, new_consumer_tag}, 10_000
 
     refute new_consumer_tag == old_consumer_tag
   end
 
   defp pulsar_producers(subscription) do
-    Transport.producers(
+    UOF.SDK.Pulsar.producers(
       host: "pulsar://localhost:#{@pulsar_port}",
       topic: "persistent://public/default/uof-feed",
       subscription: subscription

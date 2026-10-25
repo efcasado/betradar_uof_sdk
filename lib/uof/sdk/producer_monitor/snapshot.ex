@@ -40,7 +40,7 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   defstruct consumer_tag: nil, producers: %{}, descriptions: []
 
   @format :uof_sdk_monitor_snapshot
-  @version 2
+  @version 1
 
   @doc "Whether the producer may resume retained backlog without recovery."
   @spec resumable?(t(), integer()) :: boolean()

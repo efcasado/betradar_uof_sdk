@@ -17,13 +17,4 @@ defmodule UOF.SDK.ProducerMonitor.Store.ETSTest do
     assert ETS.save("second", []) == :ok
     assert ETS.load([]) == "second"
   end
-
-  test "keys select independent snapshots" do
-    ETS.save("a", key: :node_a)
-    ETS.save("b", key: :node_b)
-
-    assert ETS.load(key: :node_a) == "a"
-    assert ETS.load(key: :node_b) == "b"
-    assert ETS.load([]) == nil
-  end
 end

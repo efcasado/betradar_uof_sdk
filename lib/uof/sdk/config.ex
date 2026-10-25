@@ -27,7 +27,7 @@ defmodule UOF.SDK.Config do
       default: UOF.SDK.ProducerMonitor.Store.ETS,
       doc: """
       `module` or `{module, opts}` implementing `UOF.SDK.ProducerMonitor.Store`. `opts` is
-      passed to its callbacks, for example to select a key per subscription.
+      passed to its callbacks.
       """
     ],
     concurrency: [

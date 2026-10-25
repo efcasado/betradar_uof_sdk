@@ -297,7 +297,7 @@ A store implements `load(opts)` and `save(snapshot, opts)`, and optionally `chil
 Configure it as a module or `{module, opts}`; `opts` is passed to every callback:
 
 ```elixir
-config :uof_sdk, monitor_store: {MyApp.MonitorStore, repo: MyApp.Repo, key: "uof-node-a"}
+config :uof_sdk, monitor_store: {MyApp.MonitorStore, repo: MyApp.Repo}
 ```
 
 `save/2` must replace the snapshot atomically and return `:ok` only once the write is durable.
@@ -307,18 +307,18 @@ write. Callbacks run in the monitor, so a slow backend delays health checks and
 and a backend that stays unavailable eventually stops `UOF.SDK` through supervisor restart
 limits.
 
-A snapshot belongs to a subscription. SDK instances on one subscription share its key, and
-only the instance that owns the system subscription writes it; a passive instance's copy is
-stale and changes only in memory until promotion reloads the stored one. Distinct
-subscriptions sharing a backend need distinct keys. A key that changes on restart never
-resumes.
+A store keeps one snapshot. All SDK instances of a deployment use the same store and share
+it; only the instance that owns the system subscription writes it, and a passive instance's
+copy is stale and changes only in memory until promotion reloads the stored one. Two
+deployments sharing a database need separate storage, for example a table each through the
+store's options.
 
 For example, a PostgreSQL store using Ecto:
 
 ```elixir
 # migration
-create table(:uof_sdk_monitor_snapshots, primary_key: false) do
-  add :key, :string, primary_key: true
+create table(:uof_sdk_monitor_snapshot, primary_key: false) do
+  add :name, :string, primary_key: true
   add :snapshot, :binary, null: false
 end
 ```
@@ -329,22 +329,24 @@ defmodule MyApp.MonitorStore do
 
   import Ecto.Query
 
-  @table "uof_sdk_monitor_snapshots"
+  @table "uof_sdk_monitor_snapshot"
+  # The store keeps one snapshot, in a single row.
+  @name "snapshot"
 
   @impl true
   def load(opts) do
-    {repo, key} = {Keyword.fetch!(opts, :repo), Keyword.fetch!(opts, :key)}
-    repo.one(from(s in @table, where: s.key == ^key, select: s.snapshot), timeout: 2_000)
+    repo = Keyword.fetch!(opts, :repo)
+    repo.one(from(s in @table, where: s.name == @name, select: s.snapshot), timeout: 2_000)
   end
 
   @impl true
   def save(snapshot, opts) do
-    {repo, key} = {Keyword.fetch!(opts, :repo), Keyword.fetch!(opts, :key)}
+    repo = Keyword.fetch!(opts, :repo)
 
     {1, _} =
-      repo.insert_all(@table, [%{key: key, snapshot: snapshot}],
+      repo.insert_all(@table, [%{name: @name, snapshot: snapshot}],
         on_conflict: {:replace, [:snapshot]},
-        conflict_target: :key,
+        conflict_target: :name,
         timeout: 2_000
       )
 
@@ -357,7 +359,7 @@ Start the repo before the SDK. A store that owns a process implements `child_spe
 starts `{module, opts}` as its first child, and a store-process restart also restarts the
 monitor and consumers through `:rest_for_one`.
 
-Test a persistent store for an empty load, replacement, key isolation, and visible failures.
+Test a persistent store for an empty load, replacement, and visible failures.
 The [ETS store tests](../test/uof/sdk/producer_monitor/store/ets_test.exs) show the contract.
 
 ## Observability

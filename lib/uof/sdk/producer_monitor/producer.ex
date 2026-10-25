@@ -83,6 +83,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           recovery_window_minutes: integer() | nil,
           status: status(),
           last_alive_at: integer() | nil,
+          alive_delay: integer() | nil,
           resuming_since: integer() | nil,
           recovery: recovery_state() | nil
         }
@@ -105,6 +106,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     :name,
     :recovery_window_minutes,
     :last_alive_at,
+    :alive_delay,
     :resuming_since,
     :recovery,
     status: :down
@@ -130,7 +132,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @doc false
   @spec observe_alive(t(), integer() | nil, boolean(), integer()) :: alive_result()
   def observe_alive(%__MODULE__{} = producer, gen_timestamp, subscribed?, now) do
-    observed = %{producer | last_alive_at: now}
+    observed = %{producer | last_alive_at: now, alive_delay: alive_delay(gen_timestamp, now)}
 
     cond do
       awaiting_alive?(producer) ->
@@ -170,7 +172,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       alive_violation?(producer, now, inactivity_ms) ->
         {:recovery_needed, producer, :alive_timeout}
 
-      producer.status == :resuming and producer.last_alive_at != nil and session_ready? ->
+      producer.status == :resuming and current_alive?(producer, inactivity_ms) and session_ready? ->
         {:transition, mark_up(producer)}
 
       true ->
@@ -480,6 +482,18 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   # A resuming producer that has not heard a heartbeat since this instance took
   # control gets one interval, measured from `resuming_since`.
+  # How late the system pipeline read the alive: local receipt time minus its
+  # generation timestamp, so it includes clock skew with Betradar.
+  defp alive_delay(gen_timestamp, now) when is_integer(gen_timestamp), do: now - gen_timestamp
+  defp alive_delay(nil, _now), do: nil
+
+  # Alives drained from retained backlog prove the feed is flowing but not that
+  # the backlog has been read: a session change or unsubscribed alive may still
+  # be queued behind them. Resuming waits for one generated within the
+  # heartbeat interval.
+  defp current_alive?(%__MODULE__{last_alive_at: nil}, _ms), do: false
+  defp current_alive?(%__MODULE__{alive_delay: delay}, ms), do: is_integer(delay) and delay <= ms
+
   defp alive_violation?(%__MODULE__{last_alive_at: nil, status: :resuming, resuming_since: since}, now, ms)
        when is_integer(since), do: now - since > ms
 

@@ -35,9 +35,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   Recovery checkpoints are owned here, not by the Broadway pipeline. Subscribed
   `alive` heartbeats advance the checkpoint only after the producer is already
-  up. Incremental recovery subtracts `recovery_overlap_ms` from the stored
-  checkpoint, intentionally replaying a bounded window to cover concurrent
-  processing and distributed-consumer skew.
+  up. Incremental recovery replays from the stored checkpoint, as the official
+  SDKs do: everything before it is already on the topic.
 
   A delivery gap marks the producer `:recovering`. The request is issued after
   the per-producer cooldown with a fresh `request_id` and a checkpoint-derived
@@ -125,7 +124,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @default_inactivity_ms 20_000
   @default_tick_ms 1_000
-  @default_recovery_overlap_ms 5 * 60_000
   @default_descriptions_refresh_ms 60_000
 
   @type ownership :: :active | :passive
@@ -141,7 +139,6 @@ defmodule UOF.SDK.ProducerMonitor do
           readiness_deadline_at: integer() | nil,
           inactivity_ms: non_neg_integer(),
           tick_ms: pos_integer(),
-          recovery_overlap_ms: non_neg_integer(),
           producer_opts: keyword(),
           descriptions_refresh_ms: pos_integer(),
           next_refresh_at: integer() | nil,
@@ -160,8 +157,7 @@ defmodule UOF.SDK.ProducerMonitor do
     :readiness_deadline_at,
     ## Client API ---------------------------------------------------------------
     :inactivity_ms,
-    :tick_ms,
-    :recovery_overlap_ms
+    :tick_ms
   ]
 
   defstruct @enforce_keys ++
@@ -268,7 +264,6 @@ defmodule UOF.SDK.ProducerMonitor do
       readiness_deadline_at: nil,
       inactivity_ms: Keyword.get(opts, :inactivity_ms, @default_inactivity_ms),
       tick_ms: Keyword.get(opts, :tick_ms, @default_tick_ms),
-      recovery_overlap_ms: Keyword.get(opts, :recovery_overlap_ms, @default_recovery_overlap_ms),
       producer_opts: opts,
       descriptions_refresh_ms: Keyword.get(opts, :descriptions_refresh_ms, @default_descriptions_refresh_ms)
     }
@@ -847,9 +842,7 @@ defmodule UOF.SDK.ProducerMonitor do
   defp after_from_checkpoint(state, producer) do
     case Snapshot.progress(state.snapshot, producer.id).checkpoint do
       timestamp when is_integer(timestamp) ->
-        timestamp
-        |> checkpoint_after_overlap(state.recovery_overlap_ms)
-        |> clamp_to_window(producer, state.now_fun.())
+        clamp_to_window(timestamp, producer, state.now_fun.())
 
       nil ->
         nil
@@ -859,8 +852,6 @@ defmodule UOF.SDK.ProducerMonitor do
   defp put_producer(state, %Producer{} = producer) do
     %{state | producers: Map.put(state.producers, producer.id, producer)}
   end
-
-  defp checkpoint_after_overlap(timestamp, overlap_ms), do: max(timestamp - overlap_ms, 0)
 
   # Checkpoints only move forward.
   defp put_checkpoint(state, id, timestamp) do

@@ -71,7 +71,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
       now_fun: fn -> Agent.get(clock, & &1) end,
       inactivity_ms: @inactivity,
       tick_ms: 60_000,
-      recovery_overlap_ms: 0,
       # Most unit tests start with control authority. Ownership-specific tests
       # override this; configured monitors start passive.
       ownership: :active,
@@ -503,23 +502,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
     ProducerMonitor.alive(m, 1, 1_000, true)
     assert_receive {:recover_called, "pre", opts}
     assert opts[:after] == @now - 60_000
-  end
-
-  test "incremental recovery subtracts configured overlap from checkpoint", %{clock: clock} do
-    put_checkpoint(1, @now - 60_000)
-
-    m =
-      start_monitor(
-        [
-          now_fun: fn -> @now end,
-          recovery_overlap_ms: 30_000
-        ],
-        clock
-      )
-
-    ProducerMonitor.alive(m, 1, 1_000, true)
-    assert_receive {:recover_called, "pre", opts}
-    assert opts[:after] == @now - 90_000
   end
 
   test "clamps :after to the producer's recovery window", %{clock: clock} do

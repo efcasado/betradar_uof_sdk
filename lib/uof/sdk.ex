@@ -73,7 +73,6 @@ defmodule UOF.SDK do
            monitor_store: config.monitor_store,
            min_interval_ms: config.min_interval_between_recoveries * 1_000,
            max_recovery_ms: config.max_recovery_time * 1_000,
-           recovery_overlap_ms: config.recovery_overlap_seconds * 1_000,
            producers: config.producers}
         ]
 

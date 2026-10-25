@@ -189,11 +189,10 @@ loads producer descriptions and recovery uses the HTTP API.
 | `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
 | `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
 | `:max_recovery_time` | `3600` | Wait for recovery completion before reissuing a stalled request |
-| `:recovery_overlap_seconds` | `300` | Look-back subtracted from the stored checkpoint for incremental recovery |
 | `:producers` | `[]` | Fallback producer descriptions (`[id: 1, product: "liveodds", recovery_window_minutes: 4320]`), used only if the UOF API is unavailable at startup and no previous run stored any |
 
 Public durations are in seconds. Recovery throttling defaults follow the official SDK
-guidance; the overlap setting is SDK-specific and should be tuned for the deployment.
+guidance.
 See [time and recovery controls](docs/architecture.md#time-and-recovery-controls) for the precise semantics.
 
 ## Handler reference

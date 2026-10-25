@@ -140,11 +140,6 @@ defmodule UOF.SDK.ConfigTest do
   test "defaults the health thresholds" do
     defaults = load()
     assert defaults.inactivity_seconds == 20
-    assert defaults.recovery_overlap_seconds == 300
-  end
-
-  test "accepts a recovery overlap override" do
-    assert load(recovery_overlap_seconds: 20).recovery_overlap_seconds == 20
   end
 
   test "defaults concurrency to 10 and accepts an override" do

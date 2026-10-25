@@ -443,10 +443,9 @@ cooldown uses monotonic time.
 | `inactivity_seconds` | Elapsed time since a system heartbeat or matching recovery completion established liveness | Records recovery on an observed heartbeat timeout and requests it once the producer's alives resume; also bounds session-readiness waiting |
 | `min_interval_between_recoveries` | Per-producer recovery-request cooldown and delay after a failed request | Defers requests or retries while recovery remains pending |
 | `max_recovery_time` | Wait for matching `snapshot_complete` after a successful recovery request | Reissues a stalled recovery while retaining its original replay timestamp |
-| `recovery_overlap_seconds` | Look-back subtracted from a stored checkpoint | Replays overlapping data during incremental recovery, bounded by the producer's recovery window |
 
-These controls have distinct purposes: recovery overlap is not a timeout, and a stalled
-recovery is not a heartbeat failure. Health checks and timer messages are handled by the
+These controls have distinct purposes: a stalled recovery is not a heartbeat failure, and
+a recovery cooldown does not cancel pending intent. Health checks and timer messages are handled by the
 monitor, subject to control-plane ownership and its current recovery state; durations are
 not hard real-time deadlines. See [configuration](../README.md#configuration) for defaults and
 [startup and recovery](#recovery) for the recovery sequence and manual requests.
@@ -559,9 +558,9 @@ An upstream session change or recovery-required heartbeat still enters the norma
 path. Persistence alone does not prove delivery continuity or replace broker backlog
 retention.
 
-Incremental recovery subtracts the configured overlap from the checkpoint and clamps the
-result to the producer's advertised recovery window. Handlers must tolerate replayed
-messages. See [store implementation](#implementing-a-store) for the
+Incremental recovery replays from the checkpoint, clamped to the producer's advertised
+recovery window, as the official SDKs do; everything before the checkpoint is already on the
+topic. Handlers must still tolerate replayed messages. See [store implementation](#implementing-a-store) for the
 configuration and durability contract, and [backlog requirements](#backlog-and-restart-continuity)
 for the broker side of restart continuity.
 

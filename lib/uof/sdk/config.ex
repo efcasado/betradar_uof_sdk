@@ -65,13 +65,6 @@ defmodule UOF.SDK.Config do
       Producer descriptions used only when the UOF API cannot provide them at startup and
       none were stored by a previous run. Each entry needs `:id` and `:product`.
       """
-    ],
-    recovery_overlap_seconds: [
-      type: :pos_integer,
-      default: 300,
-      doc: """
-      Look-back subtracted from the stored checkpoint for incremental recovery.
-      """
     ]
   ]
 
@@ -111,7 +104,6 @@ defmodule UOF.SDK.Config do
           inactivity_seconds: pos_integer(),
           min_interval_between_recoveries: pos_integer(),
           max_recovery_time: pos_integer(),
-          recovery_overlap_seconds: pos_integer(),
           producers: [map()]
         }
 
@@ -127,7 +119,6 @@ defmodule UOF.SDK.Config do
     :inactivity_seconds,
     :min_interval_between_recoveries,
     :max_recovery_time,
-    :recovery_overlap_seconds,
     :producers
   ]
 

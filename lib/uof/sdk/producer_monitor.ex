@@ -1,31 +1,15 @@
 defmodule UOF.SDK.ProducerMonitor do
   @moduledoc """
-  Tracks producer health and orchestrates recovery: the SDK's control plane.
+  Coordinates producer health, recovery, persistence, and status notifications.
 
-  Its inputs are the system pipeline's observations (`alive`, with the
-  upstream consumer tag it was delivered in, and `snapshot_complete`), the
-  broker's ownership reports for the system subscription, and manual requests.
-  Events only record facts on the producers
-  (`UOF.SDK.ProducerMonitor.Producer`). After every event and on every tick,
-  the monitor persists their durable progress, sends what is due through
-  `UOF.SDK.ProducerMonitor.Requests.advance/4`, and publishes status changes.
-  Every request is therefore issued only while this instance owns the system
-  subscription, only for a producer heard in a session already checked, and
-  only once its recovery intent is durable.
+  The system pipeline supplies alives and completions; Pulsar reports ownership.
+  Only the active owner writes the subscription's shared snapshot or sends
+  recovery requests. Passive instances ignore system observations and reload
+  the snapshot on promotion, using the same restore rules as startup.
 
-  The monitor persists one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`) per
-  store, shared by a subscription's instances: the consumer tag and, per
-  producer, a checkpoint and the recovery it owes. Only the active instance
-  writes it. Startup and promotion restore producers from it alike; a passive
-  instance ignores system observations.
-
-  Producer descriptions come from the UOF API, falling back to stored and then
-  configured descriptions; an `alive` from an unknown producer triggers a
-  rate-limited reload.
-
-  The recovery guide (`docs/recovery.md`) describes the behaviour, and the
-  architecture guide (`docs/architecture.md`) the design invariants this module
-  must preserve.
+  `UOF.SDK.ProducerMonitor.Producer` owns per-producer transitions;
+  `UOF.SDK.ProducerMonitor.Requests` sends HTTP requests.
+  See `docs/recovery.md` for behaviour and `docs/architecture.md` for invariants.
   """
 
   use GenServer
@@ -131,24 +115,20 @@ defmodule UOF.SDK.ProducerMonitor do
   # Called by the system pipeline and the Pulsar ownership callback, not by
   # applications.
 
-  # Records an `alive` and the consumer tag of the upstream session it was
-  # delivered in. `subscribed?` false means recovery is needed.
   @doc false
   def alive(server \\ __MODULE__, producer_id, gen_timestamp, subscribed?, consumer_tag) do
     GenServer.cast(server, {:alive, producer_id, gen_timestamp, subscribed?, consumer_tag})
   end
 
-  # A matching completion ends the recovery and establishes the alive timeout
-  # anchor, because receiving it proves current system-message delivery.
+  # A matching completion also proves system-message delivery, so it resets
+  # the heartbeat timeout.
   @doc false
   def snapshot_complete(server \\ __MODULE__, producer_id, request_id) do
     GenServer.cast(server, {:snapshot_complete, producer_id, request_id})
   end
 
-  # A broker-reported ownership change for the system-subscription consumer.
-  # `UOF.SDK.Pulsar` wires this as the system producer's
-  # `:active_state_callback`; `metadata` is the callback's map (`:active_state`,
-  # `:topic`, `:subscription`, `:consumer_pid`).
+  # Pulsar's :active_state_callback supplies :active_state, :topic,
+  # :subscription, and :consumer_pid.
   @doc false
   def active_state_change(server \\ __MODULE__, metadata) do
     GenServer.cast(server, {:active_state, metadata})
@@ -248,19 +228,12 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @impl true
-  # A passive instance ignores system observations: the owner heals the shared
-  # feed, and promotion restores producers from the stored snapshot, which
-  # replaces anything recorded here. An observation racing demotion is not
-  # lost: the session baseline is the stored consumer tag, so a new tag is
-  # re-detected on promotion, and Betradar keeps sending subscribed=0 until a
-  # recovery is requested.
+  # Session changes are detected again after promotion, and unsubscribed
+  # alives repeat until recovery is requested.
   def handle_cast(observation, %{ownership: :passive} = state) when elem(observation, 0) in [:alive, :snapshot_complete],
     do: {:noreply, state}
 
-  # The session is checked before the alive is applied, so no producer is heard
-  # in a session that has not been checked. An alive from an unknown producer
-  # means it was activated after the descriptions were loaded; it is picked up
-  # by the next reload.
+  # Check the upstream session before recording liveness or issuing recovery.
   def handle_cast({:alive, id, gen_ts, subscribed?, consumer_tag}, state) do
     state = track_consumer_tag(state, consumer_tag)
     now = state.now_fun.()
@@ -289,11 +262,8 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state |> update_producer(id, complete) |> settle()}
   end
 
-  # Reports are idempotent for the same consumer. A report from a worker that
-  # has already exited can arrive after its replacement's report, and cannot
-  # establish ownership. A replacement may report before the old worker's DOWN
-  # is handled: it re-enters through passive, so promotion restores the shared
-  # snapshot.
+  # Ignore reports from exited workers. A replacement must restore the shared
+  # snapshot even if its predecessor's DOWN has not arrived.
   def handle_cast({:active_state, %{active_state: :active, consumer_pid: pid} = metadata}, state) do
     state =
       if pid == state.consumer_pid or not Process.alive?(pid),
@@ -318,8 +288,6 @@ defmodule UOF.SDK.ProducerMonitor do
         producers = Map.new(state.producers, fn {id, producer} -> {id, elapse(producer, now, state)} end)
         settle(%{state | producers: producers})
       else
-        # A passive instance observes nothing, so its producers' timestamps
-        # are stale; promotion restores them from the snapshot.
         state
       end
 
@@ -327,9 +295,8 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
-  # The fetch runs in a task linked to the monitor, like recovery requests: an
-  # unavailable API must not block heartbeats and status queries for the
-  # request timeout. An exception from the fetcher still crashes the monitor.
+  # Fetch asynchronously so HTTP latency does not block the monitor.
+  # Linked task failures still crash the monitor.
   def handle_info(:refresh_descriptions, state) do
     opts = state.producer_opts
     task = Task.async(fn -> Descriptions.fetch(opts) end)
@@ -365,8 +332,6 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
-  # A recovery request finished. A response for a request that was completed,
-  # abandoned, or replaced meanwhile no longer matches and is dropped.
   def handle_info({ref, {:recovery_response, id, request_id, result}}, state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
     respond = &Requests.handle_response(state.requests, &1, request_id, result)
@@ -385,7 +350,6 @@ defmodule UOF.SDK.ProducerMonitor do
     change_ownership(%{state | consumer_pid: nil, consumer_ref: nil}, :passive, metadata)
   end
 
-  # Demotes the instance only if a consumer holds ownership.
   defp demote_consumer(%{consumer_pid: nil} = state, _metadata), do: state
   defp demote_consumer(state, metadata), do: demote(state, metadata)
 
@@ -411,11 +375,7 @@ defmodule UOF.SDK.ProducerMonitor do
     if active?, do: restore(state, load_snapshot(state.monitor_store)), else: state
   end
 
-  # The stored snapshot is the subscription's state, possibly written by
-  # another owner while this instance was passive. Startup and promotion
-  # restore every producer from it alike: whatever this instance held in memory
-  # is either recorded there or was settled by that owner. This instance keeps
-  # the descriptions it loaded itself.
+  # Keep locally loaded descriptions when restoring shared subscription progress.
   defp restore(state, snapshot) do
     now = state.now_fun.()
 
@@ -434,7 +394,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Consume sessions ---------------------------------------------------------
 
-  # An alive without a consumer tag carries no session information.
   defp track_consumer_tag(state, nil), do: state
 
   defp track_consumer_tag(state, tag) do
@@ -444,11 +403,8 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  # A consumer tag change can leave a delivery gap, so every producer owes a
-  # recovery. It also invalidates a request in flight: the replay may have been
-  # published while the consumer was disconnected. A recovery still waiting to
-  # be issued needs no replacement, as its request will cover the gap. The new
-  # tag and the owed recoveries are saved in one write.
+  # A reconnect can lose replay messages too, so abandon in-flight requests.
+  # settle/1 persists the new tag and recovery intent together.
   defp recover_after_session_change(state) do
     producers =
       Map.new(state.producers, fn {id, producer} ->
@@ -460,23 +416,15 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Recovery -----------------------------------------------------------------
 
-  # Run after every event: persist, issue what is due, then publish status
-  # changes.
   defp settle(state), do: state |> persist() |> reconcile() |> publish_status_changes()
 
-  # The snapshot is a projection of the committed consumer tag and each
-  # producer's durable progress. Saving it before reconcile/1 makes recovery
-  # intent durable before any request, so a crash after the request cannot
-  # resume from stale synchronized state.
+  # Persist recovery intent before HTTP issuance so a restart cannot resume
+  # from stale synchronized state.
   defp persist(state) do
     producers = Map.new(state.producers, fn {id, producer} -> {id, Producer.progress(producer)} end)
     save_snapshot(state, %{state.snapshot | consumer_tag: state.session.persisted, producers: producers})
   end
 
-  # The only place recovery requests are sent, and only while this instance
-  # owns the control plane. A request is due only for a heard producer, and
-  # every alive's consumer tag is checked before the alive is applied, so no
-  # request precedes the check of its session.
   defp reconcile(state) do
     if owns_control?(state) do
       now = state.now_fun.()
@@ -503,9 +451,6 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp save_snapshot(%{snapshot: snapshot} = state, snapshot), do: state
 
-  # Instances of one subscription may share a snapshot, which the active
-  # instance owns. A passive instance's copy is stale, so it changes only in
-  # memory; promotion restores from the stored one.
   defp save_snapshot(%{monitor_store: {store, store_opts}} = state, snapshot) do
     if owns_control?(state), do: :ok = store.save(Snapshot.encode(snapshot), store_opts)
     %{state | snapshot: snapshot}
@@ -515,9 +460,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp new_producer(description), do: struct(Producer, description)
 
-  # Reloaded descriptions update known producers and add new ones. A producer
-  # added at runtime starts :down and recovers on its first alive. Producers no
-  # longer listed keep their state.
+  # Producers omitted from a reload retain their existing state.
   defp apply_descriptions(state, descriptions) do
     producers =
       Enum.reduce(descriptions, state.producers, fn description, producers ->
@@ -543,9 +486,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Status -------------------------------------------------------------------
 
-  # Status callbacks follow the reported status rather than individual
-  # transitions. A producer added by a description reload is recorded without a
-  # callback, like those loaded at startup.
+  # Newly discovered producers start without a status callback, as at startup.
   defp publish_status_changes(state) do
     Enum.reduce(state.producers, state, fn {id, producer}, state ->
       status = reported_status(producer, state)
@@ -564,8 +505,6 @@ defmodule UOF.SDK.ProducerMonitor do
     end)
   end
 
-  # A passive instance observes nothing, so silence is only judged while
-  # active.
   defp reported_status(%Producer{} = producer, state) do
     heard? =
       if owns_control?(state),
@@ -599,10 +538,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   defp notify_handler(%{handler: nil}, _producer), do: :ok
 
-  # Runs inside this GenServer: a raising handler crashes the monitor and is
-  # healed by supervision — :rest_for_one restarts the pipelines with it, so
-  # the re-subscribing consumers re-report failover ownership and
-  # ownership converges (see the supervisor comment in UOF.SDK).
+  # Runs synchronously; handler exceptions crash the monitor.
   defp notify_handler(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
 
   defp emit_alive(%Producer{alive_delay: delay} = producer, subscribed?) when is_integer(delay) do
@@ -617,10 +553,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Helpers ------------------------------------------------------------------
 
-  # Applies the time elapsed until `now`: a heartbeat gap owes a recovery or
-  # interrupts the request in flight. Every tick runs it, and so does every
-  # alive and completion before it replaces the time the producer was last
-  # heard: a gap that ends between two ticks would otherwise go unnoticed.
+  # Check for silence before an alive or completion updates last_alive_at;
+  # otherwise a gap ending between ticks can go unnoticed.
   defp elapse(%Producer{} = producer, now, state), do: Producer.check(producer, now, state.inactivity_ms)
 
   defp put_producer(state, %Producer{} = producer) do

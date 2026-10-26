@@ -1,12 +1,8 @@
 defmodule UOF.SDK.ProducerMonitor.Descriptions do
   @moduledoc false
 
-  # Loads the producer descriptions recovery needs: each producer's API product
-  # and stateful recovery window. The UOF API is authoritative. When it fails,
-  # the descriptions stored by a previous run, or else the configured ones, let
-  # the monitor start while it keeps retrying the API. With no source at all,
-  # startup fails: running without known producers would silently disable
-  # health tracking and recovery.
+  # Recovery requires producer descriptions. Load from the API, falling
+  # back to the stored descriptions, then configuration.
 
   require Logger
 

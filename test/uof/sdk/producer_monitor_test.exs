@@ -124,7 +124,6 @@ defmodule UOF.SDK.ProducerMonitorTest do
       store_snapshot(%{stored_snapshot() | consumer_tag: consumer_tag})
     end
 
-    ## Health monitoring ---------------------------------------------------------
     Enum.each(checkpoints, fn {id, timestamp} -> put_checkpoint(id, timestamp) end)
     Enum.each(synchronized_producers, fn id -> update_stored_progress(id, &%{&1 | pending_recovery: nil}) end)
   end

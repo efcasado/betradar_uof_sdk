@@ -88,9 +88,9 @@ the SDK moves an `after` timestamp near the window edge to 10 minutes inside the
 allow for clock skew and request latency. Older messages then fall outside the replay. Use
 [per-event recovery](#recovering-a-single-event) for events you know were affected.
 
-**Request IDs** come from a per-producer sequence starting at a random offset, so a completion
-for an older request, issued before a restart or by another instance, does not complete a
-newer one.
+**Request IDs** come from a per-monitor sequence starting at a random offset. The offset
+reduces the chance that an older request's completion matches a new request after a restart
+or promotion.
 
 **Failures.** A rejected or failed request (an API error, an HTTP transport error, or a
 response other than `ACCEPTED`) is retried after `min_interval_between_recoveries`. An

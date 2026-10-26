@@ -1,15 +1,10 @@
 defmodule UOF.SDK.ProducerMonitor.Requests do
   @moduledoc """
-  Sends recovery requests to the UOF API for the producer monitor.
+  Sends recovery requests in tasks linked to the producer monitor.
 
-  Holds the recovery settings, the request-id sequence, and the monotonic
-  clock that cooldowns, stalls, and durations are measured with. Each request
-  runs in a task linked to the monitor, whose result returns to it as
-  `{:recovery_response, producer_id, request_id, result}`. Decides nothing
-  itself: `UOF.SDK.ProducerMonitor.Producer` says when a request is
-  due and where it replays from. Each attempt replays from 60 seconds before
-  that timestamp, bounded by the current recovery window with a 10-minute
-  margin.
+  Holds shared recovery settings, the request-ID sequence, and the monotonic
+  clock. `UOF.SDK.ProducerMonitor.Producer` decides when a request is due.
+  Results return as `{:recovery_response, producer_id, request_id, result}`.
   """
 
   alias UOF.Schemas.Common.Response
@@ -74,14 +69,8 @@ defmodule UOF.SDK.ProducerMonitor.Requests do
     Producer.complete_recovery(producer, request_id, now, requests.monotonic_fun.())
   end
 
-  # The request runs in a task linked to the monitor, so a slow API cannot
-  # block it, while an exception still crashes it. The response carries the
-  # producer and request it answers, so the monitor routes it without tracking
-  # tasks.
-  #
-  # A superseded request is deliberately left to finish rather than shut down:
-  # by then it has usually reached Betradar, so stopping the task would not
-  # retract it, and a duplicate request is harmless beyond quota.
+  # Link HTTP tasks so exceptions crash the monitor without blocking observations.
+  # A superseded request may already have reached Betradar; let its task finish.
   defp send_request(requests, producer, now, monotonic_now) do
     after_ts = recovery_after(Producer.replay_from(producer), producer.recovery_window_minutes, now)
     request_id = requests.next_request_id
@@ -94,11 +83,8 @@ defmodule UOF.SDK.ProducerMonitor.Requests do
      Producer.start_request(producer, request_id, after_ts, monotonic_now)}
   end
 
-  # A 2xx acknowledgement can still carry a non-ACCEPTED response code; no
-  # `snapshot_complete` follows a rejection, so it must stay pending.
-  # Exceptions are not rescued: recovery intent is already durable, so a crash
-  # restarts with recovery still required. The request function returns errors
-  # as values, so an exception is a bug.
+  # A successful HTTP status may still contain a rejection; no completion follows
+  # it. Expected API failures return errors; exceptions crash the monitor.
   defp recover(recover_fun, product, opts) do
     case recover_fun.(product, opts) do
       {:ok, %Response{response_code: code} = response} when code != "ACCEPTED" ->
@@ -120,12 +106,8 @@ defmodule UOF.SDK.ProducerMonitor.Requests do
     {:error, detail}
   end
 
-  # `snapshot_complete` correlation trusts request ids, so sequences from
-  # different VM boots and Pulsar control-plane owners must not overlap: a
-  # completion left in a retained backlog, or one for the previous owner's
-  # request, would otherwise complete a newer request before its replay
-  # arrives. The sequence starts at a random offset, as the official SDKs do,
-  # and wraps within the Java SDK's range.
+  # Randomize the starting ID to reduce collisions with recoveries from
+  # previous monitor instances whose completions may still be queued.
   defp next_request_id(@max_request_id), do: 1
   defp next_request_id(request_id), do: request_id + 1
 

@@ -1,30 +1,12 @@
 defmodule UOF.SDK.ProducerMonitor.Producer do
   @moduledoc """
-  State machine for one Betradar producer: health observations, the recovery
-  it owes, and the request in flight. Its functions take the time as
-  arguments; apart from logging and telemetry about their own transitions,
-  they have no side effects. `UOF.SDK.ProducerMonitor.Requests` holds the
-  recovery settings and the clock, and sends the requests.
+  Tracks one producer's health, checkpoint, owed recovery, and active request.
 
-  `checkpoint` and `pending_recovery` are the producer's durable progress,
-  which the monitor persists after every event (`progress/1`, `restore/3`).
-  Everything else is runtime state. Events record facts (`observe_alive/5`,
-  `check/3`, `owe/2`, `drop_request/1`, `complete_recovery/4`), and its
-  reported status is derived from two of them: whether it is heard, and
-  whether it owes a recovery (`status/2`). A request is due once a recovery
-  is owed, nothing is in flight, the producer is heard, and the cooldown since
-  the last attempt has passed (`due?/5`).
+  The monitor persists `checkpoint` and `pending_recovery`; all other fields
+  are runtime state. Transitions receive time explicitly and emit diagnostics.
+  `UOF.SDK.ProducerMonitor.Requests` executes HTTP requests.
 
-  Silence is judged two ways: no alive received within the heartbeat
-  interval, and consecutive alives generated further apart than it. Alives
-  read from a backlog arrive close together however far apart they were
-  generated, so only the second catches a producer that went silent while the
-  SDK was down, or while the system pipeline lagged.
-
-  An unsubscribed alive or a heartbeat gap while a request is in flight
-  interrupts it: its completion advances the checkpoint to the last subscribed
-  alive seen before, and the recovery is repeated from there instead of
-  marking the producer `:up`.
+  See `docs/recovery.md` for the recovery lifecycle and heartbeat rules.
   """
 
   alias UOF.SDK.ProducerMonitor.Snapshot.Progress
@@ -356,9 +338,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     put_in(producer.request.interrupted, true)
   end
 
-  # Alives are generated every 10 seconds, so a longer gap between consecutive
-  # generation timestamps means the producer was silent, however promptly they
-  # are read.
+  # Compare generation times so draining a backlog does not hide a gap.
   defp gap?(previous, gen_ts, inactivity_ms) when is_integer(previous) and is_integer(gen_ts),
     do: gen_ts - previous > inactivity_ms
 

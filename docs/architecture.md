@@ -313,7 +313,7 @@ checkpoint. A pending full recovery stays full across a restart or session chang
 matching completion. Checkpoints only move forward.
 
 The monitor saves only when the snapshot changes: on a session change, a checkpoint advance
-from a subscribed system heartbeat while `:up` or from an interrupted recovery's completion, a
+from a subscribed system heartbeat while `:up` or from a recovery's completion, a
 producer's synchronization change, and newly loaded descriptions.
 
 `load/1` returns `nil` only when nothing has been saved, and the monitor then starts every

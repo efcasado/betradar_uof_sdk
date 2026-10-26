@@ -73,7 +73,8 @@ then the producer is `:down`; its next `alive` requests the recovery.
 5. A `snapshot_complete` carrying the request ID ends the recovery, and the producer is `:up`.
 
 **Incremental or full.** While a producer is `:up`, each subscribed system `alive` advances
-its stored checkpoint. Each incremental request starts 60 seconds before that timestamp to
+its stored checkpoint, and a completed recovery advances it to the last subscribed `alive`
+seen while the request ran. Each incremental request starts 60 seconds before that timestamp to
 allow for short publication reorderings in key-based Pulsar batches. The checkpoint itself
 does not move back. The overlap can replay duplicates; it cannot guarantee recovery of every
 message delayed longer than 60 seconds. Without a checkpoint, for example on a first start

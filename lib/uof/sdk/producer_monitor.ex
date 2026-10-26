@@ -108,28 +108,6 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @doc """
-  Record an `alive` heartbeat and the consumer tag of the upstream session it
-  was delivered in. `subscribed?` false means recovery is needed.
-
-  The tag is checked before the alive is applied: a tag not seen before means
-  the connector reconnected, so every producer owes a recovery to close the
-  message gap a reconnect leaves behind.
-  """
-  def alive(server \\ __MODULE__, producer_id, gen_timestamp, subscribed?, consumer_tag) do
-    GenServer.cast(server, {:alive, producer_id, gen_timestamp, subscribed?, consumer_tag})
-  end
-
-  @doc """
-  Correlate `snapshot_complete` with an in-flight recovery.
-
-  A matching completion moves the producer to `:up` and establishes the alive
-  timeout anchor because receiving it proves current system-message delivery.
-  """
-  def snapshot_complete(server \\ __MODULE__, producer_id, request_id) do
-    GenServer.cast(server, {:snapshot_complete, producer_id, request_id})
-  end
-
-  @doc """
   Manually trigger a recovery for `producer_id` (e.g. from an admin UI), going
   through the normal recovery lifecycle: the producer becomes `:recovering`,
   completion is correlated via `snapshot_complete`, and the stall guard
@@ -147,15 +125,30 @@ defmodule UOF.SDK.ProducerMonitor do
     GenServer.call(server, {:recover, producer_id, opts})
   end
 
-  @doc """
-  Observe a broker-reported ownership change for the system-subscription
-  consumer. `UOF.SDK.Pulsar` wires this as the system producer's
-  `:active_state_callback`; `metadata` is the callback's map
-  (`:active_state`, `:topic`, `:subscription`, `:consumer_pid`).
+  ## Wiring -------------------------------------------------------------------
+  #
+  # Called by the system pipeline and the Pulsar ownership callback, not by
+  # applications.
 
-  Reports are idempotent for the same consumer. A replacement consumer is
-  treated as a new ownership observation even if both report `:active`.
-  """
+  # Records an `alive` and the consumer tag of the upstream session it was
+  # delivered in. `subscribed?` false means recovery is needed.
+  @doc false
+  def alive(server \\ __MODULE__, producer_id, gen_timestamp, subscribed?, consumer_tag) do
+    GenServer.cast(server, {:alive, producer_id, gen_timestamp, subscribed?, consumer_tag})
+  end
+
+  # A matching completion ends the recovery and establishes the alive timeout
+  # anchor, because receiving it proves current system-message delivery.
+  @doc false
+  def snapshot_complete(server \\ __MODULE__, producer_id, request_id) do
+    GenServer.cast(server, {:snapshot_complete, producer_id, request_id})
+  end
+
+  # A broker-reported ownership change for the system-subscription consumer.
+  # `UOF.SDK.Pulsar` wires this as the system producer's
+  # `:active_state_callback`; `metadata` is the callback's map (`:active_state`,
+  # `:topic`, `:subscription`, `:consumer_pid`).
+  @doc false
   def active_state_change(server \\ __MODULE__, metadata) do
     GenServer.cast(server, {:active_state, metadata})
   end
@@ -288,43 +281,24 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state |> update_producer(id, &Requests.complete(state.requests, &1, request_id, now)) |> settle()}
   end
 
-  def handle_cast({:active_state, %{active_state: active_state} = metadata}, state) do
-    ownership = if active_state == :active, do: :active, else: :passive
-    consumer_pid = Map.fetch!(metadata, :consumer_pid)
-
+  # Reports are idempotent for the same consumer. A report from a worker that
+  # has already exited can arrive after its replacement's report, and cannot
+  # establish ownership. A replacement may report before the old worker's DOWN
+  # is handled: it re-enters through passive, so promotion restores the shared
+  # snapshot.
+  def handle_cast({:active_state, %{active_state: :active, consumer_pid: pid} = metadata}, state) do
     state =
-      cond do
-        ownership == :active and not Process.alive?(consumer_pid) ->
-          # A report from a worker that has already exited can arrive after
-          # its replacement's report. Its DOWN cannot establish ownership.
-          state
+      if pid == state.consumer_pid or not Process.alive?(pid),
+        do: state,
+        else: state |> demote_consumer(metadata) |> promote(pid, metadata)
 
-        ownership == :active and consumer_pid == state.consumer_pid ->
-          state
+    {:noreply, settle(state)}
+  end
 
-        ownership == :active ->
-          # A new worker may report before the old worker's DOWN is handled.
-          # Re-enter through passive so promotion restores the shared snapshot.
-          state =
-            if state.ownership == :active and state.consumer_pid != nil,
-              do: change_ownership(state, :passive, metadata),
-              else: state
-
-          state
-          |> monitor_consumer(consumer_pid)
-          |> change_ownership(:active, metadata)
-
-        state.consumer_pid != nil and consumer_pid != state.consumer_pid ->
-          # A passive report from a superseded worker must not demote the
-          # current owner.
-          state
-
-        true ->
-          state
-          |> clear_consumer_monitor()
-          |> change_ownership(:passive, metadata)
-      end
-
+  # A passive report from a superseded worker must not demote the current
+  # owner.
+  def handle_cast({:active_state, %{consumer_pid: pid} = metadata}, state) do
+    state = if state.consumer_pid in [nil, pid], do: demote(state, metadata), else: state
     {:noreply, settle(state)}
   end
 
@@ -366,9 +340,9 @@ defmodule UOF.SDK.ProducerMonitor do
      }}
   end
 
+  # The active consumer may exit without a final passive report.
   def handle_info({:DOWN, ref, :process, consumer_pid, _reason}, %{consumer_ref: ref, consumer_pid: consumer_pid} = state) do
-    state = clear_consumer_monitor(state)
-    {:noreply, state |> change_ownership(:passive, %{consumer_pid: consumer_pid}) |> settle()}
+    {:noreply, state |> demote(%{consumer_pid: consumer_pid}) |> settle()}
   end
 
   def handle_info({ref, result}, %{refresh_task: ref} = state) do
@@ -404,17 +378,19 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Control-plane ownership --------------------------------------------------
 
-  defp monitor_consumer(state, consumer_pid) do
-    state = clear_consumer_monitor(state)
-    %{state | consumer_pid: consumer_pid, consumer_ref: Process.monitor(consumer_pid)}
+  defp promote(state, consumer_pid, metadata) do
+    state = %{state | consumer_pid: consumer_pid, consumer_ref: Process.monitor(consumer_pid)}
+    change_ownership(state, :active, metadata)
   end
 
-  defp clear_consumer_monitor(%{consumer_ref: nil} = state), do: state
-
-  defp clear_consumer_monitor(state) do
-    Process.demonitor(state.consumer_ref, [:flush])
-    %{state | consumer_pid: nil, consumer_ref: nil}
+  defp demote(state, metadata) do
+    if state.consumer_ref, do: Process.demonitor(state.consumer_ref, [:flush])
+    change_ownership(%{state | consumer_pid: nil, consumer_ref: nil}, :passive, metadata)
   end
+
+  # Demotes the instance only if a consumer holds ownership.
+  defp demote_consumer(%{consumer_pid: nil} = state, _metadata), do: state
+  defp demote_consumer(state, metadata), do: demote(state, metadata)
 
   defp change_ownership(%{ownership: ownership} = state, ownership, _metadata), do: state
 

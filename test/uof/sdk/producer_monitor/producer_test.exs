@@ -134,8 +134,10 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     # A completion for another request is stale.
     assert Producer.complete_recovery(producer, 41, 2_000, 1_500) == producer
 
+    # The checkpoint advances to the last subscribed alive seen while it ran.
+    producer = Producer.observe_alive(producer, 900, true, 1_900)
     completed = Producer.complete_recovery(producer, 42, 2_000, 1_500)
-    assert %Producer{pending_recovery: nil, request: nil, last_alive_at: 2_000} = completed
+    assert %Producer{pending_recovery: nil, request: nil, last_alive_at: 2_000, checkpoint: 900} = completed
     assert Producer.status(completed, true) == :up
   end
 

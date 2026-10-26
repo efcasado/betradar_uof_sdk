@@ -143,29 +143,27 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @spec drop_request(t()) :: t()
   def drop_request(%__MODULE__{} = producer), do: %{producer | request: nil}
 
-  # The replay from the checkpoint is complete. After an interruption, the
-  # subscribed alives seen before it showed the feed continuous up to
-  # `resume_ts`, so the checkpoint advances there and the recovery stays owed.
+  # The replay from the checkpoint is complete, and the subscribed alives seen
+  # while it ran showed the feed continuous up to `resume_ts`, so the
+  # checkpoint advances there. After an interruption, the recovery stays owed
+  # and repeats from it.
   @doc false
   @spec complete_recovery(t(), integer(), integer(), integer()) :: t()
-  def complete_recovery(
-        %__MODULE__{request: %{id: request_id, interrupted: true} = request} = producer,
-        request_id,
-        now,
-        _monotonic_now
-      ) do
-    Logger.info(
-      "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} completed after an interruption; " <>
-        "repeating it"
-    )
+  def complete_recovery(%__MODULE__{request: %{id: request_id} = request} = producer, request_id, now, monotonic_now) do
+    producer = %{producer | last_alive_at: now} |> advance_checkpoint(request.resume_ts) |> drop_request()
 
-    %{producer | last_alive_at: now} |> advance_checkpoint(request.resume_ts) |> drop_request()
-  end
+    if request.interrupted do
+      Logger.info(
+        "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} completed after an interruption; " <>
+          "repeating it"
+      )
 
-  def complete_recovery(%__MODULE__{request: %{id: request_id}} = producer, request_id, now, monotonic_now) do
-    emit(producer, :completed, %{duration_ms: monotonic_now - producer.last_issued_at}, %{request_id: request_id})
-    Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} complete")
-    drop_request(%{producer | pending_recovery: nil, last_alive_at: now})
+      producer
+    else
+      emit(producer, :completed, %{duration_ms: monotonic_now - producer.last_issued_at}, %{request_id: request_id})
+      Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} complete")
+      %{producer | pending_recovery: nil}
+    end
   end
 
   def complete_recovery(%__MODULE__{} = producer, _request_id, _now, _monotonic_now), do: producer

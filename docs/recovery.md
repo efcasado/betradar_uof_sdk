@@ -139,16 +139,16 @@ see [monitor store](deployment.md#monitor-store).
 ## Control-plane ownership
 
 Only the instance that owns the Failover system subscription issues recovery requests and
-writes the snapshot. The others process their share of content. When ownership moves,
-in-flight recoveries on the demoted instance are parked, and the promoted instance reloads the
-snapshot and restores producers from it as on a [restart](#restarts): in an unchanged upstream
-session it resumes without recovery. This needs a store shared by the instances; see
+writes the snapshot. The others process their share of content and ignore system
+observations. When ownership moves, the promoted instance restores producers from the
+snapshot exactly as on a [restart](#restarts): in an unchanged upstream session it resumes
+without recovery, and a recovery the snapshot owes, including a full one, is requested once
+the producer is heard. Recoveries the demoted instance had in flight are abandoned; the
+snapshot already records that they are owed. This needs a store shared by the instances; see
 [monitor store](deployment.md#monitor-store).
-If another owner requested a full recovery while an instance was passive, promotion applies
-that persisted requirement to any recovery job the instance had parked earlier.
 If the active system consumer exits without reporting demotion, the monitor detects its exit
-and parks its recoveries. A replacement consumer's ownership report determines whether the
-instance resumes as active or stays passive.
+and demotes. A replacement consumer's ownership report determines whether the instance
+resumes as active or stays passive.
 
 ## Time controls
 

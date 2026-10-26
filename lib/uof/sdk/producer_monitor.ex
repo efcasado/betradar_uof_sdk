@@ -13,7 +13,8 @@ defmodule UOF.SDK.ProducerMonitor do
   The monitor persists one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`) per
   store, shared by a subscription's instances: the consumer tag and, per
   producer, a checkpoint and the recovery it owes. Only the active instance
-  writes it, and promotion reloads it. Recovery intent is durable before any
+  writes it. Startup and promotion restore producers from it alike; a passive
+  instance ignores system observations. Recovery intent is durable before any
   request is issued.
 
   Producer descriptions come from the UOF API, falling back to stored and then
@@ -169,14 +170,14 @@ defmodule UOF.SDK.ProducerMonitor do
 
     producers =
       Map.new(descriptions, fn description ->
-        producer = description |> new_producer(opts) |> restore_producer(snapshot)
+        producer = new_producer(description, opts)
         {producer.id, producer}
       end)
 
     state = %__MODULE__{
       producers: producers,
       snapshot: snapshot,
-      session: Session.new(snapshot.consumer_tag),
+      session: Session.new(nil),
       ownership: Keyword.get(opts, :ownership, :passive),
       handler: Keyword.get(opts, :handler),
       now_fun: Keyword.get(opts, :now_fun, &now_ms/0),
@@ -187,6 +188,8 @@ defmodule UOF.SDK.ProducerMonitor do
       producer_opts: opts,
       descriptions_refresh_ms: Keyword.get(opts, :descriptions_refresh_ms, @default_descriptions_refresh_ms)
     }
+
+    state = restore(state, snapshot)
 
     state =
       case source do
@@ -252,6 +255,15 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   @impl true
+  # A passive instance ignores system observations: the owner heals the shared
+  # feed, and promotion restores producers from the stored snapshot, which
+  # replaces anything recorded here. An observation racing demotion is not
+  # lost: the session baseline is the stored consumer tag, so a new tag is
+  # re-detected on promotion, and Betradar keeps sending subscribed=0 until a
+  # recovery is requested.
+  def handle_cast(observation, %{ownership: :passive} = state)
+      when elem(observation, 0) in [:alive, :observe_consumer_tag, :snapshot_complete], do: {:noreply, state}
+
   # An alive from an unknown producer means it was activated after the
   # descriptions were loaded; it is picked up by the next reload.
   def handle_cast({:alive, id, gen_ts, subscribed?}, state) do
@@ -264,15 +276,8 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, settle(state)}
   end
 
-  # A passive instance ignores session observations entirely: the owner heals
-  # the shared feed, and the stale baseline this leaves behind is the
-  # self-correction mechanism — on promotion (or a restart into ownership) the
-  # current consumer tag is re-observed as never-seen and triggers the reconnect
-  # recovery then, on the instance entitled to act.
   def handle_cast({:observe_consumer_tag, tag}, state) do
-    state = if owns_control?(state), do: track_consumer_tag(state, tag), else: state
-
-    {:noreply, settle(state)}
+    {:noreply, state |> track_consumer_tag(tag) |> settle()}
   end
 
   def handle_cast({:active_state, %{active_state: active_state} = metadata}, state) do
@@ -352,10 +357,10 @@ defmodule UOF.SDK.ProducerMonitor do
 
     if active? do
       state
-      |> reload_snapshot()
+      |> restore(load_snapshot(state.monitor_store))
       |> start_active_monitoring()
     else
-      state |> Map.put(:readiness_deadline_at, nil) |> park_recoveries()
+      Map.put(state, :readiness_deadline_at, nil)
     end
   end
 
@@ -434,7 +439,7 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   # A recovery request finished. A response for a job that was completed,
-  # parked, or replaced meanwhile matches no producer and is dropped.
+  # abandoned, or replaced meanwhile matches no producer and is dropped.
   def handle_info({ref, result}, state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
 
@@ -512,6 +517,15 @@ defmodule UOF.SDK.ProducerMonitor do
   # Resuming safely requires both durable eligibility and a checkpoint. The
   # current-session heartbeat and session gates live in Producer.check/4.
   defp restore_producer(producer, snapshot) do
+    producer = %{
+      producer
+      | status: :down,
+        last_alive_at: nil,
+        alive_delay: nil,
+        resuming_since: nil,
+        recovery: %{producer.recovery | job: nil}
+    }
+
     if Snapshot.resumable?(snapshot, producer.id), do: %{producer | status: :resuming}, else: producer
   end
 
@@ -565,47 +579,21 @@ defmodule UOF.SDK.ProducerMonitor do
   # ownership converges (see the supervisor comment in UOF.SDK).
   defp notify_handler(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
 
-  defp park_recoveries(state) do
-    in_flight = Enum.filter(state.producers, fn {_id, producer} -> Producer.recovery_in_flight?(producer) end)
+  # The stored snapshot is the subscription's state, possibly written by
+  # another owner while this instance was passive. Startup and promotion
+  # restore every producer from it alike: whatever this instance held in memory
+  # is either recorded there or was settled by that owner. Requests still in
+  # flight are abandoned; their responses and completions no longer match. This
+  # instance keeps the descriptions it loaded itself.
+  defp restore(state, snapshot) do
+    producers = Map.new(state.producers, fn {id, producer} -> {id, restore_producer(producer, snapshot)} end)
 
-    if in_flight == [] do
+    %{
       state
-    else
-      ids = Enum.map(in_flight, &elem(&1, 0))
-      Logger.info("UOF.SDK.ProducerMonitor: parking in-flight recoveries for producers #{inspect(ids)}")
-
-      producers =
-        Map.new(state.producers, fn {id, producer} ->
-          {id, Producer.park_recovery(producer)}
-        end)
-
-      %{state | producers: producers}
-    end
-  end
-
-  # The stored snapshot is the subscription's state, possibly written by the
-  # previous owner while this instance was passive. Producers without a
-  # recovery job are restored from it as on a restart. A retained job was
-  # recorded while passive and not written, so it is made durable now; it
-  # honours a full recovery the previous owner recorded. This instance keeps
-  # the descriptions it loaded itself.
-  defp reload_snapshot(state) do
-    snapshot = %{load_snapshot(state.monitor_store) | descriptions: state.snapshot.descriptions}
-
-    Enum.reduce(
-      state.producers,
-      %{state | snapshot: snapshot, session: Session.new(snapshot.consumer_tag)},
-      fn {id, producer}, state ->
-        if Producer.recovering?(producer) do
-          state = owe_recovery(state, id, :incremental)
-          full? = Snapshot.progress(state.snapshot, id).pending_recovery == :full
-          if full?, do: put_producer(state, Producer.repeat_recovery(producer, nil)), else: state
-        else
-          restored = restore_producer(%{producer | status: :down, last_alive_at: nil, resuming_since: nil}, snapshot)
-          put_producer(state, restored)
-        end
-      end
-    )
+      | producers: producers,
+        snapshot: %{snapshot | descriptions: state.snapshot.descriptions},
+        session: Session.new(snapshot.consumer_tag)
+    }
   end
 
   # A resumable producer must hear a current heartbeat within one normal alive
@@ -776,13 +764,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   # Instances of one subscription may share a snapshot, which the active
   # instance owns. A passive instance's copy is stale, so it changes only in
-  # memory; promotion reloads the stored one.
-  #
-  # Recovery intent from an unsubscribed alive that races demotion therefore
-  # stays in the demoted instance. The new owner still learns of it: Betradar
-  # keeps sending subscribed=0 until a recovery is requested, and a passive
-  # instance never requests one, so the producer's next alive is unsubscribed
-  # too.
+  # memory; promotion restores from the stored one.
   defp save_snapshot(%{monitor_store: {store, store_opts}} = state, snapshot) do
     if owns_control?(state), do: :ok = store.save(Snapshot.encode(snapshot), store_opts)
     %{state | snapshot: snapshot}

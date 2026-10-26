@@ -6,7 +6,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   response returns to it as a message.
 
   Events change the job (`prepare_recovery/2`, `repeat_recovery/2`,
-  `park_recovery/1`, `complete_recovery/3`). `advance/3` is the only function
+  `complete_recovery/3`). `advance/3` is the only function
   that issues requests: a pending job once the cooldown has passed and the
   producer is not silent, and a reissue of an accepted request that has run
   past `max_recovery_ms`.
@@ -223,12 +223,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def complete_recovery(%__MODULE__{}, _request_id, _now), do: :stale
 
   @doc false
-  @spec park_recovery(t()) :: t()
-  def park_recovery(%__MODULE__{} = producer) do
-    if recovering?(producer) and not recovery_pending?(producer), do: mark_recovery_pending(producer), else: producer
-  end
-
-  @doc false
   @spec recovering?(t()) :: boolean()
   def recovering?(%__MODULE__{recovery: %{job: job}}) when not is_nil(job), do: true
   def recovering?(%__MODULE__{}), do: false
@@ -322,7 +316,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def awaiting_response?(%__MODULE__{}, _ref), do: false
 
   # Only called for the job's current task: a response for a completed,
-  # parked, or replaced job no longer matches and is dropped by the monitor.
+  # abandoned, or replaced job no longer matches and is dropped by the monitor.
   #
   # A superseded request is deliberately left to finish rather than shut down:
   # by then it has usually reached Betradar, so stopping the task would not

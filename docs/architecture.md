@@ -145,8 +145,9 @@ the system subscription has one active owner.
 
 The monitor starts passive and waits for the broker's ownership report. The active owner runs
 periodic health checks, issues recovery requests, and writes the snapshot. Passive instances
-continue their content processing. Demotion parks in-flight recoveries; promotion reloads the
-snapshot, restores producers from it as a restart does, and permits pending work to resume.
+continue their content processing and ignore system observations. Promotion restores
+producers from the stored snapshot exactly as a restart does, so requests the demoted
+instance had in flight are abandoned; the snapshot already records the recoveries they owe.
 The monitor also watches the active system consumer process and demotes when it exits, because
 an exit may arrive without a final passive ownership report. A replacement consumer must
 report ownership before the monitor resumes control-plane work.
@@ -435,7 +436,7 @@ readiness or prove that handlers have completed their work.
 | `ProducerMonitor.Store` | Persistence behaviour; `Store.ETS` is the default | The monitor; a store with `child_spec/1` also runs its own process |
 
 A recovery request's response returns to the monitor as a message. A response for a job
-completed, parked, or replaced meanwhile is dropped, and the superseded request is left to
+completed, abandoned, or replaced meanwhile is dropped, and the superseded request is left to
 finish rather than shut down: it has usually reached Betradar already, and a duplicate request
 is harmless beyond quota.
 

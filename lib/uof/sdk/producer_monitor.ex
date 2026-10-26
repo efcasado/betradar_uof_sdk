@@ -267,7 +267,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state =
       case Map.fetch(state.producers, id) do
         {:ok, producer} ->
-          producer = Producer.observe_alive(producer, gen_ts, subscribed?, state.now_fun.())
+          producer = Producer.observe_alive(producer, gen_ts, subscribed?, state.now_fun.(), state.inactivity_ms)
           emit_alive(producer, subscribed?)
           put_producer(state, producer)
 

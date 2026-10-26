@@ -45,7 +45,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     refute Producer.due?(producer, 1_000, 0, 900, 0)
     assert Producer.status(producer, false) == :down
 
-    observed = Producer.observe_alive(producer, 900, true, 1_000)
+    observed = Producer.observe_alive(producer, 900, true, 1_000, 1_000)
     assert observed.last_alive_at == 1_000
     assert observed.pending_recovery == :incremental
     assert Producer.heard?(observed, 1_000, 900)
@@ -54,20 +54,22 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   end
 
   test "an unsubscribed alive owes a recovery, and a full one stays full" do
-    assert %Producer{pending_recovery: :incremental} = Producer.observe_alive(up(), 900, false, 1_000)
-    assert %Producer{pending_recovery: :full} = Producer.observe_alive(up(pending_recovery: :full), 900, false, 1_000)
+    assert %Producer{pending_recovery: :incremental} = Producer.observe_alive(up(), 900, false, 1_000, 1_000)
+
+    assert %Producer{pending_recovery: :full} =
+             Producer.observe_alive(up(pending_recovery: :full), 900, false, 1_000, 1_000)
   end
 
   test "subscribed alives advance the checkpoint only while up, and only forward" do
-    producer = Producer.observe_alive(up(), 900, true, 1_000)
+    producer = Producer.observe_alive(up(), 900, true, 1_000, 1_000)
     assert producer.checkpoint == 900
     assert producer.last_alive_at == 1_000
 
-    assert Producer.observe_alive(producer, 800, true, 1_100).checkpoint == 900
-    assert Producer.observe_alive(producer, nil, true, 1_100).checkpoint == 900
+    assert Producer.observe_alive(producer, 800, true, 1_100, 1_000).checkpoint == 900
+    assert Producer.observe_alive(producer, nil, true, 1_100, 1_000).checkpoint == 900
 
     for pending <- [:incremental, :full] do
-      assert Producer.observe_alive(up(pending_recovery: pending), 900, true, 1_000).checkpoint == nil
+      assert Producer.observe_alive(up(pending_recovery: pending), 900, true, 1_000, 1_000).checkpoint == nil
     end
   end
 
@@ -81,6 +83,36 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert %Producer{pending_recovery: :full, request: nil} = upgraded
     assert Producer.owes?(upgraded, :full)
     assert Producer.owe(upgraded, :incremental) == upgraded
+  end
+
+  test "alives generated further apart than the heartbeat interval owe a recovery" do
+    producer = Producer.observe_alive(up(checkpoint: 1_000), 2_000, true, 0, 1_000)
+    assert %Producer{checkpoint: 2_000, pending_recovery: nil} = producer
+
+    # Read without delay, but generated 1_001 ms after the previous alive.
+    gapped = Producer.observe_alive(producer, 3_001, true, 0, 1_000)
+    assert %Producer{checkpoint: 2_000, pending_recovery: :incremental} = gapped
+  end
+
+  test "the first alive after a restore is compared with the checkpoint" do
+    restored = Producer.restore(%Producer{id: 1}, %Progress{checkpoint: 500, pending_recovery: nil}, 0)
+
+    assert Producer.observe_alive(restored, 1_500, true, 0, 1_000).pending_recovery == nil
+    assert Producer.observe_alive(restored, 1_501, true, 0, 1_000).pending_recovery == :incremental
+  end
+
+  @tag :capture_log
+  test "after a completion, the next alive is compared with the last one, not an older checkpoint" do
+    completed =
+      [checkpoint: 0]
+      |> owing()
+      |> Producer.observe_alive(50_000, true, 50_000, 1_000)
+      |> in_flight()
+      |> Producer.complete_recovery(7, 50_100, 0)
+
+    # No alive arrived while the request ran, so the checkpoint did not move.
+    assert %Producer{pending_recovery: nil, checkpoint: 0} = completed
+    assert Producer.observe_alive(completed, 51_000, true, 51_000, 1_000).pending_recovery == nil
   end
 
   test "a heartbeat gap owes a recovery" do
@@ -97,7 +129,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert Producer.status(restored, false) == :down
 
     # Any alive, even one drained from backlog long after it was generated.
-    heard = Producer.observe_alive(restored, 600, true, 100_000)
+    heard = Producer.observe_alive(restored, 600, true, 100_000, 1_000)
     assert Producer.heard?(heard, 100_000, 900)
     assert Producer.status(heard, true) == :up
     assert heard.checkpoint == 600
@@ -107,8 +139,8 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   end
 
   test "an alive records how late it was read" do
-    assert %Producer{alive_delay: 250} = Producer.observe_alive(up(), 750, true, 1_000)
-    assert %Producer{alive_delay: nil} = Producer.observe_alive(up(), nil, true, 1_000)
+    assert %Producer{alive_delay: 250} = Producer.observe_alive(up(), 750, true, 1_000, 1_000)
+    assert %Producer{alive_delay: nil} = Producer.observe_alive(up(), nil, true, 1_000, 1_000)
   end
 
   test "a request is due once owed, heard, idle, and past the cooldown" do
@@ -147,7 +179,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert Producer.complete_recovery(producer, 41, 2_000, 1_500) == producer
 
     # The checkpoint advances to the last subscribed alive seen while it ran.
-    producer = Producer.observe_alive(producer, 900, true, 1_900)
+    producer = Producer.observe_alive(producer, 900, true, 1_900, 1_000)
     completed = Producer.complete_recovery(producer, 42, 2_000, 1_500)
     assert %Producer{pending_recovery: nil, request: nil, last_alive_at: 2_000, checkpoint: 900} = completed
     assert Producer.status(completed, true) == :up
@@ -180,10 +212,10 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
       [checkpoint: 100]
       |> owing()
       |> in_flight()
-      |> Producer.observe_alive(500, true, 0)
-      |> Producer.observe_alive(600, false, 0)
+      |> Producer.observe_alive(500, true, 0, 1_000)
+      |> Producer.observe_alive(600, false, 0, 1_000)
       # After the interruption, subscribed alives no longer prove continuity.
-      |> Producer.observe_alive(700, true, 0)
+      |> Producer.observe_alive(700, true, 0, 1_000)
       |> Producer.complete_recovery(7, 0, 0)
 
     assert %Producer{checkpoint: 500, pending_recovery: :incremental, request: nil} = producer

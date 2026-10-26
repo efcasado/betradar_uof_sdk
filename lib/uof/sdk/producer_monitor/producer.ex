@@ -7,12 +7,18 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   `checkpoint` and `pending_recovery` are the producer's durable progress,
   which the monitor persists after every event (`progress/1`, `restore/3`).
-  Everything else is runtime state. Events record facts (`observe_alive/4`,
+  Everything else is runtime state. Events record facts (`observe_alive/5`,
   `check/3`, `owe/2`, `drop_request/1`, `complete_recovery/4`), and its
   reported status is derived from two of them: whether it is heard, and
   whether it owes a recovery (`status/2`). A request is due once a recovery
   is owed, nothing is in flight, the producer is heard, and the cooldown since
   the last attempt has passed (`due?/5`).
+
+  Silence is judged two ways: no alive received within the heartbeat
+  interval, and consecutive alives generated further apart than it. Alives
+  read from a backlog arrive close together however far apart they were
+  generated, so only the second catches a producer that went silent while the
+  SDK was down, or while the system pipeline lagged.
 
   An unsubscribed alive or a heartbeat gap while a request is in flight
   interrupts it: its completion advances the checkpoint to the last subscribed
@@ -43,6 +49,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           checkpoint: integer() | nil,
           pending_recovery: Progress.pending_recovery(),
           last_alive_at: integer() | nil,
+          last_generated_at: integer() | nil,
           alive_delay: integer() | nil,
           restored_at: integer() | nil,
           request: request() | nil,
@@ -57,6 +64,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     :recovery_window_minutes,
     :checkpoint,
     :last_alive_at,
+    :last_generated_at,
     :alive_delay,
     :restored_at,
     :request,
@@ -85,6 +93,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       | checkpoint: progress.checkpoint,
         pending_recovery: pending_recovery,
         last_alive_at: nil,
+        last_generated_at: nil,
         alive_delay: nil,
         restored_at: now,
         request: nil
@@ -98,14 +107,24 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec observe_alive(t(), integer() | nil, boolean(), integer()) :: t()
-  def observe_alive(%__MODULE__{} = producer, gen_timestamp, subscribed?, now) do
-    observed = %{producer | last_alive_at: now, alive_delay: alive_delay(gen_timestamp, now)}
+  @spec observe_alive(t(), integer() | nil, boolean(), integer(), non_neg_integer()) :: t()
+  def observe_alive(%__MODULE__{} = producer, gen_timestamp, subscribed?, now, inactivity_ms) do
+    observed = %{
+      producer
+      | last_alive_at: now,
+        last_generated_at: latest(producer.last_generated_at, gen_timestamp),
+        alive_delay: alive_delay(gen_timestamp, now)
+    }
+
+    # The first alive after a restore is compared with the checkpoint: the last
+    # subscribed alive the stored progress accounts for.
+    previous = producer.last_generated_at || producer.checkpoint
 
     cond do
       in_flight?(producer) -> observe_alive_in_flight(observed, gen_timestamp, subscribed?)
       not subscribed? -> owe(observed, :incremental)
       recovering?(producer) -> observed
+      gap?(previous, gen_timestamp, inactivity_ms) -> owe_after_gap(observed, previous, gen_timestamp)
       true -> advance_checkpoint(observed, gen_timestamp)
     end
   end
@@ -336,6 +355,27 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     emit(producer, :interrupted, %{}, %{request_id: request.id, reason: reason})
     put_in(producer.request.interrupted, true)
   end
+
+  # Alives are generated every 10 seconds, so a longer gap between consecutive
+  # generation timestamps means the producer was silent, however promptly they
+  # are read.
+  defp gap?(previous, gen_ts, inactivity_ms) when is_integer(previous) and is_integer(gen_ts),
+    do: gen_ts - previous > inactivity_ms
+
+  defp gap?(_previous, _gen_ts, _inactivity_ms), do: false
+
+  defp owe_after_gap(%__MODULE__{} = producer, previous, gen_ts) do
+    Logger.warning(
+      "UOF.SDK.ProducerMonitor: producer #{producer.id} alives generated at #{previous} and #{gen_ts} " <>
+        "are further apart than the heartbeat interval; recovering"
+    )
+
+    owe(producer, :incremental)
+  end
+
+  defp latest(nil, timestamp), do: timestamp
+  defp latest(previous, nil), do: previous
+  defp latest(previous, timestamp), do: max(previous, timestamp)
 
   # How late the system pipeline read the alive: local receipt time minus its
   # generation timestamp, so it includes clock skew with Betradar.

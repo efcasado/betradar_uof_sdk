@@ -194,6 +194,17 @@ down without issuing recovery. All three consume AMQP directly, where unprocesse
 lost with its queue. Here the checkpoint tracks feed continuity on the topic rather than
 application processing; the recovery overlap allows for short cross-key publication delays.
 
+Silence is judged two ways. Both official SDKs flag a producer down when no system
+alive has been received within the inactivity interval (the Java SDK's
+`AliveIntervalViolation`, the .NET SDK's `IsAliveViolated`), measured by local receipt time.
+Consuming AMQP live, receipt follows generation. Reading the topic, it does not: alives drained
+from a backlog after a restart, or by a lagging system pipeline, arrive close together however
+far apart they were generated. The SDK therefore also compares consecutive alives' generation
+timestamps, and the first alive after a restart with the checkpoint. The
+[alive documentation](https://docs.sportradar.com/uof/data-and-features/messages/system/alive)
+supports this: producers send alives every 10 seconds, the timestamps inside them are what
+matters, and timestamps not about 10 seconds apart indicate a problem on Betradar's side.
+
 ### Node Isolation
 
 The source connector binds `#`, so a topic can contain recovery traffic for several

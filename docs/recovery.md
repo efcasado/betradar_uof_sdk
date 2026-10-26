@@ -52,7 +52,7 @@ Automatic recovery normally needs no application involvement. A producer owes a 
 | --- | --- |
 | It has never been synchronized | Initial synchronization, at startup or for a producer added later |
 | An `alive` with `subscribed=0` | Betradar reports the producer was down; it sends unsubscribed alives until a recovery is requested |
-| No `alive` within `inactivity_seconds` | The producer or the feed went silent |
+| No `alive` within `inactivity_seconds`, or two consecutive alives generated more than `inactivity_seconds` apart | The producer or the feed went silent. Betradar generates alives every 10 seconds; alives read from a backlog arrive close together however far apart they were generated, so their timestamps are compared too |
 | A new upstream consumer tag | The connector's session to Betradar was re-established and messages may have been lost; every producer owes a recovery |
 | A restart that cannot resume | See [restarts](#restarts) |
 
@@ -134,6 +134,9 @@ synchronized, and whether a full recovery is pending. After a restart:
   pipeline has read it, so an `alive` drained from the backlog counts; a session change or
   unsubscribed `alive` still queued behind it triggers a recovery when it is read, as during
   normal operation.
+- That first `alive` is compared with the checkpoint. One generated more than
+  `inactivity_seconds` after it means the producer went silent while the SDK was down, and
+  the producer recovers from the checkpoint instead.
 - A different consumer tag means the session broke while the SDK was down; each producer
   recovers from its checkpoint unless a full recovery is pending.
 - A producer without a synchronized checkpoint starts `:down` and recovers on its first
@@ -164,7 +167,7 @@ resumes as active or stays passive.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `inactivity_seconds` | `20` | Heartbeat timeout, also measured from a restart or promotion |
+| `inactivity_seconds` | `20` | Heartbeat timeout: the longest wait for an `alive`, also measured from a restart or promotion, and the longest gap between consecutive alives' generation timestamps |
 | `min_interval_between_recoveries` | `30` | Per-producer cooldown between recovery requests, and the retry delay after a failed one |
 | `max_recovery_time` | `600` | Wait for `snapshot_complete` before reissuing a request |
 

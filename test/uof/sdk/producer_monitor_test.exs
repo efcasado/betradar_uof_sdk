@@ -392,9 +392,11 @@ defmodule UOF.SDK.ProducerMonitorTest do
     flush_statuses()
 
     # Content lag is not tracked: only heartbeats decide health.
-    set_clock(clock, 1_000 + 5 * @inactivity)
-    alive(m, 1, 1_000 + 5 * @inactivity, true)
-    tick(m)
+    for n <- 1..5 do
+      set_clock(clock, 1_000 + n * @inactivity)
+      alive(m, 1, 1_000 + n * @inactivity, true)
+      tick(m)
+    end
 
     refute_received {:status, _producer}
     refute_received {:recover_called, _, _}
@@ -617,7 +619,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   test "manual recover goes through the full lifecycle", %{clock: clock} do
-    save_state(%{1 => @now - 60_000}, [1])
+    save_state(%{1 => @now - 5_000}, [1])
     m = start_monitor([now_fun: fn -> @now end], clock)
     alive(m, 1, @now, true)
 
@@ -635,7 +637,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   test "manual full recover ignores the checkpoint", %{clock: clock} do
-    save_state(%{1 => @now - 60_000}, [1])
+    save_state(%{1 => @now - 5_000}, [1])
     m = start_monitor([now_fun: fn -> @now end], clock)
     alive(m, 1, @now, true)
 
@@ -647,7 +649,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
   end
 
   defp start_up_with_checkpoint(clock) do
-    save_state(%{1 => @now - 60_000}, [1], "s1")
+    save_state(%{1 => @now - 5_000}, [1], "s1")
     set_clock(clock, @now)
     m = start_monitor(clock)
     alive(m, 1, @now, true, "s1")
@@ -1144,12 +1146,41 @@ defmodule UOF.SDK.ProducerMonitorTest do
     tick(m)
     assert {:ok, %ProducerStatus{status: :down, last_alive_at: nil}} = ProducerMonitor.producer(m, 1)
 
-    # A subscribed alive in the same consume session as before the restart: the
-    # session never broke, so no recovery.
-    alive(m, 1, 50_000, true, "ctag-sys")
+    # A subscribed alive in the same consume session as before the restart,
+    # generated within the heartbeat interval of the checkpoint: the session
+    # never broke and the producer never went silent, so no recovery.
+    alive(m, 1, 1_000 + @inactivity, true, "ctag-sys")
     assert_receive {:status, %ProducerStatus{status: :up, last_alive_at: 50_000}}
     refute_received {:recover_called, _, _}
-    assert checkpoint(1) == {:ok, 50_000}
+    assert checkpoint(1) == {:ok, 1_000 + @inactivity}
+  end
+
+  test "a resumed producer recovers when its first alive was generated long after the checkpoint", %{clock: clock} do
+    persist_healthy_shutdown(1_000)
+    set_clock(clock, 50_000)
+    m = start_monitor(clock)
+
+    # The producer went silent while the SDK was down. Read from the backlog,
+    # the alive arrives at once, but was generated after a gap.
+    alive(m, 1, 1_000 + @inactivity + 1, true, "ctag-sys")
+    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 0
+  end
+
+  test "alives generated further apart than the heartbeat interval recover, however promptly read", %{clock: clock} do
+    m = start_monitor(clock)
+    bring_up(m)
+    alive(m, 1, 2_000, true)
+    sync(m)
+    assert checkpoint(1) == {:ok, 2_000}
+
+    # A lagging system pipeline reads both within the heartbeat interval.
+    alive(m, 1, 2_000 + @inactivity + 1, true)
+    assert_receive {:status, %ProducerStatus{status: :recovering}}
+    assert_receive {:recover_called, "pre", opts}
+    assert opts[:after] == 0
+    assert checkpoint(1) == {:ok, 2_000}
   end
 
   test "resumed producer is up on its first alive, however late it is read", %{clock: clock} do
@@ -1435,7 +1466,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     set_clock(clock, 50_000)
     m = start_monitor(clock)
 
-    alive(m, 1, 50_000, true)
+    alive(m, 1, 5_000, true)
     sync(m)
     refute_received {:recover_called, _, _}
     assert {:ok, %ProducerStatus{status: :up}} = ProducerMonitor.producer(m, 1)

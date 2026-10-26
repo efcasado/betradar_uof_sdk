@@ -682,6 +682,31 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert incremental[:after] == @now - 60_000
   end
 
+  test "a manual full recovery upgrades an owed incremental one, replacing its request", %{clock: clock} do
+    m = start_up_with_checkpoint(clock)
+
+    alive(m, 1, @now, false, "s1")
+    assert_receive {:recover_called, "pre", incremental}
+    assert incremental[:after] == @now - 60_000
+
+    # A plain request is covered by the recovery already owed; a full one is not.
+    assert {:error, :already_recovering} = ProducerMonitor.recover(m, 1, [])
+    assert :ok = ProducerMonitor.recover(m, 1, full: true)
+    assert_receive {:recover_called, "pre", full}
+    refute Keyword.has_key?(full, :after)
+    assert Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
+    assert {:error, :already_recovering} = ProducerMonitor.recover(m, 1, full: true)
+
+    # The replaced incremental request's completion does not satisfy it.
+    ProducerMonitor.snapshot_complete(m, 1, incremental[:request_id])
+    sync(m)
+    assert Snapshot.progress(stored_snapshot(), 1).pending_recovery == :full
+
+    ProducerMonitor.snapshot_complete(m, 1, full[:request_id])
+    assert_receive {:status, %ProducerStatus{status: :up}}
+    assert Snapshot.progress(stored_snapshot(), 1).pending_recovery == nil
+  end
+
   test "a monitor restart retains manual full recovery intent", %{clock: clock} do
     m = start_up_with_checkpoint(clock)
 

@@ -195,7 +195,7 @@ UOF.SDK.recover(1, full: true)
 | Result | Meaning |
 | --- | --- |
 | `:ok` | The recovery is requested, or recorded to be requested once the producer is heard and the cooldown allows |
-| `{:error, :already_recovering}` | The producer already owes a recovery: it is `:down` or `:recovering` |
+| `{:error, :already_recovering}` | The producer already owes a recovery that covers this one: any recovery for a plain request, a full one for `full: true` |
 | `{:error, :passive}` | This instance does not own the control plane; call it on the active instance |
 | `{:error, :unknown_producer}` | No such producer in the loaded descriptions |
 
@@ -209,9 +209,10 @@ own.
 producer, not the messages since a point in time. Use it when your application's own state no
 longer matches the feed and you need to rebuild it from current odds, for example after
 restoring your database from an older backup or after fixing a handler bug that corrupted
-stored odds. The full request is repeated as full if it is interrupted by a consume-session
-change or monitor restart; it is not converted to an incremental request from an older
-checkpoint.
+stored odds. If the producer already owes an incremental recovery, `full: true` upgrades it,
+abandoning any incremental request in flight. The full request is repeated as full if it is
+interrupted by a consume-session change or monitor restart; it is not converted to an
+incremental request from an older checkpoint.
 
 Betradar describes this as a recovery of odds; for the settlements, cancellations, and
 rollbacks of specific events, use [stateful message recovery](#recovering-a-single-event).

@@ -134,6 +134,12 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   """
   @spec owe(t(), :incremental | :full) :: t()
   def owe(%__MODULE__{pending_recovery: :full} = producer, _kind), do: producer
+
+  # An incremental request in flight cannot satisfy a full recovery: its
+  # completion would clear it. Abandoning it reissues the recovery as full.
+  def owe(%__MODULE__{pending_recovery: :incremental} = producer, :full),
+    do: %{drop_request(producer) | pending_recovery: :full}
+
   def owe(%__MODULE__{} = producer, kind), do: %{producer | pending_recovery: kind}
 
   @doc """
@@ -171,6 +177,14 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @doc false
   @spec recovering?(t()) :: boolean()
   def recovering?(%__MODULE__{pending_recovery: pending_recovery}), do: not is_nil(pending_recovery)
+
+  @doc """
+  Whether the recovery the producer owes already covers one of `kind`: any
+  owed recovery covers an incremental one, and only a full one a full one.
+  """
+  @spec owes?(t(), :incremental | :full) :: boolean()
+  def owes?(%__MODULE__{pending_recovery: owed}, :incremental), do: not is_nil(owed)
+  def owes?(%__MODULE__{pending_recovery: owed}, :full), do: owed == :full
 
   @doc """
   The lifecycle status reported to applications: `:down` while the producer

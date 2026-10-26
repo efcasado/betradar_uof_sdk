@@ -114,10 +114,11 @@ defmodule UOF.SDK.ProducerMonitor do
   reissues if it goes missing. The recovery requirement is recorded
   immediately; its HTTP request waits until the producer is heard and the
   cooldown has passed.
-  Pass `full: true` to ignore the checkpoint and request a full snapshot.
-  Refused while the producer already owes a recovery, and with
-  `{:error, :passive}` while this instance does not own the system
-  subscription (see "Control-plane ownership").
+  Pass `full: true` to ignore the checkpoint and request a full snapshot; it
+  upgrades an incremental recovery the producer already owes, replacing any
+  request in flight. Refused while the recovery the producer owes already
+  covers the one requested, and with `{:error, :passive}` while this instance
+  does not own the system subscription (see "Control-plane ownership").
   """
   @spec recover(GenServer.server(), integer(), keyword()) ::
           :ok | {:error, :already_recovering | :passive | :unknown_producer}
@@ -231,15 +232,16 @@ defmodule UOF.SDK.ProducerMonitor do
         {:reply, {:error, :unknown_producer}, state}
 
       {:ok, producer} ->
+        kind = if opts[:full], do: :full, else: :incremental
+
         cond do
           not owns_control?(state) ->
             {:reply, {:error, :passive}, state}
 
-          Producer.recovering?(producer) ->
+          Producer.owes?(producer, kind) ->
             {:reply, {:error, :already_recovering}, state}
 
           true ->
-            kind = if opts[:full], do: :full, else: :incremental
             {:reply, :ok, state |> put_producer(Producer.owe(producer, kind)) |> settle()}
         end
     end

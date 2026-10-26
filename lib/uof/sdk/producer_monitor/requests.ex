@@ -3,8 +3,10 @@ defmodule UOF.SDK.ProducerMonitor.Requests do
   Sends recovery requests to the UOF API for the producer monitor.
 
   Holds the recovery settings, the request-id sequence, and the monotonic
-  clock that cooldowns, stalls, and durations are measured with. Decides
-  nothing itself: `UOF.SDK.ProducerMonitor.Producer` says when a request is
+  clock that cooldowns, stalls, and durations are measured with. Each request
+  runs in a task linked to the monitor, whose result returns to it as
+  `{:recovery_response, producer_id, request_id, result}`. Decides nothing
+  itself: `UOF.SDK.ProducerMonitor.Producer` says when a request is
   due and where it replays from. Each attempt replays from 60 seconds before
   that timestamp, bounded by the current recovery window with a 10-minute
   margin.
@@ -61,9 +63,9 @@ defmodule UOF.SDK.ProducerMonitor.Requests do
   end
 
   @doc false
-  @spec handle_response(t(), Producer.t(), :ok | {:error, term()}) :: Producer.t()
-  def handle_response(%__MODULE__{} = requests, %Producer{} = producer, result) do
-    Producer.handle_response(producer, result, requests.monotonic_fun.(), requests.min_interval_ms)
+  @spec handle_response(t(), Producer.t(), integer(), :ok | {:error, term()}) :: Producer.t()
+  def handle_response(%__MODULE__{} = requests, %Producer{} = producer, request_id, result) do
+    Producer.handle_response(producer, request_id, result, requests.monotonic_fun.(), requests.min_interval_ms)
   end
 
   @doc false
@@ -73,8 +75,9 @@ defmodule UOF.SDK.ProducerMonitor.Requests do
   end
 
   # The request runs in a task linked to the monitor, so a slow API cannot
-  # block it, while an exception still crashes it. The response returns to the
-  # monitor as a message.
+  # block it, while an exception still crashes it. The response carries the
+  # producer and request it answers, so the monitor routes it without tracking
+  # tasks.
   #
   # A superseded request is deliberately left to finish rather than shut down:
   # by then it has usually reached Betradar, so stopping the task would not
@@ -84,11 +87,11 @@ defmodule UOF.SDK.ProducerMonitor.Requests do
     request_id = requests.next_request_id
     opts = build_opts(after_ts, request_id, requests.node_id)
     recover_fun = requests.recover_fun
-    product = producer.product
-    task = Task.async(fn -> recover(recover_fun, product, opts) end)
+    %Producer{id: id, product: product} = producer
+    Task.async(fn -> {:recovery_response, id, request_id, recover(recover_fun, product, opts)} end)
 
     {%{requests | next_request_id: next_request_id(request_id)},
-     Producer.start_request(producer, request_id, after_ts, task.ref, monotonic_now)}
+     Producer.start_request(producer, request_id, after_ts, monotonic_now)}
   end
 
   # A 2xx acknowledgement can still carry a non-ACCEPTED response code; no

@@ -13,8 +13,8 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   # A request started at monotonic time 0, accepted unless still `:awaiting`
   # its HTTP response.
   defp in_flight(producer, request_id \\ 7, response \\ :accepted) do
-    producer = Producer.start_request(producer, request_id, 500, make_ref(), 0)
-    if response == :accepted, do: put_in(producer.request.task, nil), else: producer
+    producer = Producer.start_request(producer, request_id, 500, 0)
+    if response == :accepted, do: put_in(producer.request.accepted, true), else: producer
   end
 
   test "restore resumes only a producer that owes no recovery and has a checkpoint" do
@@ -133,15 +133,15 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
   @tag :capture_log
   test "an accepted request completes on its own request id" do
-    ref = make_ref()
-    producer = [checkpoint: 500] |> owing() |> Producer.start_request(42, 500, ref, 1_000)
+    producer = [checkpoint: 500] |> owing() |> Producer.start_request(42, 500, 1_000)
 
-    assert %{id: 42, after_ts: 500, task: ^ref} = producer.request
+    assert %{id: 42, after_ts: 500, accepted: false} = producer.request
     assert producer.last_issued_at == 1_000
-    assert Producer.awaiting_response?(producer, ref)
 
-    producer = Producer.handle_response(producer, :ok, 1_200, 30_000)
-    refute Producer.awaiting_response?(producer, ref)
+    # A response for another request is stale.
+    assert Producer.handle_response(producer, 41, :ok, 1_200, 30_000) == producer
+    producer = Producer.handle_response(producer, 42, :ok, 1_200, 30_000)
+    assert producer.request.accepted
 
     # A completion for another request is stale.
     assert Producer.complete_recovery(producer, 41, 2_000, 1_500) == producer
@@ -155,8 +155,8 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
   @tag :capture_log
   test "a failed request is retried after a full cooldown from the failure" do
-    producer = Producer.start_request(owing(), 42, nil, make_ref(), 0)
-    failed = Producer.handle_response(producer, {:error, "boom"}, 5_000, 1_000)
+    producer = Producer.start_request(owing(), 42, nil, 0)
+    failed = Producer.handle_response(producer, 42, {:error, "boom"}, 5_000, 1_000)
 
     assert %Producer{request: nil, last_issued_at: 5_000, pending_recovery: :incremental} = failed
     refute Producer.due?(failed, 0, 5_999, 10_000, 1_000)

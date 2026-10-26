@@ -62,7 +62,7 @@ defmodule UOF.SDK.ProducerMonitor.RequestsTest do
     # Each stall reissues the recovery with the next request id.
     {_requests, _producer, ids} =
       Enum.reduce(1..3, {requests, producer, [producer.request.id]}, fn _, {requests, producer, ids} ->
-        producer = Requests.handle_response(requests, producer, :ok)
+        producer = Requests.handle_response(requests, producer, producer.request.id, :ok)
         {requests, producer} = Requests.advance(requests, producer, 0, 1_000)
         {requests, producer, ids ++ [producer.request.id]}
       end)
@@ -98,7 +98,7 @@ defmodule UOF.SDK.ProducerMonitor.RequestsTest do
     {requests, producer} = Requests.advance(requests, producer, @now, 1_000)
     assert_receive {:recover_called, nil, first}
     assert first[:after] == @now - 50 * 60_000
-    producer = Requests.handle_response(requests, producer, :ok)
+    producer = Requests.handle_response(requests, producer, producer.request.id, :ok)
     assert_receive {:initiated, %{recovery_from: first_after}}
     assert first_after == first[:after]
 
@@ -110,7 +110,7 @@ defmodule UOF.SDK.ProducerMonitor.RequestsTest do
 
     assert_receive {:recover_called, nil, second}
     assert second[:after] == later - 50 * 60_000
-    Requests.handle_response(requests, producer, :ok)
+    Requests.handle_response(requests, producer, producer.request.id, :ok)
     assert_receive {:initiated, %{recovery_from: second_after}}
     assert second_after == second[:after]
   end
@@ -124,7 +124,7 @@ defmodule UOF.SDK.ProducerMonitor.RequestsTest do
     assert_receive {:recover_called, nil, first}
     assert first[:after] == @now - 50 * 60_000
 
-    producer = Requests.handle_response(requests, producer, {:error, :unavailable})
+    producer = Requests.handle_response(requests, producer, producer.request.id, {:error, :unavailable})
     later = @now + 20 * 60_000
     Requests.advance(requests, %{producer | last_alive_at: later}, later, 1_000)
 

@@ -365,17 +365,11 @@ defmodule UOF.SDK.ProducerMonitor do
   end
 
   # A recovery request finished. A response for a request that was completed,
-  # abandoned, or replaced meanwhile matches no producer and is dropped.
-  def handle_info({ref, result}, state) when is_reference(ref) do
+  # abandoned, or replaced meanwhile no longer matches and is dropped.
+  def handle_info({ref, {:recovery_response, id, request_id, result}}, state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
-
-    state =
-      case Enum.find(state.producers, fn {_id, producer} -> Producer.awaiting_response?(producer, ref) end) do
-        {_id, producer} -> put_producer(state, Requests.handle_response(state.requests, producer, result))
-        nil -> state
-      end
-
-    {:noreply, settle(state)}
+    respond = &Requests.handle_response(state.requests, &1, request_id, result)
+    {:noreply, state |> update_producer(id, respond) |> settle()}
   end
 
   ## Control-plane ownership --------------------------------------------------

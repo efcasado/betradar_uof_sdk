@@ -24,13 +24,13 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   require Logger
 
-  # `after_ts` is the value sent to the API. `resume_ts` is the last subscribed
-  # alive seen while the request was in flight and not yet interrupted. `task`
-  # is set until the HTTP response arrives.
+  # `after_ts` is the value sent to the API, and `accepted` whether the API
+  # has accepted the request. `resume_ts` is the last subscribed alive seen
+  # while the request was in flight and not yet interrupted.
   @type request :: %{
           id: integer(),
           after_ts: integer() | nil,
-          task: reference() | nil,
+          accepted: boolean(),
           interrupted: boolean(),
           resume_ts: integer() | nil
         }
@@ -233,9 +233,9 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def replay_from(%__MODULE__{checkpoint: checkpoint}), do: checkpoint
 
   @doc false
-  @spec start_request(t(), integer(), integer() | nil, reference(), integer()) :: t()
-  def start_request(%__MODULE__{} = producer, request_id, after_ts, task, monotonic_now) do
-    request = %{id: request_id, after_ts: after_ts, task: task, interrupted: false, resume_ts: nil}
+  @spec start_request(t(), integer(), integer() | nil, integer()) :: t()
+  def start_request(%__MODULE__{} = producer, request_id, after_ts, monotonic_now) do
+    request = %{id: request_id, after_ts: after_ts, accepted: false, interrupted: false, resume_ts: nil}
     %{producer | request: request, last_issued_at: monotonic_now}
   end
 
@@ -245,7 +245,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   HTTP response has not arrived yet is left alone.
   """
   @spec drop_stalled_request(t(), integer(), pos_integer()) :: t()
-  def drop_stalled_request(%__MODULE__{request: %{task: nil} = request} = producer, monotonic_now, max_recovery_ms) do
+  def drop_stalled_request(%__MODULE__{request: %{accepted: true} = request} = producer, monotonic_now, max_recovery_ms) do
     if elapsed_since_issue(producer, monotonic_now) > max_recovery_ms do
       Logger.warning(
         "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request.id} stalled: " <>
@@ -261,18 +261,12 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   def drop_stalled_request(%__MODULE__{} = producer, _monotonic_now, _max_recovery_ms), do: producer
 
+  # A response for a completed, abandoned, or replaced request no longer
+  # matches the request in flight and is dropped. A failed request is retried
+  # `retry_in_ms` after the failure, however long it took.
   @doc false
-  @spec awaiting_response?(t(), reference()) :: boolean()
-  def awaiting_response?(%__MODULE__{request: %{task: ref}}, ref) when is_reference(ref), do: true
-  def awaiting_response?(%__MODULE__{}, _ref), do: false
-
-  # Only called for the current request's task: a response for a completed,
-  # abandoned, or replaced request no longer matches and is dropped by the
-  # monitor. A failed request is retried `retry_in_ms` after the failure,
-  # however long it took.
-  @doc false
-  @spec handle_response(t(), :ok | {:error, term()}, integer(), non_neg_integer()) :: t()
-  def handle_response(%__MODULE__{request: request} = producer, :ok, _monotonic_now, _retry_in_ms) do
+  @spec handle_response(t(), integer(), :ok | {:error, term()}, integer(), non_neg_integer()) :: t()
+  def handle_response(%__MODULE__{request: %{id: request_id} = request} = producer, request_id, :ok, _now, _retry) do
     emit(producer, :initiated, %{}, %{request_id: request.id, recovery_from: request.after_ts})
 
     Logger.info(
@@ -280,10 +274,16 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
         "request_id=#{request.id} after=#{inspect(request.after_ts)}"
     )
 
-    put_in(producer.request.task, nil)
+    put_in(producer.request.accepted, true)
   end
 
-  def handle_response(%__MODULE__{request: request} = producer, {:error, reason}, monotonic_now, retry_in_ms) do
+  def handle_response(
+        %__MODULE__{request: %{id: request_id} = request} = producer,
+        request_id,
+        {:error, reason},
+        monotonic_now,
+        retry_in_ms
+      ) do
     emit(producer, :failed, %{}, %{request_id: request.id, reason: reason, retry_in_ms: retry_in_ms})
 
     Logger.warning(
@@ -292,6 +292,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
     %{producer | request: nil, last_issued_at: monotonic_now}
   end
+
+  def handle_response(%__MODULE__{} = producer, _request_id, _result, _monotonic_now, _retry_in_ms), do: producer
 
   defp elapsed_since_issue(%__MODULE__{last_issued_at: nil}, _monotonic_now), do: :infinity
   defp elapsed_since_issue(%__MODULE__{last_issued_at: last}, monotonic_now), do: monotonic_now - last

@@ -7,8 +7,8 @@ defmodule UOF.SDK.ProducerMonitor do
   broker's ownership reports for the system subscription, and manual requests.
   Events only record facts on the producers
   (`UOF.SDK.ProducerMonitor.Producer`). After every event and on every tick,
-  the monitor persists their durable progress, issues what is due through
-  `UOF.SDK.ProducerMonitor.Producer.advance/3`, and publishes status changes.
+  the monitor persists their durable progress, sends what is due through
+  `UOF.SDK.ProducerMonitor.Requests.advance/4`, and publishes status changes.
   Every request is therefore issued only while this instance owns the system
   subscription, only for a producer heard in a session already checked, and
   only once its recovery intent is durable.
@@ -32,6 +32,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   alias UOF.SDK.ProducerMonitor.Descriptions
   alias UOF.SDK.ProducerMonitor.Producer
+  alias UOF.SDK.ProducerMonitor.Requests
   alias UOF.SDK.ProducerMonitor.Session
   alias UOF.SDK.ProducerMonitor.Snapshot
   alias UOF.SDK.ProducerStatus
@@ -46,6 +47,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @type state :: %__MODULE__{
           producers: %{optional(integer()) => Producer.t()},
+          requests: Requests.t(),
           snapshot: Snapshot.t(),
           session: Session.t(),
           ownership: ownership(),
@@ -66,6 +68,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   @enforce_keys [
     :producers,
+    :requests,
     :snapshot,
     :session,
     :ownership,
@@ -167,12 +170,13 @@ defmodule UOF.SDK.ProducerMonitor do
 
     producers =
       Map.new(descriptions, fn description ->
-        producer = new_producer(description, opts)
+        producer = new_producer(description)
         {producer.id, producer}
       end)
 
     state = %__MODULE__{
       producers: producers,
+      requests: Requests.new(opts),
       snapshot: snapshot,
       session: Session.new(nil),
       ownership: Keyword.get(opts, :ownership, :passive),
@@ -281,7 +285,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def handle_cast({:snapshot_complete, id, request_id}, state) do
     now = state.now_fun.()
-    {:noreply, state |> update_producer(id, &Producer.complete_recovery(&1, request_id, now)) |> settle()}
+    {:noreply, state |> update_producer(id, &Requests.complete(state.requests, &1, request_id, now)) |> settle()}
   end
 
   def handle_cast({:active_state, %{active_state: active_state} = metadata}, state) do
@@ -391,7 +395,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
     state =
       case Enum.find(state.producers, fn {_id, producer} -> Producer.awaiting_response?(producer, ref) end) do
-        {_id, producer} -> put_producer(state, Producer.handle_response(producer, result))
+        {_id, producer} -> put_producer(state, Requests.handle_response(state.requests, producer, result))
         nil -> state
       end
 
@@ -496,16 +500,17 @@ defmodule UOF.SDK.ProducerMonitor do
     save_snapshot(state, %{state.snapshot | consumer_tag: state.session.persisted, producers: producers})
   end
 
-  # The only place recovery requests are issued, and only while this instance
-  # owns the control plane. Producer.advance/3 issues only for a heard
-  # producer, and every alive's consumer tag is checked before the alive is
-  # applied, so no request precedes the check of its session.
+  # The only place recovery requests are sent, and only while this instance
+  # owns the control plane. A request is due only for a heard producer, and
+  # every alive's consumer tag is checked before the alive is applied, so no
+  # request precedes the check of its session.
   defp reconcile(state) do
     if owns_control?(state) do
       now = state.now_fun.()
 
       Enum.reduce(state.producers, state, fn {_id, producer}, state ->
-        put_producer(state, Producer.advance(producer, now, state.inactivity_ms))
+        {requests, producer} = Requests.advance(state.requests, producer, now, state.inactivity_ms)
+        put_producer(%{state | requests: requests}, producer)
       end)
     else
       state
@@ -535,9 +540,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
   ## Producer descriptions ----------------------------------------------------
 
-  defp new_producer(description, opts) do
-    Producer |> struct(description) |> Producer.configure_recovery(opts)
-  end
+  defp new_producer(description), do: struct(Producer, description)
 
   # Reloaded descriptions update known producers and add new ones. A producer
   # added at runtime starts :down and recovers on its first alive. Producers no
@@ -547,7 +550,7 @@ defmodule UOF.SDK.ProducerMonitor do
       Enum.reduce(descriptions, state.producers, fn description, producers ->
         case Map.fetch(producers, description.id) do
           {:ok, producer} -> Map.put(producers, description.id, struct(producer, description))
-          :error -> Map.put(producers, description.id, new_producer(description, state.producer_opts))
+          :error -> Map.put(producers, description.id, new_producer(description))
         end
       end)
 

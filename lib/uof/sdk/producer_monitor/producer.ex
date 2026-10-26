@@ -1,58 +1,38 @@
 defmodule UOF.SDK.ProducerMonitor.Producer do
   @moduledoc """
   State machine for one Betradar producer: health observations, the recovery
-  it owes, the request in flight, and the cooldown. Its functions run in the
-  monitor process; each HTTP request runs in a task linked to the monitor,
-  whose response returns to it as a message.
+  it owes, and the request in flight. Its functions take the time as
+  arguments and perform no I/O; `UOF.SDK.ProducerMonitor.Requests` holds the
+  recovery settings and the clock, and sends the requests.
 
   `checkpoint` and `pending_recovery` are the producer's durable progress,
   which the monitor persists after every event (`progress/1`, `restore/3`).
   Everything else is runtime state. Events record facts (`observe_alive/4`,
-  `check/3`, `owe/2`, `drop_request/1`, `complete_recovery/3`), and its
+  `check/3`, `owe/2`, `drop_request/1`, `complete_recovery/4`), and its
   reported status is derived from two of them: whether it is heard, and
-  whether it owes a recovery (`status/2`). `advance/3` is the only
-  function that issues requests: once a recovery is owed, nothing is in
-  flight, the producer is heard, and the cooldown since the last attempt has
-  passed.
+  whether it owes a recovery (`status/2`). A request is due once a recovery
+  is owed, nothing is in flight, the producer is heard, and the cooldown since
+  the last attempt has passed (`due?/5`).
 
   An unsubscribed alive or a heartbeat gap while a request is in flight
   interrupts it: its completion advances the checkpoint to the last subscribed
   alive seen before, and the recovery is repeated from there instead of
-  marking the producer `:up`. Each attempt replays from 60 seconds before the
-  checkpoint, bounded by the current recovery window with a 10-minute margin.
+  marking the producer `:up`.
   """
 
-  alias UOF.Schemas.Common.Response
   alias UOF.SDK.ProducerMonitor.Snapshot.Progress
 
   require Logger
 
-  @default_min_interval_ms 30_000
-  @default_max_recovery_ms 10 * 60_000
-  @max_request_id 1_000_000
-  @recovery_overlap_ms 60_000
-  @recovery_window_margin_ms 10 * 60_000
-
   # `after_ts` is the value sent to the API. `resume_ts` is the last subscribed
-  # alive seen while the request was in flight and not yet interrupted.
+  # alive seen while the request was in flight and not yet interrupted. `task`
+  # is set until the HTTP response arrives.
   @type request :: %{
           id: integer(),
           after_ts: integer() | nil,
           task: reference() | nil,
           interrupted: boolean(),
           resume_ts: integer() | nil
-        }
-
-  @type recovery_state :: %{
-          request: request() | nil,
-          last_issued_at: integer() | nil,
-          recover_fun: (term(), keyword() -> term()),
-          next_request_id: pos_integer(),
-          monotonic_fun: (-> integer()),
-          now_fun: (-> integer()),
-          node_id: integer() | nil,
-          min_interval_ms: non_neg_integer(),
-          max_recovery_ms: pos_integer()
         }
 
   @type t :: %__MODULE__{
@@ -65,7 +45,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           last_alive_at: integer() | nil,
           alive_delay: integer() | nil,
           restored_at: integer() | nil,
-          recovery: recovery_state() | nil
+          request: request() | nil,
+          last_issued_at: integer() | nil
         }
 
   # A producer with no saved progress owes a recovery.
@@ -78,27 +59,10 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     :last_alive_at,
     :alive_delay,
     :restored_at,
-    :recovery,
+    :request,
+    :last_issued_at,
     pending_recovery: :incremental
   ]
-
-  @doc false
-  @spec configure_recovery(t(), keyword()) :: t()
-  def configure_recovery(%__MODULE__{} = producer, opts) do
-    recovery = %{
-      request: nil,
-      last_issued_at: nil,
-      recover_fun: Keyword.get(opts, :recover_fun, &UOF.API.Recovery.recover/2),
-      next_request_id: Keyword.get_lazy(opts, :request_id_start, fn -> :rand.uniform(@max_request_id) end),
-      monotonic_fun: Keyword.get(opts, :monotonic_fun, &monotonic_ms/0),
-      now_fun: Keyword.get(opts, :now_fun, fn -> System.system_time(:millisecond) end),
-      node_id: Keyword.get(opts, :node_id),
-      min_interval_ms: Keyword.get(opts, :min_interval_ms, @default_min_interval_ms),
-      max_recovery_ms: Keyword.get(opts, :max_recovery_ms, @default_max_recovery_ms)
-    }
-
-    %{producer | recovery: recovery}
-  end
 
   @doc """
   Restore durable progress, discarding runtime state, as at startup.
@@ -123,7 +87,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
         last_alive_at: nil,
         alive_delay: nil,
         restored_at: now,
-        recovery: %{producer.recovery | request: nil}
+        request: nil
     }
   end
 
@@ -139,7 +103,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     observed = %{producer | last_alive_at: now, alive_delay: alive_delay(gen_timestamp, now)}
 
     cond do
-      recovery_in_flight?(producer) -> observe_alive_in_flight(observed, gen_timestamp, subscribed?)
+      in_flight?(producer) -> observe_alive_in_flight(observed, gen_timestamp, subscribed?)
       not subscribed? -> owe(observed, :incremental)
       recovering?(producer) -> observed
       true -> advance_checkpoint(observed, gen_timestamp)
@@ -150,8 +114,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @spec check(t(), integer(), non_neg_integer()) :: t()
   def check(%__MODULE__{} = producer, now, inactivity_ms) do
     cond do
-      recovery_in_flight?(producer) and not producer.recovery.request.interrupted and
-          silent?(producer, now, inactivity_ms) ->
+      in_flight?(producer) and not producer.request.interrupted and silent?(producer, now, inactivity_ms) ->
         interrupt(producer, :alive_timeout)
 
       recovering?(producer) ->
@@ -174,21 +137,22 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def owe(%__MODULE__{} = producer, kind), do: %{producer | pending_recovery: kind}
 
   @doc """
-  Abandon the request in flight, if any. The recovery stays owed, and
-  `advance/3` issues it again.
+  Abandon the request in flight, if any. The recovery stays owed, and is
+  issued again once it is due.
   """
   @spec drop_request(t()) :: t()
-  def drop_request(%__MODULE__{} = producer), do: put_in(producer.recovery.request, nil)
+  def drop_request(%__MODULE__{} = producer), do: %{producer | request: nil}
 
   # The replay from the checkpoint is complete. After an interruption, the
   # subscribed alives seen before it showed the feed continuous up to
   # `resume_ts`, so the checkpoint advances there and the recovery stays owed.
   @doc false
-  @spec complete_recovery(t(), integer(), integer()) :: t()
+  @spec complete_recovery(t(), integer(), integer(), integer()) :: t()
   def complete_recovery(
-        %__MODULE__{recovery: %{request: %{id: request_id, interrupted: true} = request}} = producer,
+        %__MODULE__{request: %{id: request_id, interrupted: true} = request} = producer,
         request_id,
-        now
+        now,
+        _monotonic_now
       ) do
     Logger.info(
       "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} completed after an interruption; " <>
@@ -198,16 +162,13 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     %{producer | last_alive_at: now} |> advance_checkpoint(request.resume_ts) |> drop_request()
   end
 
-  def complete_recovery(%__MODULE__{recovery: %{request: %{id: request_id}} = recovery} = producer, request_id, now) do
-    emit(producer, :completed, %{duration_ms: recovery.monotonic_fun.() - recovery.last_issued_at}, %{
-      request_id: request_id
-    })
-
+  def complete_recovery(%__MODULE__{request: %{id: request_id}} = producer, request_id, now, monotonic_now) do
+    emit(producer, :completed, %{duration_ms: monotonic_now - producer.last_issued_at}, %{request_id: request_id})
     Logger.info("UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request_id} complete")
     drop_request(%{producer | pending_recovery: nil, last_alive_at: now})
   end
 
-  def complete_recovery(%__MODULE__{} = producer, _request_id, _now), do: producer
+  def complete_recovery(%__MODULE__{} = producer, _request_id, _now, _monotonic_now), do: producer
 
   @doc false
   @spec recovering?(t()) :: boolean()
@@ -240,27 +201,43 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   defp silent?(%__MODULE__{last_alive_at: timestamp}, now, ms), do: now - timestamp > ms
 
   @doc """
-  Issue the producer's recovery request if it is due.
-
-  Called by the monitor only while it may issue. An accepted request without
-  `snapshot_complete` for longer than `max_recovery_ms` is dropped first, so
-  it is reissued like any owed recovery. A recovery is due once no request is
-  in flight, the producer is heard, and the cooldown since the last attempt
-  has passed.
+  Whether a request is due: a recovery is owed, nothing is in flight, the
+  producer is heard, and `min_interval_ms` has passed since the last attempt.
   """
-  @spec advance(t(), integer(), non_neg_integer()) :: t()
-  def advance(%__MODULE__{} = producer, now, inactivity_ms) do
-    producer = drop_stalled_request(producer)
+  @spec due?(t(), integer(), integer(), non_neg_integer(), non_neg_integer()) :: boolean()
+  def due?(%__MODULE__{pending_recovery: nil}, _now, _monotonic_now, _inactivity_ms, _min_interval_ms), do: false
 
-    if due?(producer, now, inactivity_ms), do: issue_recovery(producer), else: producer
+  def due?(%__MODULE__{} = producer, now, monotonic_now, inactivity_ms, min_interval_ms) do
+    is_nil(producer.request) and heard?(producer, now, inactivity_ms) and
+      elapsed_since_issue(producer, monotonic_now) >= min_interval_ms
   end
 
-  # A request whose HTTP response has not arrived yet is left alone.
-  defp drop_stalled_request(%__MODULE__{recovery: %{request: %{task: nil} = request} = recovery} = producer) do
-    if elapsed_since_issue(recovery) > recovery.max_recovery_ms do
+  @doc """
+  The timestamp the next request replays from: the checkpoint, or `nil` for a
+  full recovery, or one without a checkpoint.
+  """
+  @spec replay_from(t()) :: integer() | nil
+  def replay_from(%__MODULE__{pending_recovery: :full}), do: nil
+  def replay_from(%__MODULE__{checkpoint: checkpoint}), do: checkpoint
+
+  @doc false
+  @spec start_request(t(), integer(), integer() | nil, reference(), integer()) :: t()
+  def start_request(%__MODULE__{} = producer, request_id, after_ts, task, monotonic_now) do
+    request = %{id: request_id, after_ts: after_ts, task: task, interrupted: false, resume_ts: nil}
+    %{producer | request: request, last_issued_at: monotonic_now}
+  end
+
+  @doc """
+  Drop an accepted request without `snapshot_complete` for longer than
+  `max_recovery_ms`, so it is reissued like any owed recovery. A request whose
+  HTTP response has not arrived yet is left alone.
+  """
+  @spec drop_stalled_request(t(), integer(), pos_integer()) :: t()
+  def drop_stalled_request(%__MODULE__{request: %{task: nil} = request} = producer, monotonic_now, max_recovery_ms) do
+    if elapsed_since_issue(producer, monotonic_now) > max_recovery_ms do
       Logger.warning(
         "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request.id} stalled: " <>
-          "no snapshot_complete within #{recovery.max_recovery_ms}ms; reissuing"
+          "no snapshot_complete within #{max_recovery_ms}ms; reissuing"
       )
 
       emit(producer, :stalled, %{}, %{request_id: request.id})
@@ -270,148 +247,42 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     end
   end
 
-  defp drop_stalled_request(%__MODULE__{} = producer), do: producer
-
-  defp due?(%__MODULE__{pending_recovery: nil}, _now, _inactivity_ms), do: false
-
-  defp due?(%__MODULE__{recovery: recovery} = producer, now, inactivity_ms) do
-    is_nil(recovery.request) and heard?(producer, now, inactivity_ms) and
-      elapsed_since_issue(recovery) >= recovery.min_interval_ms
-  end
-
-  defp elapsed_since_issue(%{last_issued_at: nil}), do: :infinity
-  defp elapsed_since_issue(%{last_issued_at: last} = recovery), do: recovery.monotonic_fun.() - last
-
-  # A full recovery, or one without a checkpoint, omits `after`.
-  defp issue_recovery(%__MODULE__{recovery: recovery} = producer) do
-    from = if producer.pending_recovery == :full, do: nil, else: producer.checkpoint
-    after_ts = recovery_after(from, producer.recovery_window_minutes, recovery.now_fun.())
-    request_id = recovery.next_request_id
-    opts = build_opts(after_ts, request_id, recovery.node_id)
-
-    # The request runs in a task linked to the monitor, so a slow API cannot
-    # block it, while an exception still crashes it as before. The response
-    # returns as a message for handle_response/2.
-    product = producer.product
-    task = Task.async(fn -> send_recovery_request(recovery.recover_fun, product, opts) end)
-
-    request = %{id: request_id, after_ts: after_ts, task: task.ref, interrupted: false, resume_ts: nil}
-
-    %{
-      producer
-      | recovery: %{
-          recovery
-          | request: request,
-            next_request_id: next_request_id(request_id),
-            last_issued_at: recovery.monotonic_fun.()
-        }
-    }
-  end
+  def drop_stalled_request(%__MODULE__{} = producer, _monotonic_now, _max_recovery_ms), do: producer
 
   @doc false
   @spec awaiting_response?(t(), reference()) :: boolean()
-  def awaiting_response?(%__MODULE__{recovery: %{request: %{task: ref}}}, ref) when is_reference(ref), do: true
+  def awaiting_response?(%__MODULE__{request: %{task: ref}}, ref) when is_reference(ref), do: true
   def awaiting_response?(%__MODULE__{}, _ref), do: false
 
   # Only called for the current request's task: a response for a completed,
   # abandoned, or replaced request no longer matches and is dropped by the
-  # monitor.
-  #
-  # A superseded request is deliberately left to finish rather than shut down:
-  # by then it has usually reached Betradar, so stopping the task would not
-  # retract it, and a duplicate request is harmless beyond quota. The task
-  # stays linked, so an exception from it still crashes the monitor; the
-  # request function returns errors as values, so an exception is a bug.
+  # monitor. A failed request is retried `retry_in_ms` after the failure,
+  # however long it took.
   @doc false
-  @spec handle_response(t(), :ok | {:error, term()}) :: t()
-  def handle_response(%__MODULE__{recovery: %{request: request} = recovery} = producer, result) do
-    case result do
-      :ok ->
-        emit_initiated(producer, request.id, request.after_ts)
-        put_in(producer.recovery.request.task, nil)
-
-      # The retry waits a full cooldown from the failure, however long the
-      # request took.
-      {:error, reason} ->
-        emit(producer, :failed, %{}, %{request_id: request.id, reason: reason, retry_in_ms: recovery.min_interval_ms})
-
-        Logger.warning(
-          "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery request failed; " <>
-            "retrying in #{recovery.min_interval_ms}ms"
-        )
-
-        %{producer | recovery: %{recovery | request: nil, last_issued_at: recovery.monotonic_fun.()}}
-    end
-  end
-
-  # A 2xx acknowledgement can still carry a non-ACCEPTED response code; no
-  # `snapshot_complete` follows a rejection, so it must stay pending.
-  # Exceptions are not rescued: recovery intent is already durable, so a crash
-  # restarts with recovery still required.
-  defp send_recovery_request(recover_fun, product, opts) do
-    case recover_fun.(product, opts) do
-      {:ok, %Response{response_code: code} = response} when code != "ACCEPTED" ->
-        log_failure("#{code}: #{response.message || response.errors || "(no message)"}")
-
-      {:ok, _response} ->
-        :ok
-
-      {:error, %UOF.API.Error{} = error} ->
-        log_failure(Exception.message(error))
-
-      {:error, reason} ->
-        log_failure(inspect(reason))
-    end
-  end
-
-  defp log_failure(detail) do
-    Logger.warning("UOF.SDK.ProducerMonitor: recover request failed: #{detail}")
-    {:error, detail}
-  end
-
-  # `snapshot_complete` correlation trusts request ids, so sequences from
-  # different VM boots and Pulsar control-plane owners must not overlap: a
-  # completion left in a retained backlog, or one for the previous owner's
-  # request, would otherwise complete a newer request before its replay
-  # arrives. Each producer's sequence starts at a random offset, as the
-  # official SDKs do, and wraps within the Java SDK's range. Completion is
-  # correlated per producer, so producers need not share a sequence.
-  defp next_request_id(@max_request_id), do: 1
-  defp next_request_id(request_id), do: request_id + 1
-
-  defp build_opts(after_ts, request_id, node_id) do
-    [request_id: request_id]
-    |> maybe_put(:node_id, node_id)
-    |> maybe_put(:after, after_ts)
-  end
-
-  defp recovery_after(nil, _window_minutes, _now), do: nil
-
-  defp recovery_after(timestamp, window_minutes, now) do
-    replay_from = max(timestamp - @recovery_overlap_ms, 0)
-
-    case window_minutes do
-      nil ->
-        replay_from
-
-      minutes ->
-        window_ms = minutes * 60_000
-        margin_ms = min(@recovery_window_margin_ms, div(window_ms, 2))
-        max(replay_from, now - window_ms + margin_ms)
-    end
-  end
-
-  defp maybe_put(opts, _key, nil), do: opts
-  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
-
-  defp emit_initiated(producer, request_id, after_ts) do
-    emit(producer, :initiated, %{}, %{request_id: request_id, recovery_from: after_ts})
+  @spec handle_response(t(), :ok | {:error, term()}, integer(), non_neg_integer()) :: t()
+  def handle_response(%__MODULE__{request: request} = producer, :ok, _monotonic_now, _retry_in_ms) do
+    emit(producer, :initiated, %{}, %{request_id: request.id, recovery_from: request.after_ts})
 
     Logger.info(
       "UOF.SDK.ProducerMonitor: producer #{producer.id} (#{producer.product}) recovery initiated " <>
-        "request_id=#{request_id} after=#{inspect(after_ts)}"
+        "request_id=#{request.id} after=#{inspect(request.after_ts)}"
     )
+
+    put_in(producer.request.task, nil)
   end
+
+  def handle_response(%__MODULE__{request: request} = producer, {:error, reason}, monotonic_now, retry_in_ms) do
+    emit(producer, :failed, %{}, %{request_id: request.id, reason: reason, retry_in_ms: retry_in_ms})
+
+    Logger.warning(
+      "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery request failed; retrying in #{retry_in_ms}ms"
+    )
+
+    %{producer | request: nil, last_issued_at: monotonic_now}
+  end
+
+  defp elapsed_since_issue(%__MODULE__{last_issued_at: nil}, _monotonic_now), do: :infinity
+  defp elapsed_since_issue(%__MODULE__{last_issued_at: last}, monotonic_now), do: monotonic_now - last
 
   defp emit(producer, event, measurements, metadata) do
     :telemetry.execute(
@@ -421,7 +292,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     )
   end
 
-  defp recovery_in_flight?(%__MODULE__{recovery: %{request: request}}), do: not is_nil(request)
+  defp in_flight?(%__MODULE__{request: request}), do: not is_nil(request)
 
   # Checkpoints only move forward.
   defp advance_checkpoint(%__MODULE__{} = producer, nil), do: producer
@@ -433,30 +304,27 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   # Subscribed alives mark how far the feed is known to be continuous while the
   # request runs. After an interruption they no longer prove that.
-  defp observe_alive_in_flight(%__MODULE__{recovery: %{request: %{interrupted: true}}} = producer, _gen_ts, _subscribed?),
-    do: producer
+  defp observe_alive_in_flight(%__MODULE__{request: %{interrupted: true}} = producer, _gen_ts, _subscribed?), do: producer
 
   defp observe_alive_in_flight(%__MODULE__{} = producer, _gen_ts, false), do: interrupt(producer, :unsubscribed)
 
   defp observe_alive_in_flight(%__MODULE__{} = producer, gen_ts, true) when is_integer(gen_ts),
-    do: put_in(producer.recovery.request.resume_ts, gen_ts)
+    do: put_in(producer.request.resume_ts, gen_ts)
 
   defp observe_alive_in_flight(%__MODULE__{} = producer, nil, true), do: producer
 
-  defp interrupt(%__MODULE__{recovery: %{request: request}} = producer, reason) do
+  defp interrupt(%__MODULE__{request: request} = producer, reason) do
     Logger.warning(
       "UOF.SDK.ProducerMonitor: producer #{producer.id} recovery #{request.id} interrupted (#{reason}); " <>
         "repeating it once it completes"
     )
 
     emit(producer, :interrupted, %{}, %{request_id: request.id, reason: reason})
-    put_in(producer.recovery.request.interrupted, true)
+    put_in(producer.request.interrupted, true)
   end
 
   # How late the system pipeline read the alive: local receipt time minus its
   # generation timestamp, so it includes clock skew with Betradar.
   defp alive_delay(gen_timestamp, now) when is_integer(gen_timestamp), do: now - gen_timestamp
   defp alive_delay(nil, _now), do: nil
-
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

@@ -215,7 +215,7 @@ defmodule UOF.SDK.ProducerMonitorTest do
     assert {:ok, %ProducerStatus{status: :recovering}} = ProducerMonitor.producer(m, 1)
 
     # :recovering is derived from the recovery owed and the request in flight.
-    assert %ProducerMonitor{producers: %{1 => %Producer{pending_recovery: :incremental, recovery: %{request: %{}}}}} =
+    assert %ProducerMonitor{producers: %{1 => %Producer{pending_recovery: :incremental, request: %{}}}} =
              :sys.get_state(m)
 
     ProducerMonitor.snapshot_complete(m, 1, rid)

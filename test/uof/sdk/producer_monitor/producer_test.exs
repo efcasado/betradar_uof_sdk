@@ -4,23 +4,30 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   alias UOF.SDK.ProducerMonitor.Producer
   alias UOF.SDK.ProducerMonitor.Snapshot.Progress
 
-  @now 1_000_000_000_000
-
   # A synchronized producer.
-  defp up(fields \\ []) do
-    %Producer{id: 1, pending_recovery: nil} |> struct(fields) |> Producer.configure_recovery([])
-  end
+  defp up(fields \\ []), do: struct(%Producer{id: 1, pending_recovery: nil}, fields)
 
   # A producer that owes a recovery and was last heard at 0.
-  defp owing(opts, fields \\ []) do
-    %Producer{id: 1, last_alive_at: 0} |> struct(fields) |> Producer.configure_recovery(opts)
+  defp owing(fields \\ []), do: struct(%Producer{id: 1, last_alive_at: 0}, fields)
+
+  # A request started at monotonic time 0, accepted unless still `:awaiting`
+  # its HTTP response.
+  defp in_flight(producer, request_id \\ 7, response \\ :accepted) do
+    producer = Producer.start_request(producer, request_id, 500, make_ref(), 0)
+    if response == :accepted, do: put_in(producer.request.task, nil), else: producer
   end
 
   test "restore resumes only a producer that owes no recovery and has a checkpoint" do
-    producer = Producer.configure_recovery(%Producer{id: 1, last_alive_at: 5, alive_delay: 1}, [])
+    producer = %Producer{id: 1, last_alive_at: 5, alive_delay: 1, request: %{id: 1}}
 
-    assert %Producer{pending_recovery: nil, checkpoint: 2_000, restored_at: 10, last_alive_at: nil, alive_delay: nil} =
-             Producer.restore(producer, %Progress{checkpoint: 2_000, pending_recovery: nil}, 10)
+    assert %Producer{
+             pending_recovery: nil,
+             checkpoint: 2_000,
+             restored_at: 10,
+             last_alive_at: nil,
+             alive_delay: nil,
+             request: nil
+           } = Producer.restore(producer, %Progress{checkpoint: 2_000, pending_recovery: nil}, 10)
 
     assert %Producer{pending_recovery: :incremental, restored_at: 10} =
              Producer.restore(producer, %Progress{checkpoint: nil, pending_recovery: nil}, 10)
@@ -33,22 +40,22 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert Producer.restore(producer, %Progress{}, 10).pending_recovery == :incremental
   end
 
-  test "a first alive makes the recovery a new producer owes issuable" do
-    producer = Producer.configure_recovery(%Producer{id: 1}, [])
+  test "a first alive makes the recovery a new producer owes due" do
+    producer = %Producer{id: 1}
+    refute Producer.due?(producer, 1_000, 0, 900, 0)
     assert Producer.status(producer, false) == :down
 
     observed = Producer.observe_alive(producer, 900, true, 1_000)
     assert observed.last_alive_at == 1_000
     assert observed.pending_recovery == :incremental
     assert Producer.heard?(observed, 1_000, 900)
+    assert Producer.due?(observed, 1_000, 0, 900, 0)
     assert Producer.status(observed, true) == :recovering
   end
 
   test "an unsubscribed alive owes a recovery, and a full one stays full" do
     assert %Producer{pending_recovery: :incremental} = Producer.observe_alive(up(), 900, false, 1_000)
-
-    full = up(pending_recovery: :full)
-    assert %Producer{pending_recovery: :full} = Producer.observe_alive(full, 900, false, 1_000)
+    assert %Producer{pending_recovery: :full} = Producer.observe_alive(up(pending_recovery: :full), 900, false, 1_000)
   end
 
   test "subscribed alives advance the checkpoint only while up, and only forward" do
@@ -68,18 +75,11 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     stale_alive = up(last_alive_at: 100)
 
     assert %Producer{pending_recovery: :incremental} = Producer.check(stale_alive, 1_001, 900)
-
-    assert Producer.check(%{stale_alive | last_alive_at: 1_000}, 1_001, 900) == %{
-             stale_alive
-             | last_alive_at: 1_000
-           }
+    assert Producer.check(%{stale_alive | last_alive_at: 1_000}, 1_001, 900) == %{stale_alive | last_alive_at: 1_000}
   end
 
   test "a restored producer is down until heard, and owes a recovery if not heard in time" do
-    restored =
-      %Producer{id: 1}
-      |> Producer.configure_recovery([])
-      |> Producer.restore(%Progress{checkpoint: 500, pending_recovery: nil}, 0)
+    restored = Producer.restore(%Producer{id: 1}, %Progress{checkpoint: 500, pending_recovery: nil}, 0)
 
     refute Producer.heard?(restored, 100, 900)
     assert Producer.status(restored, false) == :down
@@ -99,219 +99,96 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert %Producer{alive_delay: nil} = Producer.observe_alive(up(), nil, true, 1_000)
   end
 
+  test "a request is due once owed, heard, idle, and past the cooldown" do
+    assert Producer.due?(owing(), 0, 0, 1_000, 0)
+
+    refute Producer.due?(up(last_alive_at: 0), 0, 0, 1_000, 0)
+    refute Producer.due?(owing(last_alive_at: nil), 0, 0, 1_000, 0)
+    refute Producer.due?(owing(), 2_000, 0, 1_000, 0)
+    refute Producer.due?(in_flight(owing()), 0, 0, 1_000, 0)
+
+    # The cooldown runs from the last attempt, in monotonic time.
+    issued = owing(last_issued_at: 100)
+    refute Producer.due?(issued, 0, 149, 1_000, 50)
+    assert Producer.due?(issued, 0, 150, 1_000, 50)
+  end
+
+  test "a request replays from the checkpoint, or omits it for a full recovery" do
+    assert Producer.replay_from(owing(checkpoint: 500)) == 500
+    assert Producer.replay_from(owing(checkpoint: nil)) == nil
+    assert Producer.replay_from(owing(checkpoint: 500, pending_recovery: :full)) == nil
+  end
+
   @tag :capture_log
-  test "request ids continue from their start and wrap within the request-id range" do
-    producer =
-      [
-        recover_fun: fn _product, _opts -> {:ok, nil} end,
-        request_id_start: 999_999,
-        monotonic_fun: fn -> System.unique_integer([:monotonic]) end,
-        min_interval_ms: 0,
-        max_recovery_ms: 0
-      ]
-      |> owing()
-      |> Producer.advance(0, 1_000)
+  test "an accepted request completes on its own request id" do
+    ref = make_ref()
+    producer = [checkpoint: 500] |> owing() |> Producer.start_request(42, 500, ref, 1_000)
 
-    # Each stall reissues the recovery with the producer's next request id.
-    issued =
-      Enum.scan(1..3, producer, fn _, producer ->
-        producer |> Producer.handle_response(:ok) |> Producer.advance(0, 1_000)
-      end)
+    assert %{id: 42, after_ts: 500, task: ^ref} = producer.request
+    assert producer.last_issued_at == 1_000
+    assert Producer.awaiting_response?(producer, ref)
 
-    assert Enum.map([producer | issued], & &1.recovery.request.id) == [999_999, 1_000_000, 1, 2]
+    producer = Producer.handle_response(producer, :ok, 1_200, 30_000)
+    refute Producer.awaiting_response?(producer, ref)
+
+    # A completion for another request is stale.
+    assert Producer.complete_recovery(producer, 41, 2_000, 1_500) == producer
+
+    completed = Producer.complete_recovery(producer, 42, 2_000, 1_500)
+    assert %Producer{pending_recovery: nil, request: nil, last_alive_at: 2_000} = completed
+    assert Producer.status(completed, true) == :up
   end
 
-  test "default request-id sequences start at a random offset" do
-    starts = Enum.map(1..5, fn _ -> Producer.configure_recovery(%Producer{id: 1}, []).recovery.next_request_id end)
+  @tag :capture_log
+  test "a failed request is retried after a full cooldown from the failure" do
+    producer = Producer.start_request(owing(), 42, nil, make_ref(), 0)
+    failed = Producer.handle_response(producer, {:error, "boom"}, 5_000, 1_000)
 
-    assert Enum.all?(starts, &(&1 in 1..1_000_000))
-    assert length(Enum.uniq(starts)) > 1
+    assert %Producer{request: nil, last_issued_at: 5_000, pending_recovery: :incremental} = failed
+    refute Producer.due?(failed, 0, 5_999, 10_000, 1_000)
+    assert Producer.due?(failed, 0, 6_000, 10_000, 1_000)
   end
 
-  test "the producer owns recovery HTTP attempts, state, and cooldown" do
-    test_pid = self()
+  @tag :capture_log
+  test "an accepted request without completion past max_recovery_ms is dropped" do
+    awaiting = in_flight(owing(), 7, :awaiting)
+    accepted = in_flight(owing())
 
-    recovery_opts = [
-      recover_fun: fn product, opts ->
-        send(test_pid, {:recover_called, product, opts})
-        {:ok, :accepted}
-      end,
-      request_id_start: 42,
-      monotonic_fun: fn -> 1_000 end,
-      node_id: 7,
-      min_interval_ms: 50,
-      max_recovery_ms: 60_000
-    ]
-
-    producer = owing(recovery_opts, checkpoint: 60_500)
-    assert Producer.recovering?(producer)
-
-    producer = Producer.advance(producer, 0, 1_000)
-    assert_receive {:recover_called, nil, request}
-    assert request == [after: 500, node_id: 7, request_id: 42]
-    assert %Producer{recovery: %{request: %{id: 42}, last_issued_at: 1_000}} = producer
-
-    # An accepted request is left alone until it stalls.
-    producer = Producer.handle_response(producer, :ok)
-    assert Producer.advance(producer, 0, 1_000) == producer
-
-    producer = Producer.complete_recovery(producer, 42, 2_000)
-    refute Producer.recovering?(producer)
-    assert Producer.status(producer, true) == :up
-    assert producer.last_alive_at == 2_000
-    assert producer.recovery.request == nil
-
-    # A recovery owed within the cooldown since the last attempt waits.
-    producer = producer |> Producer.owe(:incremental) |> Producer.advance(2_000, 1_000)
-    assert producer.recovery.request == nil
-    refute_received {:recover_called, _product, _request}
-  end
-
-  test "a full recovery omits the checkpoint" do
-    test_pid = self()
-
-    [recover_fun: fn _product, opts -> send(test_pid, {:recover_called, opts}) && {:ok, nil} end]
-    |> owing(
-      checkpoint: 60_500,
-      pending_recovery: :full
-    )
-    |> Producer.advance(0, 1_000)
-
-    assert_receive {:recover_called, opts}
-    refute Keyword.has_key?(opts, :after)
-  end
-
-  test "a recovery is not issued until the producer is heard" do
-    test_pid = self()
-    recover_fun = fn _product, _opts -> send(test_pid, :issued) && {:ok, nil} end
-
-    # Never heard, or last heard at 0 and silent at 2_000 with a 1_000 interval.
-    unheard = Producer.configure_recovery(%Producer{id: 1}, recover_fun: recover_fun)
-    silent = owing([recover_fun: recover_fun], last_alive_at: 0)
-
-    for producer <- [unheard, silent] do
-      assert Producer.advance(producer, 2_000, 1_000) == producer
-    end
-
-    refute Producer.heard?(silent, 2_000, 1_000)
-    assert Producer.status(silent, false) == :down
-
-    # The next alive makes it current again, and the request goes out.
-    heard = Producer.observe_alive(silent, 1_900, true, 2_000)
-    assert Producer.heard?(heard, 2_000, 1_000)
-    Producer.advance(heard, 2_000, 1_000)
-    assert_receive :issued
+    # A request whose HTTP response has not arrived yet is left alone.
+    assert Producer.drop_stalled_request(awaiting, 10_000, 1_000) == awaiting
+    assert Producer.drop_stalled_request(accepted, 1_000, 1_000) == accepted
+    assert %Producer{request: nil, pending_recovery: :incremental} = Producer.drop_stalled_request(accepted, 1_001, 1_000)
   end
 
   @tag :capture_log
   test "an interrupted completion advances the checkpoint and repeats the recovery" do
     producer =
-      [recover_fun: fn _product, _opts -> {:ok, nil} end, min_interval_ms: 0]
-      |> owing(checkpoint: 100)
-      |> Producer.advance(0, 1_000)
-      |> Producer.handle_response(:ok)
-
-    request_id = producer.recovery.request.id
-
-    producer =
-      producer
+      [checkpoint: 100]
+      |> owing()
+      |> in_flight()
       |> Producer.observe_alive(500, true, 0)
       |> Producer.observe_alive(600, false, 0)
       # After the interruption, subscribed alives no longer prove continuity.
       |> Producer.observe_alive(700, true, 0)
-      |> Producer.complete_recovery(request_id, 0)
+      |> Producer.complete_recovery(7, 0, 0)
 
-    assert %Producer{checkpoint: 500, pending_recovery: :incremental, recovery: %{request: nil}} = producer
+    assert %Producer{checkpoint: 500, pending_recovery: :incremental, request: nil} = producer
     assert Producer.status(producer, true) == :recovering
   end
 
+  @tag :capture_log
+  test "a heartbeat gap interrupts a request in flight once" do
+    producer = [last_alive_at: 0] |> owing() |> in_flight()
+
+    interrupted = Producer.check(producer, 901, 900)
+    assert interrupted.request.interrupted
+    assert Producer.check(interrupted, 2_000, 900) == interrupted
+  end
+
   test "a request in flight can be dropped; its completion is then stale" do
-    producer =
-      [recover_fun: fn _product, _opts -> {:ok, nil} end, min_interval_ms: 0]
-      |> owing()
-      |> Producer.advance(0, 1_000)
+    dropped = owing() |> in_flight() |> Producer.drop_request()
 
-    request_id = producer.recovery.request.id
-    dropped = Producer.drop_request(producer)
-
-    assert dropped.recovery.request == nil
-    assert Producer.complete_recovery(dropped, request_id, 0) == dropped
-  end
-
-  test "a stalled request is reclamped when the recovery window moves" do
-    test_pid = self()
-    now = start_supervised!({Agent, fn -> @now end})
-    telemetry_id = make_ref()
-
-    :ok =
-      :telemetry.attach(
-        telemetry_id,
-        [:uof_sdk, :recovery, :initiated],
-        fn _event, _measurements, metadata, _config -> send(test_pid, {:initiated, metadata}) end,
-        nil
-      )
-
-    on_exit(fn -> :telemetry.detach(telemetry_id) end)
-
-    producer =
-      [
-        recover_fun: fn _, opts ->
-          send(test_pid, {:recover_called, opts})
-          {:ok, :accepted}
-        end,
-        now_fun: fn -> Agent.get(now, & &1) end,
-        monotonic_fun: fn -> Agent.get(now, & &1) end
-      ]
-      |> owing(
-        recovery_window_minutes: 60,
-        checkpoint: @now - 2 * 60 * 60_000
-      )
-      |> Producer.advance(0, 1_000)
-
-    assert_receive {:recover_called, first}
-    assert first[:after] == @now - 50 * 60_000
-    producer = Producer.handle_response(producer, :ok)
-    assert_receive {:initiated, %{recovery_from: first_after}}
-    assert first_after == first[:after]
-
-    # Past max_recovery_ms (10 minutes by default), the request stalls.
-    Agent.update(now, &(&1 + 20 * 60_000))
-    producer = Producer.advance(producer, 0, 1_000)
-
-    assert_receive {:recover_called, second}
-    assert second[:after] == @now - 30 * 60_000
-    Producer.handle_response(producer, :ok)
-    assert_receive {:initiated, %{recovery_from: second_after}}
-    assert second_after == second[:after]
-  end
-
-  test "a failed request is reclamped on retry" do
-    test_pid = self()
-    now = start_supervised!({Agent, fn -> @now end})
-
-    producer =
-      [
-        recover_fun: fn _, opts ->
-          send(test_pid, {:recover_called, opts})
-          {:ok, :accepted}
-        end,
-        now_fun: fn -> Agent.get(now, & &1) end,
-        min_interval_ms: 0
-      ]
-      |> owing(
-        recovery_window_minutes: 60,
-        checkpoint: @now - 2 * 60 * 60_000
-      )
-      |> Producer.advance(0, 1_000)
-
-    assert_receive {:recover_called, first}
-    assert first[:after] == @now - 50 * 60_000
-
-    producer = Producer.handle_response(producer, {:error, :unavailable})
-    Agent.update(now, &(&1 + 20 * 60_000))
-    Producer.advance(producer, 0, 1_000)
-
-    assert_receive {:recover_called, second}
-    assert second[:after] == @now - 30 * 60_000
+    assert dropped.request == nil
+    assert Producer.complete_recovery(dropped, 7, 0, 0) == dropped
   end
 end

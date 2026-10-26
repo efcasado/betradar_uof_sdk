@@ -5,7 +5,8 @@ defmodule UOF.SDK.ProducerStatus do
 
   `status` is one of:
 
-    * `:down` — not synchronized and no recovery is pending
+    * `:down` — not synchronized; the recovery it owes waits for the
+      producer's alives
     * `:recovering` — waiting to request, requesting, or awaiting recovery
       completion
     * `:up` — the topic carries a continuous feed for the producer; content

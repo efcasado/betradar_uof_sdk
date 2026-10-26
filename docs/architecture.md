@@ -290,7 +290,7 @@ startup description fetch is the exception; it runs before the monitor takes obs
 `UOF.SDK.ProducerMonitor.Store` persists the monitor's restart state. The monitor owns that
 state and its rules; a store keeps only the latest snapshot, an opaque binary encoded by
 `UOF.SDK.ProducerMonitor.Snapshot`. Feed messages, application state, broker
-acknowledgements, and in-flight recovery jobs are not part of it.
+acknowledgements, and in-flight recovery requests are not part of it.
 
 The default `Store.ETS` keeps snapshots in a table owned by its supervised process. They
 survive monitor and pipeline restarts, but not a store-process or VM restart. Implement a
@@ -304,15 +304,17 @@ persistent store when progress must survive those.
 | `producers` | Per producer: recovery checkpoint (epoch milliseconds) and the recovery it still owes: none when synchronized with that session, `:incremental` from the checkpoint, or `:full` |
 | `descriptions` | The last producer descriptions loaded from the UOF API |
 
-A producer may resume at startup only when it is synchronized and has a checkpoint. A consumer
-tag change saves the new tag with every producer unsynchronized, in one write. Recovery
-preparation saves the producer as unsynchronized before its HTTP request, so a crash at any
-point cannot resume from stale state. A pending full recovery stays full across a restart or
-session change until its matching completion. Checkpoints only move forward.
+The snapshot is a projection of the committed consumer tag and each producer's checkpoint and
+owed recovery. After every event, the monitor saves it before issuing any request, so recovery
+intent is durable before its HTTP request and a crash at any point cannot resume from stale
+state. A consumer tag change therefore saves the new tag with every producer unsynchronized,
+in one write. A producer may resume at startup only when it is synchronized and has a
+checkpoint. A pending full recovery stays full across a restart or session change until its
+matching completion. Checkpoints only move forward.
 
 The monitor saves only when the snapshot changes: on a session change, a checkpoint advance
-from a subscribed system heartbeat while `:up`, a producer's synchronization change, and newly
-loaded descriptions.
+from a subscribed system heartbeat while `:up` or from an interrupted recovery's completion, a
+producer's synchronization change, and newly loaded descriptions.
 
 `load/1` returns `nil` only when nothing has been saved, and the monitor then starts every
 producer `:down`. A stored binary that cannot be decoded fails startup: discarding it would
@@ -428,14 +430,14 @@ readiness or prove that handlers have completed their work.
 | `UOF.SDK.ContentPipeline` | Reads the content subscription: decodes event messages and calls the handler | Broadway, `:concurrency` processors |
 | `UOF.SDK.MessageMetadata` | Reads the connector's message properties | The pipelines |
 | `UOF.SDK.RoutingKey` | Parses routing keys: message type, event identity, node filtering | The pipelines |
-| `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session readiness, persists transitions, publishes status callbacks | Its own process |
-| `ProducerMonitor.Producer` | Per-producer state machine: health, recovery jobs, cooldowns, and request attempts; `advance/1` decides when a request is due | The monitor; each HTTP request runs in a linked task |
+| `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session readiness, persists producer progress, publishes status callbacks | Its own process |
+| `ProducerMonitor.Producer` | Per-producer state machine: health, durable progress (checkpoint and owed recovery), the request in flight, and cooldowns; `advance/3` decides when a request is due | The monitor; each HTTP request runs in a linked task |
 | `ProducerMonitor.Session` | Tracks the upstream consumer tag, independently of producer state | The monitor |
 | `ProducerMonitor.Descriptions` | Loads producer descriptions from the UOF API, falling back to stored and then configured ones | The monitor; reloads run in a linked task |
 | `ProducerMonitor.Snapshot` | The persisted state and its encoding | The monitor |
 | `ProducerMonitor.Store` | Persistence behaviour; `Store.ETS` is the default | The monitor; a store with `child_spec/1` also runs its own process |
 
-A recovery request's response returns to the monitor as a message. A response for a job
+A recovery request's response returns to the monitor as a message. A response for a request
 completed, abandoned, or replaced meanwhile is dropped, and the superseded request is left to
 finish rather than shut down: it has usually reached Betradar already, and a duplicate request
 is harmless beyond quota.

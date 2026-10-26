@@ -5,17 +5,18 @@ defmodule UOF.SDK.ProducerMonitor do
   Its inputs are the system pipeline's observations (`alive`,
   `snapshot_complete`, and the upstream consumer tag), the broker's ownership
   reports for the system subscription, and manual requests. Events only record
-  facts and change recovery jobs. After every event and on every tick, the
-  monitor issues what is due through `UOF.SDK.ProducerMonitor.Producer.advance/3`
-  and publishes status changes, so every request passes the same gates: this
-  instance owns the system subscription and the upstream session is confirmed.
+  facts on the producers (`UOF.SDK.ProducerMonitor.Producer`). After every
+  event and on every tick, the monitor persists their durable progress, issues
+  what is due through `UOF.SDK.ProducerMonitor.Producer.advance/3`, and
+  publishes status changes. Every request therefore passes the same gates
+  (this instance owns the system subscription and the upstream session is
+  confirmed), and its recovery intent is durable before it is issued.
 
   The monitor persists one snapshot (`UOF.SDK.ProducerMonitor.Snapshot`) per
   store, shared by a subscription's instances: the consumer tag and, per
   producer, a checkpoint and the recovery it owes. Only the active instance
   writes it. Startup and promotion restore producers from it alike; a passive
-  instance ignores system observations. Recovery intent is durable before any
-  request is issued.
+  instance ignores system observations.
 
   Producer descriptions come from the UOF API, falling back to stored and then
   configured descriptions; an `alive` from an unknown producer triggers a
@@ -72,7 +73,6 @@ defmodule UOF.SDK.ProducerMonitor do
     :now_fun,
     :monitor_store,
     :readiness_deadline_at,
-    ## Client API ---------------------------------------------------------------
     :inactivity_ms,
     :tick_ms
   ]
@@ -88,6 +88,8 @@ defmodule UOF.SDK.ProducerMonitor do
                 refresh_task: nil,
                 published: %{}
               ]
+
+  ## Client API ---------------------------------------------------------------
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -121,12 +123,12 @@ defmodule UOF.SDK.ProducerMonitor do
   @doc """
   Manually trigger a recovery for `producer_id` (e.g. from an admin UI), going
   through the normal recovery lifecycle: the producer becomes `:recovering`,
-  completion is correlated via `snapshot_complete`, and the
-  stall guard reissues if it goes missing. If a persisted consume session has
-  not been observed yet, the recovery requirement is recorded immediately and
-  its HTTP request waits for the system pipeline's consumer tag. Pass `full: true` to ignore the
-  checkpoint and request a full snapshot. Refused while the producer is already
-  recovering, including during a cooldown or retry delay, and with
+  completion is correlated via `snapshot_complete`, and the stall guard
+  reissues if it goes missing. The recovery requirement is recorded
+  immediately; its HTTP request waits until the producer is heard, the
+  cooldown has passed, and a persisted consume session has been observed.
+  Pass `full: true` to ignore the checkpoint and request a full snapshot.
+  Refused while the producer already owes a recovery, and with
   `{:error, :passive}` while this instance does not own the system
   subscription (see "Control-plane ownership").
   """
@@ -135,8 +137,6 @@ defmodule UOF.SDK.ProducerMonitor do
   def recover(server \\ __MODULE__, producer_id, opts) do
     GenServer.call(server, {:recover, producer_id, opts})
   end
-
-  ## Server ------------------------------------------------------------------
 
   @doc """
   Observe a broker-reported ownership change for the system-subscription
@@ -161,6 +161,8 @@ defmodule UOF.SDK.ProducerMonitor do
   def observe_consumer_tag(server \\ __MODULE__, consumer_tag) do
     GenServer.cast(server, {:observe_consumer_tag, consumer_tag})
   end
+
+  ## Server -------------------------------------------------------------------
 
   @impl true
   def init(opts) do
@@ -194,13 +196,13 @@ defmodule UOF.SDK.ProducerMonitor do
     state =
       case source do
         :api ->
-          save_snapshot(state, %{snapshot | descriptions: descriptions})
+          save_snapshot(state, %{state.snapshot | descriptions: descriptions})
 
         _fallback ->
           schedule_refresh(%{state | next_refresh_at: state.now_fun.() + state.descriptions_refresh_ms})
       end
 
-    state = if owns_control?(state), do: start_active_monitoring(state), else: state
+    state = arm_readiness_deadline(state)
 
     state = %{
       state
@@ -249,7 +251,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
           true ->
             kind = if opts[:full], do: :full, else: :incremental
-            {:reply, :ok, state |> request_recovery(producer, kind) |> settle()}
+            {:reply, :ok, state |> put_producer(Producer.owe(producer, kind)) |> settle()}
         end
     end
   end
@@ -269,8 +271,13 @@ defmodule UOF.SDK.ProducerMonitor do
   def handle_cast({:alive, id, gen_ts, subscribed?}, state) do
     state =
       case Map.fetch(state.producers, id) do
-        {:ok, producer} -> on_alive(state, producer, gen_ts, subscribed?)
-        :error -> schedule_refresh(state)
+        {:ok, producer} ->
+          producer = Producer.observe_alive(producer, gen_ts, subscribed?, state.now_fun.())
+          emit_alive(producer, subscribed?)
+          put_producer(state, producer)
+
+        :error ->
+          schedule_refresh(state)
       end
 
     {:noreply, settle(state)}
@@ -278,6 +285,11 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def handle_cast({:observe_consumer_tag, tag}, state) do
     {:noreply, state |> track_consumer_tag(tag) |> settle()}
+  end
+
+  def handle_cast({:snapshot_complete, id, request_id}, state) do
+    now = state.now_fun.()
+    {:noreply, state |> update_producer(id, &Producer.complete_recovery(&1, request_id, now)) |> settle()}
   end
 
   def handle_cast({:active_state, %{active_state: active_state} = metadata}, state) do
@@ -296,7 +308,7 @@ defmodule UOF.SDK.ProducerMonitor do
 
         ownership == :active ->
           # A new worker may report before the old worker's DOWN is handled.
-          # Re-enter through passive so promotion reloads the shared snapshot.
+          # Re-enter through passive so promotion restores the shared snapshot.
           state =
             if state.ownership == :active and state.consumer_pid != nil,
               do: change_ownership(state, :passive, metadata),
@@ -320,79 +332,23 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, settle(state)}
   end
 
-  def handle_cast({:snapshot_complete, id, request_id}, state) do
-    {:noreply, state |> complete_recovery(id, request_id) |> settle()}
-  end
-
-  defp monitor_consumer(state, consumer_pid) do
-    state = clear_consumer_monitor(state)
-    %{state | consumer_pid: consumer_pid, consumer_ref: Process.monitor(consumer_pid)}
-  end
-
-  defp clear_consumer_monitor(%{consumer_ref: nil} = state), do: state
-
-  defp clear_consumer_monitor(state) do
-    Process.demonitor(state.consumer_ref, [:flush])
-    %{state | consumer_pid: nil, consumer_ref: nil}
-  end
-
-  defp change_ownership(%{ownership: ownership} = state, ownership, _metadata), do: state
-
-  defp change_ownership(state, ownership, metadata) do
-    active? = ownership == :active
-
-    details =
-      if metadata[:topic] do
-        "topic=#{inspect(metadata[:topic])} subscription=#{inspect(metadata[:subscription])}"
-      else
-        "consumer_pid=#{inspect(metadata[:consumer_pid])} exited"
-      end
-
-    Logger.info(
-      "UOF.SDK.ProducerMonitor: control plane #{if active?, do: "active", else: "passive"} " <>
-        "(#{details})"
-    )
-
-    state = %{state | ownership: ownership}
-
-    if active? do
-      state
-      |> restore(load_snapshot(state.monitor_store))
-      |> start_active_monitoring()
-    else
-      Map.put(state, :readiness_deadline_at, nil)
-    end
-  end
-
-  defp complete_recovery(state, id, request_id) do
-    with_producer(state, id, fn producer ->
-      case Producer.complete_recovery(producer, request_id, state.now_fun.()) do
-        {:ok, producer} ->
-          Logger.info("UOF.SDK.ProducerMonitor: producer #{id} recovery #{request_id} complete")
-          synchronize(state, producer)
-
-        # The producer stays :recovering and already requires recovery durably,
-        # so the repeat needs no new transition or write.
-        {:repeat, producer, resume_ts} ->
-          put_producer(state, Producer.repeat_recovery(producer, preserve_full_recovery(state, producer, resume_ts)))
-
-        :stale ->
-          state
-      end
-    end)
-  end
-
   @impl true
   def handle_info(:tick, state) do
     state =
       if owns_control?(state) do
         now = state.now_fun.()
         ensure_session_readiness!(state, now)
-        state.producers |> Map.values() |> Enum.reduce(state, &check(&2, &1, now)) |> settle()
+        ready? = Session.ready?(state.session)
+
+        producers =
+          Map.new(state.producers, fn {id, producer} ->
+            {id, Producer.check(producer, now, state.inactivity_ms, ready?)}
+          end)
+
+        settle(%{state | producers: producers})
       else
-        # A passive instance sees no system alives, so status transitions here
-        # would be noise; healing happens on
-        # promotion when the checks resume against the then-stale timestamps.
+        # A passive instance observes nothing, so its producers' timestamps
+        # are stale; promotion restores them from the snapshot.
         state
       end
 
@@ -438,14 +394,13 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, state}
   end
 
-  # A recovery request finished. A response for a job that was completed,
+  # A recovery request finished. A response for a request that was completed,
   # abandoned, or replaced meanwhile matches no producer and is dropped.
   def handle_info({ref, result}, state) when is_reference(ref) do
     Process.demonitor(ref, [:flush])
 
     state =
       case Enum.find(state.producers, fn {_id, producer} -> Producer.awaiting_response?(producer, ref) end) do
-        ## Health transitions -------------------------------------------------------
         {_id, producer} -> put_producer(state, Producer.handle_response(producer, result))
         nil -> state
       end
@@ -453,57 +408,155 @@ defmodule UOF.SDK.ProducerMonitor do
     {:noreply, settle(state)}
   end
 
-  defp on_alive(state, producer, gen_ts, subscribed?) do
-    result = Producer.observe_alive(producer, gen_ts, subscribed?, state.now_fun.())
-    emit_alive(result, subscribed?)
+  ## Control-plane ownership --------------------------------------------------
 
-    case result do
-      {:recovery_needed, producer, _cause} ->
-        # Preserve explicit recovery intent even if this alive races demotion
-        # or session startup. Only HTTP issuance depends on ownership and
-        # readiness; the durable requirement itself must never be discarded.
-        request_recovery(state, producer)
+  defp monitor_consumer(state, consumer_pid) do
+    state = clear_consumer_monitor(state)
+    %{state | consumer_pid: consumer_pid, consumer_ref: Process.monitor(consumer_pid)}
+  end
 
-      {:checkpoint, producer, timestamp} ->
-        state
-        |> put_checkpoint(producer.id, timestamp)
-        |> put_producer(producer)
+  defp clear_consumer_monitor(%{consumer_ref: nil} = state), do: state
 
-      {:ok, producer} ->
-        put_producer(state, producer)
+  defp clear_consumer_monitor(state) do
+    Process.demonitor(state.consumer_ref, [:flush])
+    %{state | consumer_pid: nil, consumer_ref: nil}
+  end
+
+  defp change_ownership(%{ownership: ownership} = state, ownership, _metadata), do: state
+
+  defp change_ownership(state, ownership, metadata) do
+    active? = ownership == :active
+
+    details =
+      if metadata[:topic] do
+        "topic=#{inspect(metadata[:topic])} subscription=#{inspect(metadata[:subscription])}"
+      else
+        "consumer_pid=#{inspect(metadata[:consumer_pid])} exited"
+      end
+
+    Logger.info(
+      "UOF.SDK.ProducerMonitor: control plane #{if active?, do: "active", else: "passive"} " <>
+        "(#{details})"
+    )
+
+    state = %{state | ownership: ownership}
+
+    if active? do
+      state
+      |> restore(load_snapshot(state.monitor_store))
+      |> arm_readiness_deadline()
+    else
+      Map.put(state, :readiness_deadline_at, nil)
     end
   end
 
-  defp check(state, producer, now) do
-    case Producer.check(producer, now, state.inactivity_ms, Session.ready?(state.session)) do
-      {:recovery_needed, producer, :alive_timeout} ->
-        request_recovery(state, producer)
+  # The stored snapshot is the subscription's state, possibly written by
+  # another owner while this instance was passive. Startup and promotion
+  # restore every producer from it alike: whatever this instance held in memory
+  # is either recorded there or was settled by that owner. This instance keeps
+  # the descriptions it loaded itself.
+  defp restore(state, snapshot) do
+    now = state.now_fun.()
 
-      {:transition, producer} ->
-        synchronize(state, producer)
+    producers =
+      Map.new(state.producers, fn {id, producer} ->
+        {id, Producer.restore(producer, Snapshot.progress(snapshot, id), now)}
+      end)
 
-      {:interrupted, producer} ->
-        put_producer(state, producer)
+    %{
+      state
+      | producers: producers,
+        snapshot: %{snapshot | descriptions: state.snapshot.descriptions},
+        session: Session.new(snapshot.consumer_tag)
+    }
+  end
 
-      :unchanged ->
-        state
+  ## Consume sessions ---------------------------------------------------------
+
+  # A restored session must be confirmed within one normal alive interval
+  # after this instance acquires control. Failure is process-fatal so
+  # :rest_for_one restarts both pipelines instead of waiting forever.
+  defp arm_readiness_deadline(%{readiness_deadline_at: nil} = state) do
+    if owns_control?(state) and Session.awaiting_readiness?(state.session) do
+      %{state | readiness_deadline_at: state.now_fun.() + state.inactivity_ms}
+    else
+      state
     end
   end
 
-  # Records that the producer owes a recovery and prepares its job. The owed
-  # recovery is durable before reconcile/1 can issue the request, so a crash
-  # after the request cannot resume from stale synchronized state. A full
-  # recovery owed stays owed, so the job replays from the checkpoint only when
-  # no full recovery is owed.
-  defp request_recovery(state, producer, kind \\ :incremental) do
-    state = owe_recovery(state, producer.id, kind)
-    put_producer(state, Producer.prepare_recovery(producer, after_from_checkpoint(state, producer)))
+  defp arm_readiness_deadline(state), do: state
+
+  defp ensure_session_readiness!(%{readiness_deadline_at: nil}, _now), do: :ok
+
+  defp ensure_session_readiness!(%{readiness_deadline_at: deadline}, now) when now > deadline do
+    raise RuntimeError, "producer monitor session readiness timed out; no consumer tag observed"
   end
 
-  # Only ever reached with the producer :up: a completed recovery or a resume.
-  defp synchronize(state, producer) do
-    state |> put_producer(producer) |> update_progress(producer.id, &%{&1 | pending_recovery: nil})
+  defp ensure_session_readiness!(_state, _now), do: :ok
+
+  defp track_consumer_tag(state, tag) do
+    was_ready? = Session.ready?(state.session)
+
+    state =
+      case Session.observe(state.session, tag) do
+        {:recovery_needed, session} ->
+          recover_after_session_change(%{state | session: Session.commit(session)})
+
+        {:unchanged, session} ->
+          %{state | session: session}
+      end
+
+    # Readiness lets reconcile/1 issue recoveries owed before the first tag,
+    # even when the tag matches the persisted baseline and reports `:unchanged`.
+    if was_ready?, do: state, else: Map.put(state, :readiness_deadline_at, nil)
   end
+
+  # A consumer tag change can leave a delivery gap, so every producer owes a
+  # recovery. It also invalidates a request in flight: the replay may have been
+  # published while the consumer was disconnected. A recovery still waiting to
+  # be issued needs no replacement, as its request will cover the gap. The new
+  # tag and the owed recoveries are saved in one write.
+  defp recover_after_session_change(state) do
+    producers =
+      Map.new(state.producers, fn {id, producer} ->
+        {id, producer |> Producer.drop_request() |> Producer.owe(:incremental)}
+      end)
+
+    %{state | producers: producers}
+  end
+
+  ## Recovery -----------------------------------------------------------------
+
+  # Run after every event: persist, issue what is due, then publish status
+  # changes.
+  defp settle(state), do: state |> persist() |> reconcile() |> publish_status_changes()
+
+  # The snapshot is a projection of the committed consumer tag and each
+  # producer's durable progress. Saving it before reconcile/1 makes recovery
+  # intent durable before any request, so a crash after the request cannot
+  # resume from stale synchronized state.
+  defp persist(state) do
+    producers = Map.new(state.producers, fn {id, producer} -> {id, Producer.progress(producer)} end)
+    save_snapshot(state, %{state.snapshot | consumer_tag: state.session.persisted, producers: producers})
+  end
+
+  # The only place recovery requests are issued. Every request therefore passes
+  # the same gates: control-plane ownership and a confirmed upstream session.
+  defp reconcile(state) do
+    if may_issue?(state) do
+      now = state.now_fun.()
+
+      Enum.reduce(state.producers, state, fn {_id, producer}, state ->
+        put_producer(state, Producer.advance(producer, now, state.inactivity_ms))
+      end)
+    else
+      state
+    end
+  end
+
+  defp may_issue?(state), do: owns_control?(state) and not Session.awaiting_readiness?(state.session)
+
+  ## Persistence --------------------------------------------------------------
 
   # Only a missing snapshot starts empty. One that cannot be decoded raises:
   # discarding it would lose the checkpoints that bound incremental recovery.
@@ -514,20 +567,17 @@ defmodule UOF.SDK.ProducerMonitor do
     end
   end
 
-  # Resuming safely requires both durable eligibility and a checkpoint. The
-  # current-session heartbeat and session gates live in Producer.check/4.
-  defp restore_producer(producer, snapshot) do
-    producer = %{
-      producer
-      | status: :down,
-        last_alive_at: nil,
-        alive_delay: nil,
-        resuming_since: nil,
-        recovery: %{producer.recovery | job: nil}
-    }
+  defp save_snapshot(%{snapshot: snapshot} = state, snapshot), do: state
 
-    if Snapshot.resumable?(snapshot, producer.id), do: %{producer | status: :resuming}, else: producer
+  # Instances of one subscription may share a snapshot, which the active
+  # instance owns. A passive instance's copy is stale, so it changes only in
+  # memory; promotion restores from the stored one.
+  defp save_snapshot(%{monitor_store: {store, store_opts}} = state, snapshot) do
+    if owns_control?(state), do: :ok = store.save(Snapshot.encode(snapshot), store_opts)
+    %{state | snapshot: snapshot}
   end
+
+  ## Producer descriptions ----------------------------------------------------
 
   defp new_producer(description, opts) do
     Producer |> struct(description) |> Producer.configure_recovery(opts)
@@ -553,157 +603,13 @@ defmodule UOF.SDK.ProducerMonitor do
   defp schedule_refresh(%{refresh_scheduled?: true} = state), do: state
   defp schedule_refresh(%{refresh_task: ref} = state) when is_reference(ref), do: state
 
-  ## Control-plane ownership ---------------------------------------------------
-
   defp schedule_refresh(state) do
     delay = max((state.next_refresh_at || 0) - state.now_fun.(), 0)
     Process.send_after(self(), :refresh_descriptions, delay)
     %{state | refresh_scheduled?: true}
   end
 
-  defp notify(state, %ProducerStatus{} = producer) do
-    :telemetry.execute([:uof_sdk, :producer, :status], %{system_time: System.system_time()}, %{
-      producer_id: producer.id,
-      product: producer.product,
-      status: producer.status
-    })
-
-    notify_handler(state, producer)
-  end
-
-  defp notify_handler(%{handler: nil}, _producer), do: :ok
-
-  # Runs inside this GenServer: a raising handler crashes the monitor and is
-  # healed by supervision — :rest_for_one restarts the pipelines with it, so
-  # the re-subscribing consumers re-report failover ownership and
-  # ownership converges (see the supervisor comment in UOF.SDK).
-  defp notify_handler(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
-
-  # The stored snapshot is the subscription's state, possibly written by
-  # another owner while this instance was passive. Startup and promotion
-  # restore every producer from it alike: whatever this instance held in memory
-  # is either recorded there or was settled by that owner. Requests still in
-  # flight are abandoned; their responses and completions no longer match. This
-  # instance keeps the descriptions it loaded itself.
-  defp restore(state, snapshot) do
-    producers = Map.new(state.producers, fn {id, producer} -> {id, restore_producer(producer, snapshot)} end)
-
-    %{
-      state
-      | producers: producers,
-        snapshot: %{snapshot | descriptions: state.snapshot.descriptions},
-        session: Session.new(snapshot.consumer_tag)
-    }
-  end
-
-  # A resumable producer must hear a current heartbeat within one normal alive
-  # interval after this instance acquires control, or the health check recovers
-  # it. `resuming_since` starts that interval without counting as a heartbeat.
-  # Session readiness gets the same interval; failure is process-fatal so
-  # :rest_for_one restarts both pipelines instead of waiting forever.
-  defp start_active_monitoring(state) do
-    now = state.now_fun.()
-
-    producers =
-      Map.new(state.producers, fn {id, producer} ->
-        producer =
-          if producer.status == :resuming and is_nil(producer.resuming_since) do
-            %{producer | resuming_since: now}
-          else
-            producer
-          end
-
-        {id, producer}
-      end)
-
-    arm_readiness_deadline(%{state | producers: producers}, now)
-  end
-
-  defp arm_readiness_deadline(%{readiness_deadline_at: nil} = state, now) do
-    if owns_control?(state) and Session.awaiting_readiness?(state.session) do
-      %{state | readiness_deadline_at: now + state.inactivity_ms}
-    else
-      state
-    end
-  end
-
-  defp arm_readiness_deadline(state, _now), do: state
-
-  defp ensure_session_readiness!(%{readiness_deadline_at: nil}, _now), do: :ok
-
-  defp ensure_session_readiness!(%{readiness_deadline_at: deadline}, now) when now > deadline do
-    raise RuntimeError, "producer monitor session readiness timed out; no consumer tag observed"
-  end
-
-  defp ensure_session_readiness!(_state, _now), do: :ok
-
-  defp track_consumer_tag(state, tag) do
-    was_ready? = Session.ready?(state.session)
-
-    state =
-      case Session.observe(state.session, tag) do
-        {:recovery_needed, session} ->
-          commit_session_change(state, Session.commit(session))
-
-        {:unchanged, session} ->
-          %{state | session: session}
-      end
-
-    # Readiness lets reconcile/1 issue jobs recorded before the first tag, even
-    # when the tag matches the persisted baseline and reports `:unchanged`.
-    if was_ready?, do: state, else: Map.put(state, :readiness_deadline_at, nil)
-  end
-
-  ## Recovery -----------------------------------------------------------------
-
-  defp commit_session_change(state, session) do
-    state
-    |> save_snapshot(Snapshot.change_session(state.snapshot, session.persisted))
-    |> Map.put(:session, session)
-    |> recover_after_session_change()
-  end
-
-  # A consumer tag change invalidates an in-flight request: it may have published
-  # messages while the consumer was disconnected. A recovery already waiting
-  # for its cooldown or an API retry needs no replacement because its request
-  # will be issued after this reconnect and therefore covers the gap.
-  defp recover_after_session_change(state) do
-    state.producers
-    |> Map.values()
-    |> Enum.reduce(state, fn producer, state ->
-      cond do
-        Producer.recovery_pending?(producer) ->
-          state
-
-        Producer.recovering?(producer) ->
-          put_producer(state, Producer.repeat_recovery(producer, after_from_checkpoint(state, producer)))
-
-        true ->
-          request_recovery(state, producer)
-      end
-    end)
-  end
-
-  # Runtime status is not stored: `:resuming` is reconstructed at startup from
-  # the checkpoint and the recovery still owed.
-  defp owe_recovery(state, id, kind), do: update_progress(state, id, &Snapshot.Progress.owe(&1, kind))
-
-  # Run after every event: issue what is due, then publish status changes.
-  defp settle(state), do: state |> reconcile() |> publish_status_changes()
-
-  # The only place recovery requests are issued. Every request therefore passes
-  # the same gates: control-plane ownership and a confirmed upstream session.
-  defp reconcile(state) do
-    if may_issue?(state) do
-      now = state.now_fun.()
-
-      Enum.reduce(state.producers, state, fn {_id, producer}, state ->
-        put_producer(state, Producer.advance(producer, now, state.inactivity_ms))
-      end)
-    else
-      state
-    end
-  end
+  ## Status -------------------------------------------------------------------
 
   # Status callbacks follow the reported status rather than individual
   # transitions. A producer added by a description reload is recorded without a
@@ -726,67 +632,11 @@ defmodule UOF.SDK.ProducerMonitor do
     end)
   end
 
-  defp may_issue?(state), do: owns_control?(state) and not Session.awaiting_readiness?(state.session)
-
-  defp after_from_checkpoint(state, producer) do
-    progress = Snapshot.progress(state.snapshot, producer.id)
-    if progress.pending_recovery == :full, do: nil, else: progress.checkpoint
-  end
-
-  defp preserve_full_recovery(state, producer, after_ts) do
-    if Snapshot.progress(state.snapshot, producer.id).pending_recovery == :full, do: nil, else: after_ts
-  end
-
-  defp put_producer(state, %Producer{} = producer) do
-    %{state | producers: Map.put(state.producers, producer.id, producer)}
-  end
-
-  # Checkpoints only move forward.
-  defp put_checkpoint(state, id, timestamp) do
-    update_progress(state, id, fn
-      %{checkpoint: checkpoint} = progress when is_integer(checkpoint) and checkpoint >= timestamp -> progress
-      progress -> %{progress | checkpoint: timestamp}
-    end)
-  end
-
-  # Writes are skipped when nothing changed; otherwise the snapshot is durable
-  # before the monitor acts on it.
-  defp update_progress(state, id, fun) do
-    progress = Snapshot.progress(state.snapshot, id)
-
-    case fun.(progress) do
-      ^progress -> state
-      updated -> save_snapshot(state, Snapshot.put_progress(state.snapshot, id, updated))
-    end
-  end
-
-  defp save_snapshot(%{snapshot: snapshot} = state, snapshot), do: state
-
-  # Instances of one subscription may share a snapshot, which the active
-  # instance owns. A passive instance's copy is stale, so it changes only in
-  # memory; promotion restores from the stored one.
-  defp save_snapshot(%{monitor_store: {store, store_opts}} = state, snapshot) do
-    if owns_control?(state), do: :ok = store.save(Snapshot.encode(snapshot), store_opts)
-    %{state | snapshot: snapshot}
-  end
-
-  ## Helpers ------------------------------------------------------------------
-  # Recovery state stays internal; a pending or in-flight job is reported as
-  # `:recovering`. A pending job of a silent producer is reported as `:down`:
-  # no recovery can start until the producer is heard again. A passive
-  # instance hears no alives, so silence is only judged while active.
+  # A passive instance observes nothing, so silence is only judged while
+  # active.
   defp reported_status(%Producer{} = producer, state) do
-    cond do
-      Producer.recovery_pending?(producer) and owns_control?(state) and
-          Producer.silent?(producer, state.now_fun.(), state.inactivity_ms) ->
-        :down
-
-      Producer.recovering?(producer) ->
-        :recovering
-
-      true ->
-        producer.status
-    end
+    silent? = owns_control?(state) and Producer.silent?(producer, state.now_fun.(), state.inactivity_ms)
+    Producer.status(producer, silent?)
   end
 
   defp reported_producer(%Producer{} = producer, state) do
@@ -801,21 +651,43 @@ defmodule UOF.SDK.ProducerMonitor do
     }
   end
 
-  defp emit_alive(result, subscribed?) do
-    producer = elem(result, 1)
+  defp notify(state, %ProducerStatus{} = producer) do
+    :telemetry.execute([:uof_sdk, :producer, :status], %{system_time: System.system_time()}, %{
+      producer_id: producer.id,
+      product: producer.product,
+      status: producer.status
+    })
 
-    if is_integer(producer.alive_delay) do
-      :telemetry.execute([:uof_sdk, :producer, :alive], %{delay_ms: producer.alive_delay}, %{
-        producer_id: producer.id,
-        product: producer.product,
-        subscribed: subscribed?
-      })
-    end
+    notify_handler(state, producer)
   end
 
-  defp with_producer(state, id, fun) do
+  defp notify_handler(%{handler: nil}, _producer), do: :ok
+
+  # Runs inside this GenServer: a raising handler crashes the monitor and is
+  # healed by supervision — :rest_for_one restarts the pipelines with it, so
+  # the re-subscribing consumers re-report failover ownership and
+  # ownership converges (see the supervisor comment in UOF.SDK).
+  defp notify_handler(%{handler: handler}, producer), do: handler.handle_producer_status(producer)
+
+  defp emit_alive(%Producer{alive_delay: delay} = producer, subscribed?) when is_integer(delay) do
+    :telemetry.execute([:uof_sdk, :producer, :alive], %{delay_ms: delay}, %{
+      producer_id: producer.id,
+      product: producer.product,
+      subscribed: subscribed?
+    })
+  end
+
+  defp emit_alive(%Producer{}, _subscribed?), do: :ok
+
+  ## Helpers ------------------------------------------------------------------
+
+  defp put_producer(state, %Producer{} = producer) do
+    %{state | producers: Map.put(state.producers, producer.id, producer)}
+  end
+
+  defp update_producer(state, id, fun) do
     case Map.fetch(state.producers, id) do
-      {:ok, producer} -> fun.(producer)
+      {:ok, producer} -> put_producer(state, fun.(producer))
       :error -> state
     end
   end

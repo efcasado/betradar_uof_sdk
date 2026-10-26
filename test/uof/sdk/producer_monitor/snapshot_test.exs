@@ -16,29 +16,6 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
     assert @snapshot |> Snapshot.encode() |> Snapshot.decode!() == @snapshot
   end
 
-  test "resume requires a producer that owes no recovery and has a checkpoint" do
-    assert Snapshot.resumable?(@snapshot, 1)
-    refute Snapshot.resumable?(@snapshot, 3)
-    refute Snapshot.resumable?(@snapshot, 99)
-
-    unchecked = Snapshot.put_progress(@snapshot, 4, %Progress{pending_recovery: nil})
-    refute Snapshot.resumable?(unchecked, 4)
-
-    for pending <- [:incremental, :full] do
-      owing = Snapshot.put_progress(@snapshot, 1, %Progress{checkpoint: 2_000, pending_recovery: pending})
-      refute Snapshot.resumable?(owing, 1)
-    end
-  end
-
-  test "a session change makes every producer owe a recovery, keeping checkpoints and full recoveries" do
-    changed = Snapshot.change_session(@snapshot, "ctag-s2")
-
-    assert changed.consumer_tag == "ctag-s2"
-    assert Snapshot.progress(changed, 1) == %Progress{checkpoint: 2_000, pending_recovery: :incremental}
-    assert Snapshot.progress(changed, 3).pending_recovery == :full
-    refute Snapshot.resumable?(changed, 1)
-  end
-
   test "rejects an old progress shape" do
     previous =
       :erlang.term_to_binary(

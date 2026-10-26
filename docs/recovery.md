@@ -22,7 +22,7 @@ Each Betradar producer (live odds, prematch, virtual sports, and so on) has a li
 
 | Status | Meaning |
 | --- | --- |
-| `:down` | Not synchronized: no recovery yet, or one waiting for the producer's alives to resume |
+| `:down` | Not synchronized: owes a recovery that waits for the producer's alives |
 | `:recovering` | A recovery is pending, being requested, or waiting for completion |
 | `:up` | The topic carries a continuous feed for the producer |
 | `:resuming` | After a restart, eligible to resume without recovery, pending continuity checks |
@@ -45,24 +45,30 @@ callbacks receive.
 
 ## When the SDK recovers
 
-Automatic recovery normally needs no application involvement. The SDK starts one when:
+Automatic recovery normally needs no application involvement. A producer owes a recovery when:
 
 | Trigger | Why |
 | --- | --- |
-| A producer's first subscribed `alive` while it is `:down` | Initial synchronization, at startup or for a producer added later |
+| It has never been synchronized | Initial synchronization, at startup or for a producer added later |
 | An `alive` with `subscribed=0` | Betradar reports the producer was down; it sends unsubscribed alives until a recovery is requested |
-| No `alive` within `inactivity_seconds` | The producer or the feed went silent; the SDK records the recovery at once but requests it only when alives resume, because Betradar rejects recovery for a silent producer |
-| A new upstream consumer tag | The connector's session to Betradar was re-established and messages may have been lost; every producer recovers |
+| No `alive` within `inactivity_seconds` | The producer or the feed went silent |
+| A new upstream consumer tag | The connector's session to Betradar was re-established and messages may have been lost; every producer owes a recovery |
 | A restart that cannot resume | See [restarts](#restarts) |
+
+The SDK records the recovery at once, but requests it only while the producer is heard: an
+`alive` within `inactivity_seconds`. Betradar rejects recovery for a silent producer, so until
+then the producer is `:down`; its next `alive` requests the recovery.
 
 ## How a recovery runs
 
-1. A trigger creates recovery intent for the producer, which is reported as `:recovering`.
+1. A trigger creates recovery intent for the producer, which is reported as `:recovering`, or
+   `:down` while the producer is not heard.
 2. The monitor persists that the producer requires recovery before any request is made, so a
    crash at any point cannot later resume from stale state.
-3. Once this instance owns the control plane, the upstream session is known, and the
-   per-producer cooldown (`min_interval_between_recoveries`) has passed, the SDK requests the
-   recovery from Betradar's API with a fresh request ID and this subscription's `node_id`.
+3. Once this instance owns the control plane, the upstream session is known, the producer is
+   heard, and the per-producer cooldown (`min_interval_between_recoveries`) has passed, the
+   SDK requests the recovery from Betradar's API with a fresh request ID and this
+   subscription's `node_id`.
 4. Betradar replays messages over the feed. They reach your handlers like live messages.
 5. A `snapshot_complete` carrying the request ID ends the recovery, and the producer is `:up`.
 
@@ -95,13 +101,15 @@ monitor recover again.
 **Interrupted.** An unsubscribed `alive`, or a heartbeat gap, while a request is in flight
 means the producer may have lost messages the running replay does not cover. The SDK emits
 `[:uof_sdk, :recovery, :interrupted]`, lets the recovery finish, and then repeats it from the
-last subscribed `alive` seen before the interruption, or from the original start if there was
-none. The producer stays `:recovering` until a recovery completes without interruption.
-For a pending full recovery, the repeat remains full. The incremental behavior follows the
-official SDKs.
+last subscribed `alive` seen before the interruption: the completed replay and those alives
+show the feed was continuous up to there, so the checkpoint advances to it. Without such an
+alive, the recovery repeats from the unchanged checkpoint. The producer stays `:recovering`
+until a recovery completes without interruption. For a pending full recovery, the repeat
+remains full. The incremental behavior follows the official SDKs.
 
-**Stalled.** A request with no `snapshot_complete` within `max_recovery_time` is reissued from
-its original start, with a warning log and `[:uof_sdk, :recovery, :stalled]`. Reissuing also
+**Stalled.** A request with no `snapshot_complete` within `max_recovery_time` is abandoned,
+with a warning log and `[:uof_sdk, :recovery, :stalled]`, and reissued from the checkpoint
+like any owed recovery: once the cooldown has passed and the producer is heard. Reissuing also
 covers an earlier interruption. An interrupted recovery that never completes is reissued this
 way.
 
@@ -110,7 +118,7 @@ way.
 RabbitMQ gives every consume session a consumer tag (`amq.ctag-…`). The source connector
 copies its session's tag into every message, and the system pipeline reports it from each
 `alive`. A tag the SDK has not seen before means the connector reconnected to Betradar and may
-have missed messages, so every producer recovers. Tags are compared by novelty, not arrival
+have missed messages, so every producer owes a recovery. Tags are compared by novelty, not arrival
 order, so a late message from an old session is not a change.
 
 ## Restarts
@@ -184,8 +192,8 @@ UOF.SDK.recover(1, full: true)
 
 | Result | Meaning |
 | --- | --- |
-| `:ok` | The recovery is requested, or recorded to be requested once the cooldown or the session allows |
-| `{:error, :already_recovering}` | The producer already has a recovery pending or in flight, including during a cooldown or retry delay |
+| `:ok` | The recovery is requested, or recorded to be requested once the producer is heard and the cooldown and session allow |
+| `{:error, :already_recovering}` | The producer already owes a recovery: it is `:down` or `:recovering` |
 | `{:error, :passive}` | This instance does not own the control plane; call it on the active instance |
 | `{:error, :unknown_producer}` | No such producer in the loaded descriptions |
 

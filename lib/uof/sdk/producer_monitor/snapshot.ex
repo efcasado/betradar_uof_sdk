@@ -27,12 +27,6 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
 
     # A producer with no saved progress owes a recovery.
     defstruct checkpoint: nil, pending_recovery: :incremental
-
-    @doc false
-    # A full recovery owed stays owed until it completes.
-    @spec owe(t(), :incremental | :full) :: t()
-    def owe(%__MODULE__{pending_recovery: :full} = progress, _kind), do: progress
-    def owe(%__MODULE__{} = progress, kind), do: %{progress | pending_recovery: kind}
   end
 
   @type description :: %{
@@ -53,30 +47,9 @@ defmodule UOF.SDK.ProducerMonitor.Snapshot do
   @format :uof_sdk_monitor_snapshot
   @version 1
 
-  @doc "Whether the producer may resume retained backlog without recovery."
-  @spec resumable?(t(), integer()) :: boolean()
-  def resumable?(%__MODULE__{} = snapshot, id) do
-    match?(%Progress{pending_recovery: nil, checkpoint: checkpoint} when is_integer(checkpoint), progress(snapshot, id))
-  end
-
-  @doc false
+  @doc "A producer's progress; a producer without saved progress owes a recovery."
   @spec progress(t(), integer()) :: Progress.t()
   def progress(%__MODULE__{producers: producers}, id), do: Map.get(producers, id, %Progress{})
-
-  @doc false
-  @spec put_progress(t(), integer(), Progress.t()) :: t()
-  def put_progress(%__MODULE__{} = snapshot, id, %Progress{} = progress) do
-    %{snapshot | producers: Map.put(snapshot.producers, id, progress)}
-  end
-
-  # A consume-session change can leave a delivery gap, so every producer owes a
-  # recovery with the new consumer tag. Both changes are saved in one write.
-  @doc false
-  @spec change_session(t(), binary()) :: t()
-  def change_session(%__MODULE__{} = snapshot, consumer_tag) do
-    producers = Map.new(snapshot.producers, fn {id, progress} -> {id, Progress.owe(progress, :incremental)} end)
-    %{snapshot | consumer_tag: consumer_tag, producers: producers}
-  end
 
   @doc "Encode a snapshot for a store."
   @spec encode(t()) :: binary()

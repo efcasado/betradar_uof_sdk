@@ -38,7 +38,7 @@ defmodule UOF.SDK.Config do
     inactivity_seconds: [
       type: :pos_integer,
       default: 20,
-      doc: "Heartbeat timeout and session-readiness waiting interval."
+      doc: "Heartbeat timeout."
     ],
     min_interval_between_recoveries: [
       type: :pos_integer,

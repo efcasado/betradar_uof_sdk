@@ -154,7 +154,7 @@ loads producer descriptions and recovery uses the HTTP API.
 | `:node_id` | `nil` | Positive ID scopes recovery replays and `snapshot_complete`; shared by every instance on one subscription, distinct across subscriptions using the same access token |
 | `:monitor_store` | `UOF.SDK.ProducerMonitor.Store.ETS` | `module` or `{module, opts}` persisting restart state; see [implementing a store](docs/architecture.md#implementing-a-store) |
 | `:concurrency` | `10` | Number of content processors in each SDK instance |
-| `:inactivity_seconds` | `20` | Heartbeat timeout and session-readiness waiting interval |
+| `:inactivity_seconds` | `20` | Heartbeat timeout |
 | `:min_interval_between_recoveries` | `30` | Per-producer recovery-request cooldown and retry delay |
 | `:max_recovery_time` | `600` | Wait for recovery completion before reissuing a stalled request; a reissue is logged as a warning |
 | `:producers` | `[]` | Fallback producer descriptions (`[id: 1, product: "liveodds", recovery_window_minutes: 4320]`), used only if the UOF API is unavailable at startup and no previous run stored any |

@@ -67,29 +67,28 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   test "a heartbeat gap owes a recovery" do
     stale_alive = up(last_alive_at: 100)
 
-    assert %Producer{pending_recovery: :incremental} = Producer.check(stale_alive, 1_001, 900, true)
+    assert %Producer{pending_recovery: :incremental} = Producer.check(stale_alive, 1_001, 900)
 
-    assert Producer.check(%{stale_alive | last_alive_at: 1_000}, 1_001, 900, true) == %{
+    assert Producer.check(%{stale_alive | last_alive_at: 1_000}, 1_001, 900) == %{
              stale_alive
              | last_alive_at: 1_000
            }
   end
 
-  test "a resuming producer becomes up only after a current heartbeat and the session gate" do
+  test "a resuming producer becomes up only after a current heartbeat" do
     producer = up(resuming_since: 0, last_alive_at: 1_000, alive_delay: 0)
     assert Producer.status(producer, false) == :resuming
 
-    assert Producer.check(producer, 1_001, 900, false) == producer
-    assert %Producer{resuming_since: nil} = resumed = Producer.check(producer, 1_001, 900, true)
+    assert %Producer{resuming_since: nil} = resumed = Producer.check(producer, 1_001, 900)
     assert Producer.status(resumed, false) == :up
 
     # An alive drained from backlog keeps the producer alive but is not current.
     stale = %{producer | alive_delay: 901}
-    assert Producer.check(stale, 1_001, 900, true) == stale
+    assert Producer.check(stale, 1_001, 900) == stale
 
     # Not heard within the interval of resuming: it owes a recovery.
     unheard = %{producer | last_alive_at: nil}
-    assert %Producer{pending_recovery: :incremental} = Producer.check(unheard, 901, 900, true)
+    assert %Producer{pending_recovery: :incremental} = Producer.check(unheard, 901, 900)
   end
 
   test "an alive records how late it was read" do

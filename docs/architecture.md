@@ -160,7 +160,7 @@ With one partition and a Failover subscription, the active system consumer recei
 message on the topic. A delivery gap can only start upstream of the topic, when the
 connector's consume session changes, and every message carries that session's consumer tag.
 Content not yet processed stays in the content subscription's backlog. The system pipeline
-alone therefore decides readiness, session changes, checkpoints, and recovery; the content
+alone therefore decides session changes, checkpoints, and recovery; the content
 pipeline does not report to the monitor.
 
 Producer status therefore describes feed continuity on the topic, not application progress:
@@ -267,7 +267,7 @@ business operations.
 
 `ProducerMonitor` is the control plane: a GenServer that owns producer status, recovery
 orchestration, and the persisted snapshot. Its inputs all come from the system pipeline
-(`alive`, `snapshot_complete`, and the upstream consumer tag), from broker ownership reports,
+(`alive` with its upstream consumer tag, and `snapshot_complete`), from broker ownership reports,
 and from manual requests. The [recovery guide](recovery.md) describes its behaviour.
 
 At startup it loads its snapshot and fetches the active producer descriptions through
@@ -426,11 +426,11 @@ readiness or prove that handlers have completed their work.
 | `UOF.SDK` | Supervisor and public API | The host application's supervisor |
 | `UOF.SDK.Config` | Validates configuration and derives the Pulsar wiring | The caller, at startup |
 | `UOF.SDK.Pulsar` | Builds the shared client and the two subscription specs from `:pulsar` | The caller, at startup |
-| `UOF.SDK.SystemPipeline` | Reads the system subscription: `alive`, `snapshot_complete`, and consumer tags go to the monitor; event content is acknowledged undecoded | Broadway, one processor |
+| `UOF.SDK.SystemPipeline` | Reads the system subscription: `alive` with its consumer tag, and `snapshot_complete`, go to the monitor; event content is acknowledged undecoded | Broadway, one processor |
 | `UOF.SDK.ContentPipeline` | Reads the content subscription: decodes event messages and calls the handler | Broadway, `:concurrency` processors |
 | `UOF.SDK.MessageMetadata` | Reads the connector's message properties | The pipelines |
 | `UOF.SDK.RoutingKey` | Parses routing keys: message type, event identity, node filtering | The pipelines |
-| `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session readiness, persists producer progress, publishes status callbacks | Its own process |
+| `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session changes, persists producer progress, publishes status callbacks | Its own process |
 | `ProducerMonitor.Producer` | Per-producer state machine: health, durable progress (checkpoint and owed recovery), the request in flight, and cooldowns; `advance/3` decides when a request is due | The monitor; each HTTP request runs in a linked task |
 | `ProducerMonitor.Session` | Tracks the upstream consumer tag, independently of producer state | The monitor |
 | `ProducerMonitor.Descriptions` | Loads producer descriptions from the UOF API, falling back to stored and then configured ones | The monitor; reloads run in a linked task |

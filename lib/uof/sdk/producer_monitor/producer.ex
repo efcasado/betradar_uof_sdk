@@ -8,7 +8,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   `checkpoint` and `pending_recovery` are the producer's durable progress,
   which the monitor persists after every event (`progress/1`, `restore/3`).
   Everything else is runtime state. Events record facts (`observe_alive/4`,
-  `check/4`, `owe/2`, `drop_request/1`, `complete_recovery/3`), and its
+  `check/3`, `owe/2`, `drop_request/1`, `complete_recovery/3`), and its
   reported status is derived from them (`status/2`). `advance/3` is the only
   function that issues requests: once a recovery is owed, nothing is in
   flight, the producer is heard, and the cooldown since the last attempt has
@@ -147,8 +147,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   end
 
   @doc false
-  @spec check(t(), integer(), non_neg_integer(), boolean()) :: t()
-  def check(%__MODULE__{} = producer, now, inactivity_ms, session_ready?) do
+  @spec check(t(), integer(), non_neg_integer()) :: t()
+  def check(%__MODULE__{} = producer, now, inactivity_ms) do
     cond do
       recovery_in_flight?(producer) and not producer.recovery.request.interrupted and
           silent?(producer, now, inactivity_ms) ->
@@ -160,7 +160,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       silent?(producer, now, inactivity_ms) ->
         owe(producer, :incremental)
 
-      is_integer(producer.resuming_since) and current_alive?(producer, inactivity_ms) and session_ready? ->
+      is_integer(producer.resuming_since) and current_alive?(producer, inactivity_ms) ->
         %{producer | resuming_since: nil}
 
       true ->

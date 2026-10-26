@@ -32,11 +32,10 @@ defmodule UOF.SDK.FeedIntegrationTest do
   defmodule Monitor do
     @moduledoc false
 
-    def alive(product, timestamp, subscribed?), do: notify({:observed_alive, product, timestamp, subscribed?})
+    def alive(product, timestamp, subscribed?, consumer_tag),
+      do: notify({:observed_alive, product, timestamp, subscribed?, consumer_tag})
 
     def snapshot_complete(product, request_id), do: notify({:observed_snapshot_complete, product, request_id})
-
-    def observe_consumer_tag(tag), do: notify({:observed_consumer_tag, tag})
 
     defp notify(message), do: send(Application.fetch_env!(:uof_sdk_test, :integration_test_pid), message)
   end
@@ -100,9 +99,8 @@ defmodule UOF.SDK.FeedIntegrationTest do
 
     publish_alive(channel, 42)
 
-    assert_receive {:observed_consumer_tag, consumer_tag}, 10_000
+    assert_receive {:observed_alive, 1, 42, true, consumer_tag}, 10_000
     assert is_binary(consumer_tag) and consumer_tag != ""
-    assert_receive {:observed_alive, 1, 42, true}, 10_000
   end
 
   test "a content subscription created after messages were published still receives them", %{channel: channel} do
@@ -209,8 +207,7 @@ defmodule UOF.SDK.FeedIntegrationTest do
   test "changes the system consumer tag when the source connector restarts", %{channel: channel} do
     publish_alive(channel, 100)
 
-    assert_receive {:observed_alive, 1, 100, true}, 10_000
-    assert_receive {:observed_consumer_tag, old_consumer_tag}, 10_000
+    assert_receive {:observed_alive, 1, 100, true, old_consumer_tag}, 10_000
 
     {:ok, old_queue} = TestSupport.source_queue()
     TestSupport.restart_source!()
@@ -220,8 +217,7 @@ defmodule UOF.SDK.FeedIntegrationTest do
 
     # The system subscription starts at the latest message, so these are the
     # only alives it receives, in topic order.
-    assert_receive {:observed_alive, 1, 101, true}, 10_000
-    assert_receive {:observed_consumer_tag, new_consumer_tag}, 10_000
+    assert_receive {:observed_alive, 1, 101, true, new_consumer_tag}, 10_000
 
     refute new_consumer_tag == old_consumer_tag
   end

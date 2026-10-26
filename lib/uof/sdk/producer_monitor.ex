@@ -238,7 +238,7 @@ defmodule UOF.SDK.ProducerMonitor do
           not owns_control?(state) ->
             {:reply, {:error, :passive}, state}
 
-          Producer.owes?(producer, kind) ->
+          Producer.owes_recovery?(producer, kind) ->
             {:reply, {:error, :already_recovering}, state}
 
           true ->

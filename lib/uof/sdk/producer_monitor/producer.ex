@@ -2,7 +2,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @moduledoc """
   State machine for one Betradar producer: health observations, the recovery
   it owes, and the request in flight. Its functions take the time as
-  arguments and perform no I/O; `UOF.SDK.ProducerMonitor.Requests` holds the
+  arguments; apart from logging and telemetry about their own transitions,
+  they have no side effects. `UOF.SDK.ProducerMonitor.Requests` holds the
   recovery settings and the clock, and sends the requests.
 
   `checkpoint` and `pending_recovery` are the producer's durable progress,
@@ -123,7 +124,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     cond do
       in_flight?(producer) -> observe_alive_in_flight(observed, gen_timestamp, subscribed?)
       not subscribed? -> owe(observed, :incremental)
-      recovering?(producer) -> observed
+      owes_recovery?(producer) -> observed
       gap?(previous, gen_timestamp, inactivity_ms) -> owe_after_gap(observed, previous, gen_timestamp)
       true -> advance_checkpoint(observed, gen_timestamp)
     end
@@ -136,7 +137,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       in_flight?(producer) and not producer.request.interrupted and silent?(producer, now, inactivity_ms) ->
         interrupt(producer, :alive_timeout)
 
-      recovering?(producer) ->
+      owes_recovery?(producer) ->
         producer
 
       silent?(producer, now, inactivity_ms) ->
@@ -193,17 +194,16 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   def complete_recovery(%__MODULE__{} = producer, _request_id, _now, _monotonic_now), do: producer
 
-  @doc false
-  @spec recovering?(t()) :: boolean()
-  def recovering?(%__MODULE__{pending_recovery: pending_recovery}), do: not is_nil(pending_recovery)
-
   @doc """
-  Whether the recovery the producer owes already covers one of `kind`: any
-  owed recovery covers an incremental one, and only a full one a full one.
+  Whether the producer owes a recovery that covers one of `kind`: any owed
+  recovery covers an incremental one, and only a full one a full one. Owing a
+  recovery is not the same as the `:recovering` status: a producer that is
+  not heard owes one but is `:down`.
   """
-  @spec owes?(t(), :incremental | :full) :: boolean()
-  def owes?(%__MODULE__{pending_recovery: owed}, :incremental), do: not is_nil(owed)
-  def owes?(%__MODULE__{pending_recovery: owed}, :full), do: owed == :full
+  @spec owes_recovery?(t(), :incremental | :full) :: boolean()
+  def owes_recovery?(producer, kind \\ :incremental)
+  def owes_recovery?(%__MODULE__{pending_recovery: owed}, :incremental), do: not is_nil(owed)
+  def owes_recovery?(%__MODULE__{pending_recovery: owed}, :full), do: owed == :full
 
   @doc """
   The lifecycle status reported to applications: `:down` while the producer

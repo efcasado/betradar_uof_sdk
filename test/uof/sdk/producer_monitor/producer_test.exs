@@ -75,13 +75,13 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
   test "a full recovery upgrades an incremental one, replacing its request in flight" do
     producer = in_flight(owing())
-    assert Producer.owes?(producer, :incremental)
-    refute Producer.owes?(producer, :full)
-    refute Producer.owes?(up(), :incremental)
+    assert Producer.owes_recovery?(producer)
+    refute Producer.owes_recovery?(producer, :full)
+    refute Producer.owes_recovery?(up())
 
     upgraded = Producer.owe(producer, :full)
     assert %Producer{pending_recovery: :full, request: nil} = upgraded
-    assert Producer.owes?(upgraded, :full)
+    assert Producer.owes_recovery?(upgraded, :full)
     assert Producer.owe(upgraded, :incremental) == upgraded
   end
 

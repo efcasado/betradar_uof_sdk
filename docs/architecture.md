@@ -442,7 +442,7 @@ readiness or prove that handlers have completed their work.
 | `UOF.SDK.MessageMetadata` | Reads the connector's message properties | The pipelines |
 | `UOF.SDK.RoutingKey` | Parses routing keys: message type, event identity, node filtering | The pipelines |
 | `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session changes, persists producer progress, publishes status callbacks | Its own process |
-| `ProducerMonitor.Producer` | Per-producer state machine: health, durable progress (checkpoint and owed recovery), and the request in flight; decides when a request is due. Takes the time as arguments and performs no I/O | The monitor |
+| `ProducerMonitor.Producer` | Per-producer state machine: health, durable progress (checkpoint and owed recovery), and the request in flight; decides when a request is due. Takes the time as arguments; its only side effects are logging and telemetry about its transitions | The monitor |
 | `ProducerMonitor.Requests` | Sends recovery requests: settings, request ids, the replay start and recovery window, the HTTP call, and how its response is read | The monitor; each HTTP request runs in a linked task |
 | `ProducerMonitor.Session` | Tracks the upstream consumer tag, independently of producer state | The monitor |
 | `ProducerMonitor.Descriptions` | Loads producer descriptions from the UOF API, falling back to stored and then configured ones | The monitor; reloads run in a linked task |

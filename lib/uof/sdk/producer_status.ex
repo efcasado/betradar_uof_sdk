@@ -5,13 +5,13 @@ defmodule UOF.SDK.ProducerStatus do
 
   `status` is one of:
 
-    * `:down` — not synchronized and no recovery is pending
-    * `:recovering` — waiting to request, requesting, or awaiting recovery
-      completion
-    * `:up` — the topic carries a continuous feed for the producer; content
-      processing may still be catching up
-    * `:resuming` — draining retained backlog after a restart and awaiting
-      current-session confirmation
+    * `:down` — not heard within `inactivity_seconds`: no `alive` read yet
+      since startup or promotion, or the producer went silent
+    * `:recovering` — heard, and owes a recovery: waiting to request,
+      requesting, or awaiting completion
+    * `:up` — heard, and the topic carries a continuous feed for the producer
+      as far as the system pipeline has read it; content processing may still
+      be catching up
 
   `last_alive_at` is when this node last observed a system heartbeat, in epoch
   milliseconds. `alive_delay` is how late that heartbeat was read, in
@@ -20,7 +20,7 @@ defmodule UOF.SDK.ProducerStatus do
   Betradar.
   """
 
-  @type status :: :down | :recovering | :up | :resuming
+  @type status :: :down | :recovering | :up
 
   @type t :: %__MODULE__{
           id: integer(),

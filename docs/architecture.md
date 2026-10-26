@@ -145,8 +145,9 @@ the system subscription has one active owner.
 
 The monitor starts passive and waits for the broker's ownership report. The active owner runs
 periodic health checks, issues recovery requests, and writes the snapshot. Passive instances
-continue their content processing. Demotion parks in-flight recoveries; promotion reloads the
-snapshot, restores producers from it as a restart does, and permits pending work to resume.
+continue their content processing and ignore system observations. Promotion restores
+producers from the stored snapshot exactly as a restart does, so requests the demoted
+instance had in flight are abandoned; the snapshot already records the recoveries they owe.
 The monitor also watches the active system consumer process and demotes when it exits, because
 an exit may arrive without a final passive ownership report. A replacement consumer must
 report ownership before the monitor resumes control-plane work.
@@ -159,7 +160,7 @@ With one partition and a Failover subscription, the active system consumer recei
 message on the topic. A delivery gap can only start upstream of the topic, when the
 connector's consume session changes, and every message carries that session's consumer tag.
 Content not yet processed stays in the content subscription's backlog. The system pipeline
-alone therefore decides readiness, session changes, checkpoints, and recovery; the content
+alone therefore decides session changes, checkpoints, and recovery; the content
 pipeline does not report to the monitor.
 
 Producer status therefore describes feed continuity on the topic, not application progress:
@@ -192,6 +193,17 @@ storing the last processed message timestamp, and states that slow processing ma
 down without issuing recovery. All three consume AMQP directly, where unprocessed content is
 lost with its queue. Here the checkpoint tracks feed continuity on the topic rather than
 application processing; the recovery overlap allows for short cross-key publication delays.
+
+Silence is judged two ways. Both official SDKs flag a producer down when no system
+alive has been received within the inactivity interval (the Java SDK's
+`AliveIntervalViolation`, the .NET SDK's `IsAliveViolated`), measured by local receipt time.
+Consuming AMQP live, receipt follows generation. Reading the topic, it does not: alives drained
+from a backlog after a restart, or by a lagging system pipeline, arrive close together however
+far apart they were generated. The SDK therefore also compares consecutive alives' generation
+timestamps, and the first alive after a restart with the checkpoint. The
+[alive documentation](https://docs.sportradar.com/uof/data-and-features/messages/system/alive)
+supports this: producers send alives every 10 seconds, the timestamps inside them are what
+matters, and timestamps not about 10 seconds apart indicate a problem on Betradar's side.
 
 ### Node Isolation
 
@@ -266,7 +278,7 @@ business operations.
 
 `ProducerMonitor` is the control plane: a GenServer that owns producer status, recovery
 orchestration, and the persisted snapshot. Its inputs all come from the system pipeline
-(`alive`, `snapshot_complete`, and the upstream consumer tag), from broker ownership reports,
+(`alive` with its upstream consumer tag, and `snapshot_complete`), from broker ownership reports,
 and from manual requests. The [recovery guide](recovery.md) describes its behaviour.
 
 At startup it loads its snapshot and fetches the active producer descriptions through
@@ -289,7 +301,7 @@ startup description fetch is the exception; it runs before the monitor takes obs
 `UOF.SDK.ProducerMonitor.Store` persists the monitor's restart state. The monitor owns that
 state and its rules; a store keeps only the latest snapshot, an opaque binary encoded by
 `UOF.SDK.ProducerMonitor.Snapshot`. Feed messages, application state, broker
-acknowledgements, and in-flight recovery jobs are not part of it.
+acknowledgements, and in-flight recovery requests are not part of it.
 
 The default `Store.ETS` keeps snapshots in a table owned by its supervised process. They
 survive monitor and pipeline restarts, but not a store-process or VM restart. Implement a
@@ -300,18 +312,20 @@ persistent store when progress must survive those.
 | Field | Meaning |
 | --- | --- |
 | `consumer_tag` | Committed consumer tag of the connector's upstream session |
-| `producers` | Per producer: recovery checkpoint (epoch milliseconds), whether it is synchronized with that session, and whether a full recovery is pending |
+| `producers` | Per producer: recovery checkpoint (epoch milliseconds) and the recovery it still owes: none when synchronized with that session, `:incremental` from the checkpoint, or `:full` |
 | `descriptions` | The last producer descriptions loaded from the UOF API |
 
-A producer may resume at startup only when it is synchronized and has a checkpoint. A consumer
-tag change saves the new tag with every producer unsynchronized, in one write. Recovery
-preparation saves the producer as unsynchronized before its HTTP request, so a crash at any
-point cannot resume from stale state. A pending full recovery stays full across a restart or
-session change until its matching completion. Checkpoints only move forward.
+The snapshot is a projection of the committed consumer tag and each producer's checkpoint and
+owed recovery. After every event, the monitor saves it before issuing any request, so recovery
+intent is durable before its HTTP request and a crash at any point cannot resume from stale
+state. A consumer tag change therefore saves the new tag with every producer unsynchronized,
+in one write. A producer may resume at startup only when it is synchronized and has a
+checkpoint. A pending full recovery stays full across a restart or session change until its
+matching completion. Checkpoints only move forward.
 
 The monitor saves only when the snapshot changes: on a session change, a checkpoint advance
-from a subscribed system heartbeat while `:up`, a producer's synchronization change, and newly
-loaded descriptions.
+from a subscribed system heartbeat while `:up` or from a recovery's completion, a
+producer's synchronization change, and newly loaded descriptions.
 
 `load/1` returns `nil` only when nothing has been saved, and the monitor then starts every
 producer `:down`. A stored binary that cannot be decoded fails startup: discarding it would
@@ -423,18 +437,20 @@ readiness or prove that handlers have completed their work.
 | `UOF.SDK` | Supervisor and public API | The host application's supervisor |
 | `UOF.SDK.Config` | Validates configuration and derives the Pulsar wiring | The caller, at startup |
 | `UOF.SDK.Pulsar` | Builds the shared client and the two subscription specs from `:pulsar` | The caller, at startup |
-| `UOF.SDK.SystemPipeline` | Reads the system subscription: `alive`, `snapshot_complete`, and consumer tags go to the monitor; event content is acknowledged undecoded | Broadway, one processor |
+| `UOF.SDK.SystemPipeline` | Reads the system subscription: `alive` with its consumer tag, and `snapshot_complete`, go to the monitor; event content is acknowledged undecoded | Broadway, one processor |
 | `UOF.SDK.ContentPipeline` | Reads the content subscription: decodes event messages and calls the handler | Broadway, `:concurrency` processors |
 | `UOF.SDK.MessageMetadata` | Reads the connector's message properties | The pipelines |
 | `UOF.SDK.RoutingKey` | Parses routing keys: message type, event identity, node filtering | The pipelines |
-| `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session readiness, persists transitions, publishes status callbacks | Its own process |
-| `ProducerMonitor.Producer` | Per-producer state machine: health, recovery jobs, cooldowns, request attempts, and timers | The monitor; each HTTP request runs in a linked task |
+| `UOF.SDK.ProducerMonitor` | The control plane: routes observations, applies ownership and session changes, persists producer progress, publishes status callbacks | Its own process |
+| `ProducerMonitor.Producer` | Per-producer state machine: health, durable progress (checkpoint and owed recovery), and the request in flight; decides when a request is due. Takes the time as arguments; its only side effects are logging and telemetry about its transitions | The monitor |
+| `ProducerMonitor.Requests` | Sends recovery requests: settings, request ids, the replay start and recovery window, the HTTP call, and how its response is read | The monitor; each HTTP request runs in a linked task |
 | `ProducerMonitor.Session` | Tracks the upstream consumer tag, independently of producer state | The monitor |
+| `ProducerMonitor.Descriptions` | Loads producer descriptions from the UOF API, falling back to stored and then configured ones | The monitor; reloads run in a linked task |
 | `ProducerMonitor.Snapshot` | The persisted state and its encoding | The monitor |
 | `ProducerMonitor.Store` | Persistence behaviour; `Store.ETS` is the default | The monitor; a store with `child_spec/1` also runs its own process |
 
-A recovery request's response returns to the monitor as a message. A response for a job
-completed, parked, or replaced meanwhile is dropped, and the superseded request is left to
+A recovery request's response returns to the monitor as a message. A response for a request
+completed, abandoned, or replaced meanwhile is dropped, and the superseded request is left to
 finish rather than shut down: it has usually reached Betradar already, and a duplicate request
 is harmless beyond quota.
 

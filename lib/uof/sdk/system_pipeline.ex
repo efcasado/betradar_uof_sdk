@@ -13,8 +13,9 @@ defmodule UOF.SDK.SystemPipeline do
     * `:producer` - Broadway producer spec for the Failover system
       subscription. It receives every message on the topic; event content is
       acked without decoding.
-    * `:monitor` - module that receives lifecycle side-effects (`alive`,
-      `snapshot_complete`, and the upstream consumer tag). Default `nil`.
+    * `:monitor` - module that receives lifecycle side-effects (`alive`, with
+      the upstream consumer tag it was delivered in, and `snapshot_complete`).
+      Default `nil`.
     * `:node_id` - this SDK node's id. `snapshot_complete` addressed to another
       node is acked without reaching the monitor, so a colliding `request_id`
       from another node cannot complete our recovery. `nil` accepts every node.
@@ -76,8 +77,7 @@ defmodule UOF.SDK.SystemPipeline do
   defp handle_system_message(%Message{} = message, context, rk) do
     case Schemas.XML.decode(message.data) do
       {:ok, decoded} ->
-        maybe_observe_consumer_tag(context.monitor, rk.message_type, message)
-        observe(context, rk, decoded)
+        observe(context, rk, decoded, message)
         message
 
       {:error, reason} ->
@@ -116,30 +116,22 @@ defmodule UOF.SDK.SystemPipeline do
 
   ## lifecycle side-effects --------------------------------------------------
 
-  defp observe(ctx, %RoutingKey{message_type: "alive"}, msg) do
+  # An alive carries the consumer tag it was delivered in, so the monitor
+  # checks the upstream session in the same step as the alive itself.
+  defp observe(ctx, %RoutingKey{message_type: "alive"}, msg, message) do
     # `subscribed=0` is itself a recovery signal. A malformed/missing timestamp
     # must not hide it; the monitor can observe an alive without checkpointing.
     if msg.product do
-      notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1])
+      consumer_tag = MessageMetadata.consumer_tag(message)
+      notify(ctx.monitor, :alive, [msg.product, msg.timestamp, msg.subscribed == 1, consumer_tag])
     end
   end
 
-  defp observe(ctx, %RoutingKey{message_type: "snapshot_complete"}, msg) do
+  defp observe(ctx, %RoutingKey{message_type: "snapshot_complete"}, msg, _message) do
     notify(ctx.monitor, :snapshot_complete, [msg.product, msg.request_id])
   end
 
-  defp observe(_ctx, %RoutingKey{}, _msg), do: :ok
-
-  defp maybe_observe_consumer_tag(nil, _type, _message), do: :ok
-
-  defp maybe_observe_consumer_tag(monitor, "alive", message) do
-    case MessageMetadata.consumer_tag(message) do
-      nil -> :ok
-      tag -> monitor.observe_consumer_tag(tag)
-    end
-  end
-
-  defp maybe_observe_consumer_tag(_monitor, _type, _message), do: :ok
+  defp observe(_ctx, %RoutingKey{}, _msg, _message), do: :ok
 
   defp notify(nil, _fun, _args), do: :ok
   defp notify(mod, fun, args), do: apply(mod, fun, args)

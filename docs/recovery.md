@@ -18,14 +18,15 @@ how to request a recovery yourself, and what to watch in production.
 
 ## Producer status
 
-Each Betradar producer (live odds, prematch, virtual sports, and so on) has a lifecycle status:
+Each Betradar producer (live odds, prematch, virtual sports, and so on) has a lifecycle status,
+derived from two facts: whether the producer is heard (an `alive` within `inactivity_seconds`),
+and whether it owes a recovery.
 
 | Status | Meaning |
 | --- | --- |
-| `:down` | Not synchronized: no recovery yet, or one waiting for the producer's alives to resume |
-| `:recovering` | A recovery is pending, being requested, or waiting for completion |
-| `:up` | The topic carries a continuous feed for the producer |
-| `:resuming` | After a restart, eligible to resume without recovery, pending continuity checks |
+| `:down` | Not heard: no `alive` read yet since startup or promotion, or the producer went silent |
+| `:recovering` | Heard, and owes a recovery: pending, being requested, or waiting for completion |
+| `:up` | Heard, and the topic carries a continuous feed for the producer |
 
 Query it at any time, or react to changes in `handle_producer_status/1`:
 
@@ -45,29 +46,35 @@ callbacks receive.
 
 ## When the SDK recovers
 
-Automatic recovery normally needs no application involvement. The SDK starts one when:
+Automatic recovery normally needs no application involvement. A producer owes a recovery when:
 
 | Trigger | Why |
 | --- | --- |
-| A producer's first subscribed `alive` while it is `:down` | Initial synchronization, at startup or for a producer added later |
+| It has never been synchronized | Initial synchronization, at startup or for a producer added later |
 | An `alive` with `subscribed=0` | Betradar reports the producer was down; it sends unsubscribed alives until a recovery is requested |
-| No `alive` within `inactivity_seconds` | The producer or the feed went silent; the SDK records the recovery at once but requests it only when alives resume, because Betradar rejects recovery for a silent producer |
-| A new upstream consumer tag | The connector's session to Betradar was re-established and messages may have been lost; every producer recovers |
+| No `alive` within `inactivity_seconds`, or two consecutive alives generated more than `inactivity_seconds` apart | The producer or the feed went silent. Betradar generates alives every 10 seconds; alives read from a backlog arrive close together however far apart they were generated, so their timestamps are compared too |
+| A new upstream consumer tag | The connector's session to Betradar was re-established and messages may have been lost; every producer owes a recovery |
 | A restart that cannot resume | See [restarts](#restarts) |
+
+The SDK records the recovery at once, but requests it only while the producer is heard: an
+`alive` within `inactivity_seconds`. Betradar rejects recovery for a silent producer, so until
+then the producer is `:down`; its next `alive` requests the recovery.
 
 ## How a recovery runs
 
-1. A trigger creates recovery intent for the producer, which is reported as `:recovering`.
+1. A trigger creates recovery intent for the producer, which is reported as `:recovering`, or
+   `:down` while the producer is not heard.
 2. The monitor persists that the producer requires recovery before any request is made, so a
    crash at any point cannot later resume from stale state.
-3. Once this instance owns the control plane, the upstream session is known, and the
-   per-producer cooldown (`min_interval_between_recoveries`) has passed, the SDK requests the
-   recovery from Betradar's API with a fresh request ID and this subscription's `node_id`.
+3. Once this instance owns the control plane, the producer is heard, and the per-producer
+   cooldown (`min_interval_between_recoveries`) has passed, the SDK requests the recovery from
+   Betradar's API with a fresh request ID and this subscription's `node_id`.
 4. Betradar replays messages over the feed. They reach your handlers like live messages.
 5. A `snapshot_complete` carrying the request ID ends the recovery, and the producer is `:up`.
 
 **Incremental or full.** While a producer is `:up`, each subscribed system `alive` advances
-its stored checkpoint. Each incremental request starts 60 seconds before that timestamp to
+its stored checkpoint, and a completed recovery advances it to the last subscribed `alive`
+seen while the request ran. Each incremental request starts 60 seconds before that timestamp to
 allow for short publication reorderings in key-based Pulsar batches. The checkpoint itself
 does not move back. The overlap can replay duplicates; it cannot guarantee recovery of every
 message delayed longer than 60 seconds. Without a checkpoint, for example on a first start
@@ -81,9 +88,9 @@ the SDK moves an `after` timestamp near the window edge to 10 minutes inside the
 allow for clock skew and request latency. Older messages then fall outside the replay. Use
 [per-event recovery](#recovering-a-single-event) for events you know were affected.
 
-**Request IDs** come from a per-producer sequence starting at a random offset, so a completion
-for an older request, issued before a restart or by another instance, does not complete a
-newer one.
+**Request IDs** come from a per-monitor sequence starting at a random offset. The offset
+reduces the chance that an older request's completion matches a new request after a restart
+or promotion.
 
 **Failures.** A rejected or failed request (an API error, an HTTP transport error, or a
 response other than `ACCEPTED`) is retried after `min_interval_between_recoveries`. An
@@ -95,22 +102,25 @@ monitor recover again.
 **Interrupted.** An unsubscribed `alive`, or a heartbeat gap, while a request is in flight
 means the producer may have lost messages the running replay does not cover. The SDK emits
 `[:uof_sdk, :recovery, :interrupted]`, lets the recovery finish, and then repeats it from the
-last subscribed `alive` seen before the interruption, or from the original start if there was
-none. The producer stays `:recovering` until a recovery completes without interruption.
-For a pending full recovery, the repeat remains full. The incremental behavior follows the
-official SDKs.
+last subscribed `alive` seen before the interruption: the completed replay and those alives
+show the feed was continuous up to there, so the checkpoint advances to it. Without such an
+alive, the recovery repeats from the unchanged checkpoint. The producer stays `:recovering`
+until a recovery completes without interruption. For a pending full recovery, the repeat
+remains full. The incremental behavior follows the official SDKs.
 
-**Stalled.** A request with no `snapshot_complete` within `max_recovery_time` is reissued from
-its original start, with a warning log and `[:uof_sdk, :recovery, :stalled]`. Reissuing also
+**Stalled.** A request with no `snapshot_complete` within `max_recovery_time` is abandoned,
+with a warning log and `[:uof_sdk, :recovery, :stalled]`, and reissued from the checkpoint
+like any owed recovery: once the cooldown has passed and the producer is heard. Reissuing also
 covers an earlier interruption. An interrupted recovery that never completes is reissued this
 way.
 
 ## Consume sessions
 
 RabbitMQ gives every consume session a consumer tag (`amq.ctag-…`). The source connector
-copies its session's tag into every message, and the system pipeline reports it from each
-`alive`. A tag the SDK has not seen before means the connector reconnected to Betradar and may
-have missed messages, so every producer recovers. Tags are compared by novelty, not arrival
+copies its session's tag into every message, and the system pipeline reports it with each
+`alive`. The monitor checks the tag before it applies the `alive`, so a producer is never
+heard, and no recovery is requested for it, in a session that has not been checked. A tag the SDK has not seen before means the connector reconnected to Betradar and may
+have missed messages, so every producer owes a recovery. Tags are compared by novelty, not arrival
 order, so a late message from an old session is not a change.
 
 ## Restarts
@@ -118,20 +128,23 @@ order, so a late message from an old session is not a change.
 The monitor persists the last consumer tag and, per producer, its checkpoint, whether it was
 synchronized, and whether a full recovery is pending. After a restart:
 
-- A synchronized producer with a checkpoint starts `:resuming`. It becomes `:up` once the
-  system pipeline reports the same consumer tag and an `alive` generated within
-  `inactivity_seconds` arrives: the upstream session never broke, so the backlog on the topic
-  is complete and no recovery is needed. Older alives drained from the backlog keep the
-  producer alive but do not count, so a session change or unsubscribed alive still queued
-  behind them is read before the producer is reported `:up`.
+- A synchronized producer with a checkpoint resumes without recovery. It is `:down` until its
+  first `alive` with the same consumer tag, then `:up`: the upstream session never broke, so
+  the backlog on the topic is complete. Status describes the topic as far as the system
+  pipeline has read it, so an `alive` drained from the backlog counts; a session change or
+  unsubscribed `alive` still queued behind it triggers a recovery when it is read, as during
+  normal operation.
+- That first `alive` is compared with the checkpoint. One generated more than
+  `inactivity_seconds` after it means the producer went silent while the SDK was down, and
+  the producer recovers from the checkpoint instead.
 - A different consumer tag means the session broke while the SDK was down; each producer
   recovers from its checkpoint unless a full recovery is pending.
 - A producer without a synchronized checkpoint starts `:down` and recovers on its first
   `alive`.
 - A pending full recovery remains full, even if the producer has an older checkpoint. It is
   cleared only after a matching `snapshot_complete` completes the recovery.
-- Recovery requests wait until the system pipeline reports a consumer tag. If none arrives
-  within `inactivity_seconds`, the monitor crashes so supervision restarts the pipelines.
+- A producer not heard within `inactivity_seconds` of the restart owes a recovery, as after
+  any heartbeat gap.
 
 With the default ETS store this only survives monitor and pipeline restarts, not VM restarts;
 see [monitor store](deployment.md#monitor-store).
@@ -139,22 +152,22 @@ see [monitor store](deployment.md#monitor-store).
 ## Control-plane ownership
 
 Only the instance that owns the Failover system subscription issues recovery requests and
-writes the snapshot. The others process their share of content. When ownership moves,
-in-flight recoveries on the demoted instance are parked, and the promoted instance reloads the
-snapshot and restores producers from it as on a [restart](#restarts): in an unchanged upstream
-session it resumes without recovery. This needs a store shared by the instances; see
+writes the snapshot. The others process their share of content and ignore system
+observations. When ownership moves, the promoted instance restores producers from the
+snapshot exactly as on a [restart](#restarts): in an unchanged upstream session it resumes
+without recovery, and a recovery the snapshot owes, including a full one, is requested once
+the producer is heard. Recoveries the demoted instance had in flight are abandoned; the
+snapshot already records that they are owed. This needs a store shared by the instances; see
 [monitor store](deployment.md#monitor-store).
-If another owner requested a full recovery while an instance was passive, promotion applies
-that persisted requirement to any recovery job the instance had parked earlier.
 If the active system consumer exits without reporting demotion, the monitor detects its exit
-and parks its recoveries. A replacement consumer's ownership report determines whether the
-instance resumes as active or stays passive.
+and demotes. A replacement consumer's ownership report determines whether the instance
+resumes as active or stays passive.
 
 ## Time controls
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `inactivity_seconds` | `20` | Heartbeat timeout; also bounds how long a restart waits for the consumer tag |
+| `inactivity_seconds` | `20` | Heartbeat timeout: the longest wait for an `alive`, also measured from a restart or promotion, and the longest gap between consecutive alives' generation timestamps |
 | `min_interval_between_recoveries` | `30` | Per-producer cooldown between recovery requests, and the retry delay after a failed one |
 | `max_recovery_time` | `600` | Wait for `snapshot_complete` before reissuing a request |
 
@@ -164,7 +177,8 @@ the [rate limits](#rate-limits).
 
 Heartbeat inactivity uses local observation time, and the recovery window is applied against
 the local wall clock; the cooldown uses monotonic time. Durations are not hard real-time
-deadlines: checks run on the monitor's tick.
+deadlines: checks run on the monitor's tick. A heartbeat gap is also judged when the `alive`
+or `snapshot_complete` that ends it arrives, so a gap that ends between two ticks still counts.
 
 ## Manual recovery
 
@@ -172,7 +186,7 @@ deadlines: checks run on the monitor's tick.
 
 `UOF.SDK.recover/2` asks the monitor to recover a producer. It follows exactly the same path
 as an automatic recovery: persisted intent, the cooldown, the `:recovering` status, completion
-by `snapshot_complete`, interruption handling, and the stall timer.
+by `snapshot_complete`, interruption handling, and the stall check.
 
 ```elixir
 UOF.SDK.recover(1)
@@ -184,8 +198,8 @@ UOF.SDK.recover(1, full: true)
 
 | Result | Meaning |
 | --- | --- |
-| `:ok` | The recovery is requested, or recorded to be requested once the cooldown or the session allows |
-| `{:error, :already_recovering}` | The producer already has a recovery pending or in flight, including during a cooldown or retry delay |
+| `:ok` | The recovery is requested, or recorded to be requested once the producer is heard and the cooldown allows |
+| `{:error, :already_recovering}` | The producer already owes a recovery that covers this one: any recovery for a plain request, a full one for `full: true` |
 | `{:error, :passive}` | This instance does not own the control plane; call it on the active instance |
 | `{:error, :unknown_producer}` | No such producer in the loaded descriptions |
 
@@ -199,9 +213,10 @@ own.
 producer, not the messages since a point in time. Use it when your application's own state no
 longer matches the feed and you need to rebuild it from current odds, for example after
 restoring your database from an older backup or after fixing a handler bug that corrupted
-stored odds. The full request is repeated as full if it is interrupted by a consume-session
-change or monitor restart; it is not converted to an incremental request from an older
-checkpoint.
+stored odds. If the producer already owes an incremental recovery, `full: true` upgrades it,
+abandoning any incremental request in flight. The full request is repeated as full if it is
+interrupted by a consume-session change or monitor restart; it is not converted to an
+incremental request from an older checkpoint.
 
 Betradar describes this as a recovery of odds; for the settlements, cancellations, and
 rollbacks of specific events, use [stateful message recovery](#recovering-a-single-event).

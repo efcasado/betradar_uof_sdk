@@ -7,36 +7,13 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
   @snapshot %Snapshot{
     consumer_tag: "ctag-s",
     producers: %{
-      1 => %Progress{checkpoint: 2_000, synchronized: true},
-      3 => %Progress{checkpoint: nil, synchronized: false, full_recovery_pending: true}
+      1 => %Progress{checkpoint: 2_000, pending_recovery: nil},
+      3 => %Progress{checkpoint: nil, pending_recovery: :full}
     }
   }
 
   test "round-trips through its encoding" do
     assert @snapshot |> Snapshot.encode() |> Snapshot.decode!() == @snapshot
-  end
-
-  test "resume requires a synchronized producer with a checkpoint" do
-    assert Snapshot.resumable?(@snapshot, 1)
-    refute Snapshot.resumable?(@snapshot, 3)
-    refute Snapshot.resumable?(@snapshot, 99)
-
-    unchecked = Snapshot.put_progress(@snapshot, 4, %Progress{synchronized: true})
-    refute Snapshot.resumable?(unchecked, 4)
-
-    pending =
-      Snapshot.put_progress(@snapshot, 1, %Progress{checkpoint: 2_000, synchronized: true, full_recovery_pending: true})
-
-    refute Snapshot.resumable?(pending, 1)
-  end
-
-  test "a session change unsynchronizes every producer and keeps checkpoints" do
-    changed = Snapshot.change_session(@snapshot, "ctag-s2")
-
-    assert changed.consumer_tag == "ctag-s2"
-    assert Snapshot.progress(changed, 1) == %Progress{checkpoint: 2_000, synchronized: false}
-    assert Snapshot.progress(changed, 3).full_recovery_pending
-    refute Snapshot.resumable?(changed, 1)
   end
 
   test "rejects an old progress shape" do
@@ -46,6 +23,15 @@ defmodule UOF.SDK.ProducerMonitor.SnapshotTest do
       )
 
     assert_raise ArgumentError, ~r/invalid producer monitor snapshot progress/, fn -> Snapshot.decode!(previous) end
+
+    # The shape with separate synchronized and full-recovery flags.
+    flags =
+      :erlang.term_to_binary(
+        {:uof_sdk_monitor_snapshot, 1,
+         %{consumer_tag: "ctag-s", producers: %{1 => {2_000, true, false}}, descriptions: []}}
+      )
+
+    assert_raise ArgumentError, ~r/invalid producer monitor snapshot progress/, fn -> Snapshot.decode!(flags) end
   end
 
   test "rejects binaries that are not external terms" do

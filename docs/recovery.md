@@ -18,14 +18,15 @@ how to request a recovery yourself, and what to watch in production.
 
 ## Producer status
 
-Each Betradar producer (live odds, prematch, virtual sports, and so on) has a lifecycle status:
+Each Betradar producer (live odds, prematch, virtual sports, and so on) has a lifecycle status,
+derived from two facts: whether the producer is heard (an `alive` within `inactivity_seconds`),
+and whether it owes a recovery.
 
 | Status | Meaning |
 | --- | --- |
-| `:down` | Not synchronized: owes a recovery that waits for the producer's alives |
-| `:recovering` | A recovery is pending, being requested, or waiting for completion |
-| `:up` | The topic carries a continuous feed for the producer |
-| `:resuming` | After a restart, eligible to resume without recovery, pending continuity checks |
+| `:down` | Not heard: no `alive` read yet since startup or promotion, or the producer went silent |
+| `:recovering` | Heard, and owes a recovery: pending, being requested, or waiting for completion |
+| `:up` | Heard, and the topic carries a continuous feed for the producer |
 
 Query it at any time, or react to changes in `handle_producer_status/1`:
 
@@ -126,20 +127,20 @@ order, so a late message from an old session is not a change.
 The monitor persists the last consumer tag and, per producer, its checkpoint, whether it was
 synchronized, and whether a full recovery is pending. After a restart:
 
-- A synchronized producer with a checkpoint starts `:resuming`. It becomes `:up` once an
-  `alive` generated within `inactivity_seconds` arrives with the same consumer tag: the
-  upstream session never broke, so the backlog on the topic is complete and no recovery is
-  needed. Older alives drained from the backlog keep the
-  producer alive but do not count, so a session change or unsubscribed alive still queued
-  behind them is read before the producer is reported `:up`.
+- A synchronized producer with a checkpoint resumes without recovery. It is `:down` until its
+  first `alive` with the same consumer tag, then `:up`: the upstream session never broke, so
+  the backlog on the topic is complete. Status describes the topic as far as the system
+  pipeline has read it, so an `alive` drained from the backlog counts; a session change or
+  unsubscribed `alive` still queued behind it triggers a recovery when it is read, as during
+  normal operation.
 - A different consumer tag means the session broke while the SDK was down; each producer
   recovers from its checkpoint unless a full recovery is pending.
 - A producer without a synchronized checkpoint starts `:down` and recovers on its first
   `alive`.
 - A pending full recovery remains full, even if the producer has an older checkpoint. It is
   cleared only after a matching `snapshot_complete` completes the recovery.
-- A resuming producer not heard within `inactivity_seconds` owes a recovery and is `:down`
-  until its alives resume, as after any heartbeat gap.
+- A producer not heard within `inactivity_seconds` of the restart owes a recovery, as after
+  any heartbeat gap.
 
 With the default ETS store this only survives monitor and pipeline restarts, not VM restarts;
 see [monitor store](deployment.md#monitor-store).
@@ -162,7 +163,7 @@ resumes as active or stays passive.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `inactivity_seconds` | `20` | Heartbeat timeout, including for a producer resuming after a restart |
+| `inactivity_seconds` | `20` | Heartbeat timeout, also measured from a restart or promotion |
 | `min_interval_between_recoveries` | `30` | Per-producer cooldown between recovery requests, and the retry delay after a failed one |
 | `max_recovery_time` | `600` | Wait for `snapshot_complete` before reissuing a request |
 

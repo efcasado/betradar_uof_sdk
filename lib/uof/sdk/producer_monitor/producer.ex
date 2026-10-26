@@ -9,7 +9,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   which the monitor persists after every event (`progress/1`, `restore/3`).
   Everything else is runtime state. Events record facts (`observe_alive/4`,
   `check/3`, `owe/2`, `drop_request/1`, `complete_recovery/3`), and its
-  reported status is derived from them (`status/2`). `advance/3` is the only
+  reported status is derived from two of them: whether it is heard, and
+  whether it owes a recovery (`status/2`). `advance/3` is the only
   function that issues requests: once a recovery is owed, nothing is in
   flight, the producer is heard, and the cooldown since the last attempt has
   passed.
@@ -63,7 +64,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
           pending_recovery: Progress.pending_recovery(),
           last_alive_at: integer() | nil,
           alive_delay: integer() | nil,
-          resuming_since: integer() | nil,
+          restored_at: integer() | nil,
           recovery: recovery_state() | nil
         }
 
@@ -76,7 +77,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     :checkpoint,
     :last_alive_at,
     :alive_delay,
-    :resuming_since,
+    :restored_at,
     :recovery,
     pending_recovery: :incremental
   ]
@@ -102,29 +103,28 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   @doc """
   Restore durable progress, discarding runtime state, as at startup.
 
-  A producer that owes no recovery and has a checkpoint resumes; any other
-  owes a recovery. `resuming_since` starts the heartbeat interval a resuming
-  producer gets, without counting as a heartbeat. A request in flight is
-  abandoned; its response and completion no longer match.
+  A producer that owes no recovery and has a checkpoint resumes without one;
+  any other owes a recovery. Either way it is `:down` until heard, and
+  `restored_at` starts the heartbeat interval it gets, without counting as a
+  heartbeat. A request in flight is abandoned; its response and completion no
+  longer match.
   """
   @spec restore(t(), Progress.t(), integer()) :: t()
   def restore(%__MODULE__{} = producer, %Progress{} = progress, now) do
-    producer = %{
+    pending_recovery =
+      if is_nil(progress.pending_recovery) and is_integer(progress.checkpoint),
+        do: nil,
+        else: progress.pending_recovery || :incremental
+
+    %{
       producer
       | checkpoint: progress.checkpoint,
+        pending_recovery: pending_recovery,
         last_alive_at: nil,
         alive_delay: nil,
-        resuming_since: nil,
+        restored_at: now,
         recovery: %{producer.recovery | request: nil}
     }
-
-    case progress do
-      %Progress{pending_recovery: nil, checkpoint: checkpoint} when is_integer(checkpoint) ->
-        %{producer | pending_recovery: nil, resuming_since: now}
-
-      %Progress{pending_recovery: pending_recovery} ->
-        %{producer | pending_recovery: pending_recovery || :incremental}
-    end
   end
 
   @doc "The producer's durable progress."
@@ -141,8 +141,8 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
     cond do
       recovery_in_flight?(producer) -> observe_alive_in_flight(observed, gen_timestamp, subscribed?)
       not subscribed? -> owe(observed, :incremental)
-      up?(producer) -> advance_checkpoint(observed, gen_timestamp)
-      true -> observed
+      recovering?(producer) -> observed
+      true -> advance_checkpoint(observed, gen_timestamp)
     end
   end
 
@@ -160,9 +160,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
       silent?(producer, now, inactivity_ms) ->
         owe(producer, :incremental)
 
-      is_integer(producer.resuming_since) and current_alive?(producer, inactivity_ms) ->
-        %{producer | resuming_since: nil}
-
       true ->
         producer
     end
@@ -174,7 +171,7 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   """
   @spec owe(t(), :incremental | :full) :: t()
   def owe(%__MODULE__{pending_recovery: :full} = producer, _kind), do: producer
-  def owe(%__MODULE__{} = producer, kind), do: %{producer | pending_recovery: kind, resuming_since: nil}
+  def owe(%__MODULE__{} = producer, kind), do: %{producer | pending_recovery: kind}
 
   @doc """
   Abandon the request in flight, if any. The recovery stays owed, and
@@ -217,33 +214,30 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   def recovering?(%__MODULE__{pending_recovery: pending_recovery}), do: not is_nil(pending_recovery)
 
   @doc """
-  The lifecycle status reported to applications. A producer that owes a
-  recovery is `:recovering` while its request is in flight or can be issued,
-  and `:down` while it is not heard: Betradar accepts recovery only for a
-  producer that is alive. `silent?` is the monitor's judgement of
-  `silent?/3`.
+  The lifecycle status reported to applications: `:down` while the producer
+  is not heard, otherwise `:recovering` while it owes a recovery, otherwise
+  `:up`. `heard?` is the monitor's judgement of `heard?/3`.
   """
   @spec status(t(), boolean()) :: UOF.SDK.ProducerStatus.status()
-  def status(%__MODULE__{pending_recovery: nil, resuming_since: since}, _silent?) when is_integer(since), do: :resuming
-  def status(%__MODULE__{pending_recovery: nil}, _silent?), do: :up
-
-  def status(%__MODULE__{} = producer, silent?) do
-    if recovery_in_flight?(producer) or (is_integer(producer.last_alive_at) and not silent?),
-      do: :recovering,
-      else: :down
-  end
+  def status(%__MODULE__{}, false), do: :down
+  def status(%__MODULE__{pending_recovery: nil}, true), do: :up
+  def status(%__MODULE__{}, true), do: :recovering
 
   @doc """
-  Whether the producer has gone quiet: no alive within `inactivity_ms`, or, for
-  a resuming producer not heard since it was restored, none within
-  `inactivity_ms` of resuming.
+  Whether the producer has been heard within `inactivity_ms`. Betradar accepts
+  recovery only for a producer that is alive.
   """
-  @spec silent?(t(), integer(), non_neg_integer()) :: boolean()
-  def silent?(%__MODULE__{last_alive_at: nil, resuming_since: since}, now, ms) when is_integer(since),
-    do: now - since > ms
+  @spec heard?(t(), integer(), non_neg_integer()) :: boolean()
+  def heard?(%__MODULE__{} = producer, now, inactivity_ms) do
+    is_integer(producer.last_alive_at) and not silent?(producer, now, inactivity_ms)
+  end
 
-  def silent?(%__MODULE__{last_alive_at: nil}, _now, _ms), do: false
-  def silent?(%__MODULE__{last_alive_at: timestamp}, now, ms), do: now - timestamp > ms
+  # Whether the producer has gone quiet: no alive within `inactivity_ms`, or
+  # none within `inactivity_ms` of being restored. A producer added at runtime
+  # is not silent before its first alive.
+  defp silent?(%__MODULE__{last_alive_at: nil, restored_at: nil}, _now, _ms), do: false
+  defp silent?(%__MODULE__{last_alive_at: nil, restored_at: since}, now, ms), do: now - since > ms
+  defp silent?(%__MODULE__{last_alive_at: timestamp}, now, ms), do: now - timestamp > ms
 
   @doc """
   Issue the producer's recovery request if it is due.
@@ -283,11 +277,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   defp due?(%__MODULE__{recovery: recovery} = producer, now, inactivity_ms) do
     is_nil(recovery.request) and heard?(producer, now, inactivity_ms) and
       elapsed_since_issue(recovery) >= recovery.min_interval_ms
-  end
-
-  # Betradar accepts recovery only for a producer that is alive.
-  defp heard?(producer, now, inactivity_ms) do
-    is_integer(producer.last_alive_at) and not silent?(producer, now, inactivity_ms)
   end
 
   defp elapsed_since_issue(%{last_issued_at: nil}), do: :infinity
@@ -434,9 +423,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
 
   defp recovery_in_flight?(%__MODULE__{recovery: %{request: request}}), do: not is_nil(request)
 
-  defp up?(%__MODULE__{pending_recovery: nil, resuming_since: nil}), do: true
-  defp up?(%__MODULE__{}), do: false
-
   # Checkpoints only move forward.
   defp advance_checkpoint(%__MODULE__{} = producer, nil), do: producer
 
@@ -471,13 +457,6 @@ defmodule UOF.SDK.ProducerMonitor.Producer do
   # generation timestamp, so it includes clock skew with Betradar.
   defp alive_delay(gen_timestamp, now) when is_integer(gen_timestamp), do: now - gen_timestamp
   defp alive_delay(nil, _now), do: nil
-
-  # Alives drained from retained backlog prove the feed is flowing but not that
-  # the backlog has been read: a session change or unsubscribed alive may still
-  # be queued behind them. Resuming waits for one generated within the
-  # heartbeat interval.
-  defp current_alive?(%__MODULE__{last_alive_at: nil}, _ms), do: false
-  defp current_alive?(%__MODULE__{alive_delay: delay}, ms), do: is_integer(delay) and delay <= ms
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

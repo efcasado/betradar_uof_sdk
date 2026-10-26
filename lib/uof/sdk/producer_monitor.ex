@@ -591,8 +591,12 @@ defmodule UOF.SDK.ProducerMonitor do
   # A passive instance observes nothing, so silence is only judged while
   # active.
   defp reported_status(%Producer{} = producer, state) do
-    silent? = owns_control?(state) and Producer.silent?(producer, state.now_fun.(), state.inactivity_ms)
-    Producer.status(producer, silent?)
+    heard? =
+      if owns_control?(state),
+        do: Producer.heard?(producer, state.now_fun.(), state.inactivity_ms),
+        else: is_integer(producer.last_alive_at)
+
+    Producer.status(producer, heard?)
   end
 
   defp reported_producer(%Producer{} = producer, state) do

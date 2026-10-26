@@ -42,8 +42,8 @@ defmodule UOF.SDK.MessageHandler do
   @callback handle_fixture_change(%Feed.FixtureChange{}, Context.t()) :: :ok
 
   @doc """
-  Called whenever a producer's lifecycle status changes (down, recovering, up,
-  resuming). Receives the same `UOF.SDK.ProducerStatus` returned by
+  Called whenever a producer's lifecycle status changes (down, recovering,
+  up). Receives the same `UOF.SDK.ProducerStatus` returned by
   `UOF.SDK.producers/0`.
   """
   @callback handle_producer_status(UOF.SDK.ProducerStatus.t()) :: :ok

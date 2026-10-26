@@ -19,14 +19,14 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
   test "restore resumes only a producer that owes no recovery and has a checkpoint" do
     producer = Producer.configure_recovery(%Producer{id: 1, last_alive_at: 5, alive_delay: 1}, [])
 
-    assert %Producer{pending_recovery: nil, checkpoint: 2_000, resuming_since: 10, last_alive_at: nil, alive_delay: nil} =
+    assert %Producer{pending_recovery: nil, checkpoint: 2_000, restored_at: 10, last_alive_at: nil, alive_delay: nil} =
              Producer.restore(producer, %Progress{checkpoint: 2_000, pending_recovery: nil}, 10)
 
-    assert %Producer{pending_recovery: :incremental, resuming_since: nil} =
+    assert %Producer{pending_recovery: :incremental, restored_at: 10} =
              Producer.restore(producer, %Progress{checkpoint: nil, pending_recovery: nil}, 10)
 
     for pending <- [:incremental, :full] do
-      assert %Producer{pending_recovery: ^pending, checkpoint: 2_000, resuming_since: nil} =
+      assert %Producer{pending_recovery: ^pending, checkpoint: 2_000, restored_at: 10} =
                Producer.restore(producer, %Progress{checkpoint: 2_000, pending_recovery: pending}, 10)
     end
 
@@ -40,8 +40,8 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     observed = Producer.observe_alive(producer, 900, true, 1_000)
     assert observed.last_alive_at == 1_000
     assert observed.pending_recovery == :incremental
-    assert Producer.status(observed, false) == :recovering
-    assert Producer.status(observed, true) == :down
+    assert Producer.heard?(observed, 1_000, 900)
+    assert Producer.status(observed, true) == :recovering
   end
 
   test "an unsubscribed alive owes a recovery, and a full one stays full" do
@@ -59,8 +59,8 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
     assert Producer.observe_alive(producer, 800, true, 1_100).checkpoint == 900
     assert Producer.observe_alive(producer, nil, true, 1_100).checkpoint == 900
 
-    for fields <- [[pending_recovery: :incremental], [resuming_since: 0]] do
-      assert Producer.observe_alive(up(fields), 900, true, 1_000).checkpoint == nil
+    for pending <- [:incremental, :full] do
+      assert Producer.observe_alive(up(pending_recovery: pending), 900, true, 1_000).checkpoint == nil
     end
   end
 
@@ -75,20 +75,23 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
            }
   end
 
-  test "a resuming producer becomes up only after a current heartbeat" do
-    producer = up(resuming_since: 0, last_alive_at: 1_000, alive_delay: 0)
-    assert Producer.status(producer, false) == :resuming
+  test "a restored producer is down until heard, and owes a recovery if not heard in time" do
+    restored =
+      %Producer{id: 1}
+      |> Producer.configure_recovery([])
+      |> Producer.restore(%Progress{checkpoint: 500, pending_recovery: nil}, 0)
 
-    assert %Producer{resuming_since: nil} = resumed = Producer.check(producer, 1_001, 900)
-    assert Producer.status(resumed, false) == :up
+    refute Producer.heard?(restored, 100, 900)
+    assert Producer.status(restored, false) == :down
 
-    # An alive drained from backlog keeps the producer alive but is not current.
-    stale = %{producer | alive_delay: 901}
-    assert Producer.check(stale, 1_001, 900) == stale
+    # Any alive, even one drained from backlog long after it was generated.
+    heard = Producer.observe_alive(restored, 600, true, 100_000)
+    assert Producer.heard?(heard, 100_000, 900)
+    assert Producer.status(heard, true) == :up
+    assert heard.checkpoint == 600
 
-    # Not heard within the interval of resuming: it owes a recovery.
-    unheard = %{producer | last_alive_at: nil}
-    assert %Producer{pending_recovery: :incremental} = Producer.check(unheard, 901, 900)
+    assert Producer.check(restored, 900, 900) == restored
+    assert %Producer{pending_recovery: :incremental} = Producer.check(restored, 901, 900)
   end
 
   test "an alive records how late it was read" do
@@ -154,7 +157,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
 
     producer = Producer.complete_recovery(producer, 42, 2_000)
     refute Producer.recovering?(producer)
-    assert Producer.status(producer, false) == :up
+    assert Producer.status(producer, true) == :up
     assert producer.last_alive_at == 2_000
     assert producer.recovery.request == nil
 
@@ -190,12 +193,12 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
       assert Producer.advance(producer, 2_000, 1_000) == producer
     end
 
-    assert Producer.silent?(silent, 2_000, 1_000)
-    assert Producer.status(silent, true) == :down
+    refute Producer.heard?(silent, 2_000, 1_000)
+    assert Producer.status(silent, false) == :down
 
     # The next alive makes it current again, and the request goes out.
     heard = Producer.observe_alive(silent, 1_900, true, 2_000)
-    refute Producer.silent?(heard, 2_000, 1_000)
+    assert Producer.heard?(heard, 2_000, 1_000)
     Producer.advance(heard, 2_000, 1_000)
     assert_receive :issued
   end
@@ -219,7 +222,7 @@ defmodule UOF.SDK.ProducerMonitor.ProducerTest do
       |> Producer.complete_recovery(request_id, 0)
 
     assert %Producer{checkpoint: 500, pending_recovery: :incremental, recovery: %{request: nil}} = producer
-    assert Producer.status(producer, false) == :recovering
+    assert Producer.status(producer, true) == :recovering
   end
 
   test "a request in flight can be dropped; its completion is then stale" do

@@ -86,11 +86,21 @@ defmodule UOF.SDK.ProducerMonitor.RequestsTest do
       :telemetry.attach(
         telemetry_id,
         [:uof_sdk, :recovery, :initiated],
-        fn _event, _measurements, metadata, _config -> send(test_pid, {:initiated, metadata}) end,
-        nil
+        fn _event, _measurements, metadata, pid ->
+          if self() == pid, do: send(pid, {:initiated, metadata})
+        end,
+        test_pid
       )
 
     on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+    fn ->
+      :telemetry.execute([:uof_sdk, :recovery, :initiated], %{}, %{recovery_from: :another_test})
+    end
+    |> Task.async()
+    |> Task.await()
+
+    refute_received {:initiated, _metadata}
 
     requests = Requests.new(recover_fun: reporting_recover_fun(), monotonic_fun: fn -> Agent.get(clock, & &1) end)
     producer = owing(@now, recovery_window_minutes: 60, checkpoint: @now - 2 * 60 * 60_000)

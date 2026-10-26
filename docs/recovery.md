@@ -177,7 +177,8 @@ the [rate limits](#rate-limits).
 
 Heartbeat inactivity uses local observation time, and the recovery window is applied against
 the local wall clock; the cooldown uses monotonic time. Durations are not hard real-time
-deadlines: checks run on the monitor's tick.
+deadlines: checks run on the monitor's tick. A heartbeat gap is also judged when the `alive`
+or `snapshot_complete` that ends it arrives, so a gap that ends between two ticks still counts.
 
 ## Manual recovery
 

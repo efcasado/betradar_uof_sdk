@@ -348,6 +348,63 @@ defmodule UOF.SDK.ProducerMonitorTest do
     end
   end
 
+  # A heartbeat gap that ends between two ticks: the tick at the interval's
+  # end sees no timeout (the comparison is strict), and the alive or completion
+  # that ends the gap arrives before the next tick. The alives' generation
+  # timestamps stay continuous, so only receipt time shows the gap.
+  describe "a heartbeat gap ending between ticks" do
+    setup do
+      attach_telemetry([[:uof_sdk, :recovery, :interrupted]])
+    end
+
+    test "owes a recovery when an alive ends it", %{clock: clock} do
+      m = start_monitor(clock)
+      bring_up(m)
+      flush_statuses()
+
+      set_clock(clock, 1_000 + @inactivity)
+      tick(m)
+      refute_received {:status, _producer}
+
+      set_clock(clock, 1_000 + @inactivity + 500)
+      alive(m, 1, 1_000 + @inactivity, true)
+      assert_receive {:status, %ProducerStatus{status: :recovering}}
+      assert_receive {:recover_called, "pre", _opts}
+    end
+
+    test "interrupts a request in flight when an alive ends it", %{clock: clock} do
+      m = start_monitor(clock)
+      alive(m, 1, 1_000, true)
+      rid = assert_recovery_triggered()
+
+      set_clock(clock, 1_000 + @inactivity)
+      tick(m)
+      set_clock(clock, 1_000 + @inactivity + 500)
+      alive(m, 1, 1_000 + @inactivity, true)
+      assert_receive {:telemetry, [:uof_sdk, :recovery, :interrupted], _, %{request_id: ^rid, reason: :alive_timeout}}
+
+      # Its completion repeats the recovery instead of satisfying it.
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+      assert_receive {:recover_called, "pre", _opts}
+      refute_received {:status, %ProducerStatus{status: :up}}
+    end
+
+    test "interrupts a request in flight when its completion ends it", %{clock: clock} do
+      m = start_monitor(clock)
+      alive(m, 1, 1_000, true)
+      rid = assert_recovery_triggered()
+
+      set_clock(clock, 1_000 + @inactivity)
+      tick(m)
+      set_clock(clock, 1_000 + @inactivity + 500)
+      ProducerMonitor.snapshot_complete(m, 1, rid)
+
+      assert_receive {:telemetry, [:uof_sdk, :recovery, :interrupted], _, %{request_id: ^rid, reason: :alive_timeout}}
+      assert_receive {:recover_called, "pre", _opts}
+      refute_received {:status, %ProducerStatus{status: :up}}
+    end
+  end
+
   # Brings producer 1 up, then lets its heartbeat lapse.
   defp time_out_up_producer(m, clock) do
     alive(m, 1, 1_000, true)
@@ -1090,6 +1147,8 @@ defmodule UOF.SDK.ProducerMonitorTest do
       rid = assert_recovery_triggered()
       alive(m, 1, 2_000, true)
       alive(m, 1, 3_000, false)
+      # The alives are observed before the clock moves.
+      sync(m)
 
       now = 3 * 60 * 60_000
       set_clock(clock, now)

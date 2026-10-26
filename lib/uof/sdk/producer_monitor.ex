@@ -263,11 +263,16 @@ defmodule UOF.SDK.ProducerMonitor do
   # by the next reload.
   def handle_cast({:alive, id, gen_ts, subscribed?, consumer_tag}, state) do
     state = track_consumer_tag(state, consumer_tag)
+    now = state.now_fun.()
 
     state =
       case Map.fetch(state.producers, id) do
         {:ok, producer} ->
-          producer = Producer.observe_alive(producer, gen_ts, subscribed?, state.now_fun.(), state.inactivity_ms)
+          producer =
+            producer
+            |> elapse(now, state)
+            |> Producer.observe_alive(gen_ts, subscribed?, now, state.inactivity_ms)
+
           emit_alive(producer, subscribed?)
           put_producer(state, producer)
 
@@ -280,7 +285,8 @@ defmodule UOF.SDK.ProducerMonitor do
 
   def handle_cast({:snapshot_complete, id, request_id}, state) do
     now = state.now_fun.()
-    {:noreply, state |> update_producer(id, &Requests.complete(state.requests, &1, request_id, now)) |> settle()}
+    complete = &Requests.complete(state.requests, elapse(&1, now, state), request_id, now)
+    {:noreply, state |> update_producer(id, complete) |> settle()}
   end
 
   # Reports are idempotent for the same consumer. A report from a worker that
@@ -309,12 +315,7 @@ defmodule UOF.SDK.ProducerMonitor do
     state =
       if owns_control?(state) do
         now = state.now_fun.()
-
-        producers =
-          Map.new(state.producers, fn {id, producer} ->
-            {id, Producer.check(producer, now, state.inactivity_ms)}
-          end)
-
+        producers = Map.new(state.producers, fn {id, producer} -> {id, elapse(producer, now, state)} end)
         settle(%{state | producers: producers})
       else
         # A passive instance observes nothing, so its producers' timestamps
@@ -615,6 +616,12 @@ defmodule UOF.SDK.ProducerMonitor do
   defp emit_alive(%Producer{}, _subscribed?), do: :ok
 
   ## Helpers ------------------------------------------------------------------
+
+  # Applies the time elapsed until `now`: a heartbeat gap owes a recovery or
+  # interrupts the request in flight. Every tick runs it, and so does every
+  # alive and completion before it replaces the time the producer was last
+  # heard: a gap that ends between two ticks would otherwise go unnoticed.
+  defp elapse(%Producer{} = producer, now, state), do: Producer.check(producer, now, state.inactivity_ms)
 
   defp put_producer(state, %Producer{} = producer) do
     %{state | producers: Map.put(state.producers, producer.id, producer)}

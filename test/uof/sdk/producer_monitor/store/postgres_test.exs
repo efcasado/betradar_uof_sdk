@@ -4,6 +4,7 @@ defmodule UOF.SDK.ProducerMonitor.Store.PostgresTest do
   alias UOF.SDK.ProducerMonitor.Store.Postgres
 
   @moduletag :postgres
+  @moduletag skip: is_nil(System.get_env("UOF_TEST_POSTGRES_URL"))
 
   setup do
     case System.get_env("UOF_TEST_POSTGRES_URL") do

@@ -26,6 +26,7 @@ defmodule UofSdk.MixProject do
       {:uof_schemas, "~> 0.3.0"},
       {:broadway, "~> 1.3"},
       {:nimble_options, "~> 1.1"},
+      {:postgrex, "~> 0.20", optional: true},
       {:off_broadway_pulsar, "~> 2.0"},
       # dev / test
       {:styler, "~> 1.2", only: [:dev, :test], runtime: false},

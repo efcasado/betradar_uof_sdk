@@ -207,6 +207,26 @@ position is shared, so its feed continuity is too. All instances use the same st
 keeps that one snapshot, and only the active instance writes it. When ownership moves, the
 promoted instance reloads the snapshot and carries on where the previous owner left off.
 
+A built-in PostgreSQL store is available when the application includes `{:postgrex, "~> 0.20"}` and starts a Postgrex connection or pool before the SDK. Create the table once:
+
+```sql
+CREATE TABLE uof_sdk_monitor_snapshots (
+  subscription text PRIMARY KEY,
+  snapshot bytea NOT NULL
+);
+```
+
+Configure all instances of the same logical subscription with the same row key:
+
+```elixir
+config :uof_sdk,
+  monitor_store: {UOF.SDK.ProducerMonitor.Store.Postgres,
+    conn: MyApp.Postgres,
+    subscription: "uof-sdk"}
+```
+
+Use a distinct subscription key for each independent SDK subscription. Database failures propagate to the monitor rather than silently resetting checkpoints. This implementation preserves the existing ownership model; PostgreSQL atomic writes do not fence an old owner during Failover transitions.
+
 The default ETS store is local to a VM and does not survive a VM restart. In production,
 implement a persistent store that all instances reach; the
 [architecture guide](architecture.md#implementing-a-store) describes the contract and includes
